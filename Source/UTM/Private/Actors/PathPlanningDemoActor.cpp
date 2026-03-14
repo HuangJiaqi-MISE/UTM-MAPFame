@@ -12,6 +12,7 @@
 #include "Planning/CBSPlanner.h"
 #include "Planning/ECBSPlanner.h"
 #include "Planning/LaCAMPlanner.h"
+#include "Planning/LaCAMUTM.h"
 #include "Planning/PBSPlanner.h"
 #include "Planning/SIPPPlanner.h"
 
@@ -727,6 +728,8 @@ void APathPlanningDemoActor::ResetExecutionCache()
     ExecutionAccumulator = 0.f;
     CurrentExecutionTimeStep = 0;
     bExecutionRunning = false;
+
+    LastExecutionSummary = FExecutionSummary();
 }
 
 void APathPlanningDemoActor::InitializeExecutionStates()
@@ -771,21 +774,75 @@ void APathPlanningDemoActor::InitializeExecutionStates()
     bExecutionRunning = (ExecutionStates.Num() > 0);
 
     DetectExecutionConflictsAtStep(0);
+
+    if (!bExecutionRunning)
+    {
+        BuildExecutionSummary();
+
+        if (bLogExecutionSummary)
+        {
+            LogExecutionSummary();
+        }
+    }
 }
 
-bool APathPlanningDemoActor::ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep) const
+const FAgentDelayConfig* APathPlanningDemoActor::FindAgentDelayConfig(int32 MissionId) const
+{
+    for (const FAgentDelayConfig& Config : AgentDelayConfigs)
+    {
+        if (Config.MissionId == MissionId)
+        {
+            return &Config;
+        }
+    }
+
+    return nullptr;
+}
+
+bool APathPlanningDemoActor::IsForcedDelayStep(const FExecutionAgentState& State, int32 TimeStep) const
+{
+    const FAgentDelayConfig* Config = FindAgentDelayConfig(State.MissionId);
+    if (!Config)
+    {
+        return false;
+    }
+
+    return Config->ForcedDelaySteps.Contains(TimeStep);
+}
+
+bool APathPlanningDemoActor::ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep)
 {
     if (State.bFinished)
     {
         return false;
     }
 
-    if (StepDelayProbability <= 0.f)
+    switch (DelayMode)
     {
-        return false;
+    case EExecutionDelayMode::RandomGlobal:
+    {
+        const float P = FMath::Clamp(StepDelayProbability, 0.f, 1.f);
+        return (P > 0.f) && (ExecutionRandom.FRand() < P);
     }
 
-    return ExecutionRandom.FRand() < StepDelayProbability;
+    case EExecutionDelayMode::PerAgentProbability:
+    {
+        const FAgentDelayConfig* Config = FindAgentDelayConfig(State.MissionId);
+        if (!Config)
+        {
+            return false;
+        }
+
+        const float P = FMath::Clamp(Config->DelayProbability, 0.f, 1.f);
+        return (P > 0.f) && (ExecutionRandom.FRand() < P);
+    }
+
+    case EExecutionDelayMode::ScriptedTimesteps:
+        return IsForcedDelayStep(State, TimeStep);
+
+    default:
+        return false;
+    }
 }
 
 void APathPlanningDemoActor::AdvanceExecutionOneStep()
@@ -850,10 +907,164 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
     {
         bExecutionRunning = false;
         UpdateExecutionVisuals(1.f);
+
+        BuildExecutionSummary();
+
+        if (bLogExecutionSummary)
+        {
+            LogExecutionSummary();
+        }
+
         return;
     }
 
     bExecutionRunning = true;
+}
+
+int32 APathPlanningDemoActor::ComputeFirstMismatchTime(const FExecutionAgentState& State) const
+{
+    const int32 MaxSteps = FMath::Max(State.PlannedCells.Num(), State.ActualCells.Num());
+
+    for (int32 T = 0; T < MaxSteps; ++T)
+    {
+        const FIntVector PlannedCell = GetCellAtTime(State.PlannedCells, T);
+        const FIntVector ActualCell = GetCellAtTime(State.ActualCells, T);
+
+        if (PlannedCell != ActualCell)
+        {
+            return T;
+        }
+    }
+
+    return -1;
+}
+
+void APathPlanningDemoActor::BuildExecutionSummary()
+{
+    LastExecutionSummary = FExecutionSummary();
+    LastExecutionSummary.AgentCount = ExecutionStates.Num();
+
+    for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
+    {
+        const FExecutionAgentState& State = KVP.Value;
+
+        FExecutionAgentSummary Item;
+        Item.MissionId = State.MissionId;
+        Item.PlannedCellCount = State.PlannedCells.Num();
+        Item.ActualCellCount = State.ActualCells.Num();
+        Item.PlannedMakespan = FMath::Max(0, State.PlannedCells.Num() - 1);
+        Item.ActualMakespan = FMath::Max(0, State.ActualCells.Num() - 1);
+        Item.TotalDelaySteps = State.TotalDelaySteps;
+        Item.FirstMismatchTime = ComputeFirstMismatchTime(State);
+        Item.bReachedGoal =
+            (State.PlannedCells.Num() > 0) &&
+            (State.ActualCells.Num() > 0) &&
+            (State.PlannedCells.Last() == State.ActualCells.Last());
+
+        if (Item.bReachedGoal)
+        {
+            LastExecutionSummary.CompletedAgentCount++;
+        }
+
+        LastExecutionSummary.PlannedMakespan =
+            FMath::Max(LastExecutionSummary.PlannedMakespan, Item.PlannedMakespan);
+
+        LastExecutionSummary.ActualMakespan =
+            FMath::Max(LastExecutionSummary.ActualMakespan, Item.ActualMakespan);
+
+        LastExecutionSummary.TotalDelaySteps += Item.TotalDelaySteps;
+        LastExecutionSummary.AgentSummaries.Add(Item);
+    }
+
+    for (const FExecutionConflict& Conflict : ExecutionConflicts)
+    {
+        if (Conflict.bIsEdgeConflict)
+        {
+            LastExecutionSummary.EdgeConflictCount++;
+        }
+        else
+        {
+            LastExecutionSummary.VertexConflictCount++;
+        }
+
+        if (LastExecutionSummary.FirstConflictTime < 0 ||
+            Conflict.TimeStep < LastExecutionSummary.FirstConflictTime)
+        {
+            LastExecutionSummary.FirstConflictTime = Conflict.TimeStep;
+        }
+    }
+
+    LastExecutionSummary.AgentSummaries.Sort(
+        [](const FExecutionAgentSummary& A, const FExecutionAgentSummary& B)
+        {
+            return A.MissionId < B.MissionId;
+        });
+}
+
+void APathPlanningDemoActor::LogExecutionSummary() const
+{
+    UE_LOG(LogTemp, Warning, TEXT("============= Execution Summary ============="));
+    UE_LOG(LogTemp, Warning, TEXT("DelayMode = %s"),
+        *UEnum::GetValueAsString(DelayMode));
+
+    UE_LOG(LogTemp, Warning, TEXT("AgentCount = %d, CompletedAgentCount = %d"),
+        LastExecutionSummary.AgentCount,
+        LastExecutionSummary.CompletedAgentCount);
+
+    UE_LOG(LogTemp, Warning, TEXT("PlannedMakespan = %d, ActualMakespan = %d, Expansion = %d"),
+        LastExecutionSummary.PlannedMakespan,
+        LastExecutionSummary.ActualMakespan,
+        LastExecutionSummary.ActualMakespan - LastExecutionSummary.PlannedMakespan);
+
+    UE_LOG(LogTemp, Warning, TEXT("TotalDelaySteps = %d"),
+        LastExecutionSummary.TotalDelaySteps);
+
+    UE_LOG(LogTemp, Warning, TEXT("VertexConflictCount = %d, EdgeConflictCount = %d, FirstConflictTime = %d"),
+        LastExecutionSummary.VertexConflictCount,
+        LastExecutionSummary.EdgeConflictCount,
+        LastExecutionSummary.FirstConflictTime);
+
+    for (const FExecutionAgentSummary& Item : LastExecutionSummary.AgentSummaries)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("Mission %d | PlannedCells=%d ActualCells=%d | PlannedMakespan=%d ActualMakespan=%d | Delay=%d | FirstMismatch=%d | ReachedGoal=%s"),
+            Item.MissionId,
+            Item.PlannedCellCount,
+            Item.ActualCellCount,
+            Item.PlannedMakespan,
+            Item.ActualMakespan,
+            Item.TotalDelaySteps,
+            Item.FirstMismatchTime,
+            Item.bReachedGoal ? TEXT("true") : TEXT("false"));
+    }
+
+    if (DelayMode == EExecutionDelayMode::PerAgentProbability ||
+        DelayMode == EExecutionDelayMode::ScriptedTimesteps)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("--------- Agent Delay Configs ---------"));
+
+        for (const FAgentDelayConfig& Config : AgentDelayConfigs)
+        {
+            FString ForcedStepsStr;
+            for (int32 Index = 0; Index < Config.ForcedDelaySteps.Num(); ++Index)
+            {
+                if (Index > 0)
+                {
+                    ForcedStepsStr += TEXT(",");
+                }
+
+                ForcedStepsStr += FString::FromInt(Config.ForcedDelaySteps[Index]);
+            }
+
+            UE_LOG(LogTemp, Warning,
+                TEXT("Mission %d | DelayProbability=%.3f | ForcedDelaySteps=[%s]"),
+                Config.MissionId,
+                Config.DelayProbability,
+                *ForcedStepsStr);
+        }
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("=============================================="));
 }
 
 void APathPlanningDemoActor::DetectExecutionConflictsAtStep(int32 TimeStep)
@@ -1410,6 +1621,12 @@ bool APathPlanningDemoActor::PlanMultiAgentMissions(
         return Planner.PlanMissions(GridMap, Missions, OutPaths);
     }
 
+    if (PlannerType == EPlannerType::LaCAMUTM)
+    {
+        FLaCAMUTMPlanner Planner(LaCAMTimeLimitMs, LaCAMRandomSeed, bLaCAMAnytime, LaCAMVerboseLevel, NoFlyZoneConfigs);
+        return Planner.PlanMissions(GridMap, Missions, OutPaths);
+    }
+
     UE_LOG(LogTemp, Error, TEXT("PlannerType=%d is not a multi-agent planner"), (int32)PlannerType);
     return false;
 }
@@ -1419,7 +1636,8 @@ bool APathPlanningDemoActor::IsMultiAgentPlannerType() const
     return PlannerType == EPlannerType::CBS
         || PlannerType == EPlannerType::ECBS
         || PlannerType == EPlannerType::PBS
-        || PlannerType == EPlannerType::LaCAM;
+        || PlannerType == EPlannerType::LaCAM
+        || PlannerType == EPlannerType::LaCAMUTM;
 }
 
 // 根据 PlannerType 创建对应的路径规划器实例
@@ -1451,6 +1669,7 @@ TUniquePtr<IPathPlannerBase> APathPlanningDemoActor::CreatePlannerByType() const
     case EPlannerType::CBS:
     case EPlannerType::ECBS:
     case EPlannerType::LaCAM:
+    case EPlannerType::LaCAMUTM:
         UE_LOG(LogTemp, Warning, TEXT("%s is a multi-agent planner and is not created by CreatePlannerByType()"), *GetPlannerTypeName());
         return nullptr;
 
@@ -1480,6 +1699,8 @@ FString APathPlanningDemoActor::GetPlannerTypeName() const
         return TEXT("PBS");
     case EPlannerType::LaCAM:
         return TEXT("LaCAM");
+    case EPlannerType::LaCAMUTM:
+        return TEXT("LaCAM-UTM");
     default:
         return TEXT("Unknown");
     }

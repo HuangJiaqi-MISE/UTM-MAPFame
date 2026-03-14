@@ -27,7 +27,21 @@ enum class EPlannerType : uint8
     CBS        UMETA(DisplayName = "CBS"),
     ECBS       UMETA(DisplayName = "ECBS"),
     PBS        UMETA(DisplayName = "PBS"),
-    LaCAM      UMETA(DisplayName = "LaCAM")
+    LaCAM      UMETA(DisplayName = "LaCAM"),
+    LaCAMUTM   UMETA(DisplayName = "LaCAM-UTM")
+};
+
+/*
+模式 A：全局随机延迟,适合快速看效果。
+模式 B：指定 agent 延迟,比如只让 Mission 2 延迟,能明确观察单个执行异常如何破坏整体 schedule。
+模式 C：指定 timestep 延迟,比如让 Agent 2 在 t=4, 7, 8 原地等待,让实验可复现、可解释。
+*/
+UENUM(BlueprintType)
+enum class EExecutionDelayMode : uint8
+{
+    RandomGlobal        UMETA(DisplayName = "Random Global"),
+    PerAgentProbability UMETA(DisplayName = "Per-Agent Probability"),
+    ScriptedTimesteps   UMETA(DisplayName = "Scripted Timesteps")
 };
 
 UENUM(BlueprintType)
@@ -197,6 +211,84 @@ struct FExecutionConflict
     FIntVector ToB = FIntVector::ZeroValue;
 };
 
+USTRUCT(BlueprintType)
+struct FAgentDelayConfig
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
+    int32 MissionId = INDEX_NONE;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float DelayProbability = 0.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
+    TArray<int32> ForcedDelaySteps;
+};
+
+USTRUCT(BlueprintType)
+struct FExecutionAgentSummary
+{
+    GENERATED_BODY()
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 MissionId = INDEX_NONE;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 PlannedCellCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 ActualCellCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 PlannedMakespan = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 ActualMakespan = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 TotalDelaySteps = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 FirstMismatchTime = -1;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    bool bReachedGoal = false;
+};
+
+USTRUCT(BlueprintType)
+struct FExecutionSummary
+{
+    GENERATED_BODY()
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 AgentCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 CompletedAgentCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 PlannedMakespan = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 ActualMakespan = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 TotalDelaySteps = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 VertexConflictCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 EdgeConflictCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 FirstConflictTime = -1;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    TArray<FExecutionAgentSummary> AgentSummaries;
+};
+
 
 UCLASS()
 class UTM_API APathPlanningDemoActor : public AActor
@@ -237,9 +329,14 @@ private:
     void InitializeExecutionStates();
     void AdvanceExecutionOneStep();
     void UpdateExecutionVisuals(float Alpha);
-    bool ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep) const;
+    bool ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep);
     void DetectExecutionConflictsAtStep(int32 TimeStep);
     void DrawExecutionDebugForState(const FExecutionAgentState& State, int32 TimeStep) const;
+    const FAgentDelayConfig* FindAgentDelayConfig(int32 MissionId) const;
+    bool IsForcedDelayStep(const FExecutionAgentState& State, int32 TimeStep) const;
+    int32 ComputeFirstMismatchTime(const FExecutionAgentState& State) const;
+    void BuildExecutionSummary();
+    void LogExecutionSummary() const;
 
 private:
     FGridMap3D GridMap;
@@ -331,6 +428,18 @@ public:
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
     bool bUseCentralizedExecution = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
+    EExecutionDelayMode DelayMode = EExecutionDelayMode::RandomGlobal;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
+    TArray<FAgentDelayConfig> AgentDelayConfigs;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
+    bool bLogExecutionSummary = true;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    FExecutionSummary LastExecutionSummary;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution", meta = (ClampMin = "0.0", ClampMax = "1.0"))
     float StepDelayProbability = 0.20f;

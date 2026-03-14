@@ -1,4 +1,4 @@
-#include "Planning/LaCAMPlanner.h"
+#include "Planning/LaCAMUTM.h"
 
 #include "HAL/PlatformTime.h"
 #include "Planning/GridMap3D.h"
@@ -15,6 +15,22 @@
 
 namespace
 {
+    FIntVector NormalizeMinCellLaCAMUTM(const FIntVector& A, const FIntVector& B)
+    {
+        return FIntVector(
+            FMath::Min(A.X, B.X),
+            FMath::Min(A.Y, B.Y),
+            FMath::Min(A.Z, B.Z));
+    }
+
+    FIntVector NormalizeMaxCellLaCAMUTM(const FIntVector& A, const FIntVector& B)
+    {
+        return FIntVector(
+            FMath::Max(A.X, B.X),
+            FMath::Max(A.Y, B.Y),
+            FMath::Max(A.Z, B.Z));
+    }
+
     bool ValidateMissionIdsUniqueLaCAM(const TArray<FDroneMissionConfig>& Missions)
     {
         TSet<int32> SeenMissionIds;
@@ -40,7 +56,7 @@ namespace
     }
 }
 
-namespace LaCAMOriginal
+namespace LaCAMUE
 {
     struct FDeadline
     {
@@ -212,6 +228,28 @@ namespace LaCAMOriginal
         }
     };
 
+    struct FTimedConfigKey
+    {
+        Config Q;
+        int32 TimeStep = 0;
+
+        bool operator==(const FTimedConfigKey& Other) const
+        {
+            return TimeStep == Other.TimeStep && IsSameConfig(Q, Other.Q);
+        }
+    };
+
+    struct FTimedConfigKeyHasher
+    {
+        size_t operator()(const FTimedConfigKey& Key) const
+        {
+            FConfigHasher ConfigHasher;
+            size_t Hash = ConfigHasher(Key.Q);
+            Hash ^= static_cast<size_t>(Key.TimeStep) + 0x9e3779b9 + (Hash << 6) + (Hash >> 2);
+            return Hash;
+        }
+    };
+
     struct FInstance
     {
         explicit FInstance(const FGridMap3D& GridMap)
@@ -222,6 +260,142 @@ namespace LaCAMOriginal
         FGraph Graph;
         Config Starts;
         Config Goals;
+    };
+
+    struct FBlockedInterval
+    {
+        int32 Start = 0;
+        int32 End = 0;
+    };
+
+    class FNoFlyZoneTable
+    {
+    public:
+        void Build(const FGridMap3D& GridMap, const TArray<FTemporalNoFlyZoneConfig>& NoFlyZoneConfigs)
+        {
+            BlockedIntervalsByCell.Reset();
+            MaxBlockedTime = 0;
+
+            for (const FTemporalNoFlyZoneConfig& Zone : NoFlyZoneConfigs)
+            {
+                if (!Zone.bEnabled)
+                {
+                    continue;
+                }
+
+                const int32 StartTime = FMath::Max(0, Zone.StartTimeStep);
+                const int32 EndTime = FMath::Max(StartTime, Zone.EndTimeStep);
+
+                FIntVector MinCell = NormalizeMinCellLaCAMUTM(Zone.MinCell, Zone.MaxCell);
+                FIntVector MaxCell = NormalizeMaxCellLaCAMUTM(Zone.MinCell, Zone.MaxCell);
+
+                MinCell.X = FMath::Clamp(MinCell.X, 0, FMath::Max(0, GridMap.GridDim.X - 1));
+                MinCell.Y = FMath::Clamp(MinCell.Y, 0, FMath::Max(0, GridMap.GridDim.Y - 1));
+                MinCell.Z = FMath::Clamp(MinCell.Z, 0, FMath::Max(0, GridMap.GridDim.Z - 1));
+
+                MaxCell.X = FMath::Clamp(MaxCell.X, 0, FMath::Max(0, GridMap.GridDim.X - 1));
+                MaxCell.Y = FMath::Clamp(MaxCell.Y, 0, FMath::Max(0, GridMap.GridDim.Y - 1));
+                MaxCell.Z = FMath::Clamp(MaxCell.Z, 0, FMath::Max(0, GridMap.GridDim.Z - 1));
+
+                if (MinCell.X > MaxCell.X || MinCell.Y > MaxCell.Y || MinCell.Z > MaxCell.Z)
+                {
+                    continue;
+                }
+
+                MaxBlockedTime = FMath::Max(MaxBlockedTime, EndTime);
+
+                for (int32 X = MinCell.X; X <= MaxCell.X; ++X)
+                {
+                    for (int32 Y = MinCell.Y; Y <= MaxCell.Y; ++Y)
+                    {
+                        for (int32 Z = MinCell.Z; Z <= MaxCell.Z; ++Z)
+                        {
+                            FBlockedInterval Interval;
+                            Interval.Start = StartTime;
+                            Interval.End = EndTime;
+                            BlockedIntervalsByCell.FindOrAdd(FIntVector(X, Y, Z)).Add(Interval);
+                        }
+                    }
+                }
+            }
+
+            for (auto& Pair : BlockedIntervalsByCell)
+            {
+                MergeIntervals(Pair.Value);
+            }
+        }
+
+        bool IsBlockedAtTime(const FIntVector& Cell, int32 TimeStep) const
+        {
+            const TArray<FBlockedInterval>* Intervals = BlockedIntervalsByCell.Find(Cell);
+            if (Intervals == nullptr)
+            {
+                return false;
+            }
+
+            for (const FBlockedInterval& Interval : *Intervals)
+            {
+                if (TimeStep < Interval.Start)
+                {
+                    return false;
+                }
+
+                if (TimeStep <= Interval.End)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        int32 GetMaxBlockedTime() const
+        {
+            return MaxBlockedTime;
+        }
+
+    private:
+        void MergeIntervals(TArray<FBlockedInterval>& InOutIntervals) const
+        {
+            if (InOutIntervals.Num() <= 1)
+            {
+                return;
+            }
+
+            InOutIntervals.Sort(
+                [](const FBlockedInterval& Left, const FBlockedInterval& Right)
+                {
+                    if (Left.Start != Right.Start)
+                    {
+                        return Left.Start < Right.Start;
+                    }
+
+                    return Left.End < Right.End;
+                });
+
+            TArray<FBlockedInterval> Merged;
+            Merged.Reserve(InOutIntervals.Num());
+            Merged.Add(InOutIntervals[0]);
+
+            for (int32 Index = 1; Index < InOutIntervals.Num(); ++Index)
+            {
+                const FBlockedInterval& Candidate = InOutIntervals[Index];
+                FBlockedInterval& Tail = Merged.Last();
+
+                if (Candidate.Start <= Tail.End + 1)
+                {
+                    Tail.End = FMath::Max(Tail.End, Candidate.End);
+                    continue;
+                }
+
+                Merged.Add(Candidate);
+            }
+
+            InOutIntervals = MoveTemp(Merged);
+        }
+
+        TMap<FIntVector, TArray<FBlockedInterval>> BlockedIntervalsByCell;
+        int32 MaxBlockedTime = 0;
     };
 
     class FDistTable
@@ -282,6 +456,7 @@ namespace LaCAMOriginal
         FPIBT(
             const FInstance* InInstance,
             FDistTable* InDistTable,
+            const FNoFlyZoneTable* InNoFlyZoneTable,
             int32 InSeed)
             : Instance(InInstance)
             , MT(InSeed)
@@ -289,6 +464,7 @@ namespace LaCAMOriginal
             , AgentCount(InInstance->Starts.size())
             , NoAgent(AgentCount)
             , DistTable(InDistTable)
+            , NoFlyZoneTable(InNoFlyZoneTable)
             , OccupiedNow(InInstance->Graph.Size(), NoAgent)
             , OccupiedNext(InInstance->Graph.Size(), NoAgent)
         {
@@ -297,7 +473,8 @@ namespace LaCAMOriginal
         bool SetNewConfig(
             const Config& QFrom,
             Config& QTo,
-            const std::vector<int32>& Order)
+            const std::vector<int32>& Order,
+            int32 NextTimeStep)
         {
             bool bSuccess = true;
 
@@ -307,6 +484,12 @@ namespace LaCAMOriginal
 
                 if (QTo[AgentIndex] != nullptr)
                 {
+                    if (NoFlyZoneTable != nullptr && NoFlyZoneTable->IsBlockedAtTime(QTo[AgentIndex]->Cell, NextTimeStep))
+                    {
+                        bSuccess = false;
+                        break;
+                    }
+
                     if (OccupiedNext[QTo[AgentIndex]->Id] != NoAgent)
                     {
                         bSuccess = false;
@@ -330,7 +513,7 @@ namespace LaCAMOriginal
             {
                 for (int32 AgentIndex : Order)
                 {
-                    if (QTo[AgentIndex] == nullptr && !FuncPIBT(AgentIndex, QFrom, QTo))
+                    if (QTo[AgentIndex] == nullptr && !FuncPIBT(AgentIndex, QFrom, QTo, NextTimeStep))
                     {
                         bSuccess = false;
                         break;
@@ -351,7 +534,7 @@ namespace LaCAMOriginal
         }
 
     private:
-        bool FuncPIBT(int32 AgentIndex, const Config& QFrom, Config& QTo)
+        bool FuncPIBT(int32 AgentIndex, const Config& QFrom, Config& QTo, int32 NextTimeStep)
         {
             std::vector<int32> NeighborAgents;
             NeighborAgents.reserve(QFrom[AgentIndex]->Neighbors.size());
@@ -441,6 +624,11 @@ namespace LaCAMOriginal
             for (size_t OrderIndex = 0; OrderIndex < CandidateOrder.size(); ++OrderIndex)
             {
                 FVertex* NextVertex = Candidates[CandidateOrder[OrderIndex]];
+                if (NoFlyZoneTable != nullptr && NoFlyZoneTable->IsBlockedAtTime(NextVertex->Cell, NextTimeStep))
+                {
+                    continue;
+                }
+
                 if (OccupiedNext[NextVertex->Id] != NoAgent)
                 {
                     continue;
@@ -458,7 +646,7 @@ namespace LaCAMOriginal
                 if (BlockingAgent != NoAgent
                     && NextVertex != QFrom[AgentIndex]
                     && QTo[BlockingAgent] == nullptr
-                    && !FuncPIBT(BlockingAgent, QFrom, QTo))
+                    && !FuncPIBT(BlockingAgent, QFrom, QTo, NextTimeStep))
                 {
                     OccupiedNext[NextVertex->Id] = NoAgent;
                     QTo[AgentIndex] = nullptr;
@@ -471,6 +659,12 @@ namespace LaCAMOriginal
                 }
 
                 return true;
+            }
+
+            if (NoFlyZoneTable != nullptr && NoFlyZoneTable->IsBlockedAtTime(QFrom[AgentIndex]->Cell, NextTimeStep))
+            {
+                QTo[AgentIndex] = nullptr;
+                return false;
             }
 
             OccupiedNext[QFrom[AgentIndex]->Id] = AgentIndex;
@@ -608,6 +802,7 @@ namespace LaCAMOriginal
         int32 AgentCount = 0;
         int32 NoAgent = 0;
         FDistTable* DistTable = nullptr;
+        const FNoFlyZoneTable* NoFlyZoneTable = nullptr;
         std::vector<int32> OccupiedNow;
         std::vector<int32> OccupiedNext;
     };
@@ -715,7 +910,7 @@ namespace LaCAMOriginal
             }
         }
 
-        return false;
+        return Left->Depth < Right->Depth;
     }
 
     class FSolver
@@ -724,29 +919,36 @@ namespace LaCAMOriginal
         FSolver(
             const FInstance* InInstance,
             FDistTable* InDistTable,
+            const FNoFlyZoneTable* InNoFlyZoneTable,
             const FDeadline* InDeadline,
+            int32 InMaxTimeStep,
             int32 InSeed,
             bool bInAnytime,
             int32 InVerboseLevel)
             : Instance(InInstance)
             , DistTable(InDistTable)
             , Deadline(InDeadline)
+            , MaxTimeStep(InMaxTimeStep)
             , MT(InSeed)
             , RandomReal(0.0f, 1.0f)
             , VerboseLevel(InVerboseLevel)
-            , PIBT(InInstance, InDistTable, InSeed)
+            , PIBT(InInstance, InDistTable, InNoFlyZoneTable, InSeed)
             , bAnytime(bInAnytime)
         {
         }
 
         Solution Solve()
         {
-            std::unordered_map<Config, FHNode*, FConfigHasher> Explored;
+            std::unordered_map<FTimedConfigKey, FHNode*, FTimedConfigKeyHasher> Explored;
             std::vector<FHNode*> AllNodes;
 
             FHNode* InitialNode = new FHNode(Instance->Starts, DistTable);
             Open.push_front(InitialNode);
-            Explored[InitialNode->Q] = InitialNode;
+
+            FTimedConfigKey InitialKey;
+            InitialKey.Q = InitialNode->Q;
+            InitialKey.TimeStep = 0;
+            Explored[InitialKey] = InitialNode;
             AllNodes.push_back(InitialNode);
 
             while (!Open.empty() && !Deadline->IsExpired())
@@ -786,7 +988,7 @@ namespace LaCAMOriginal
                         UE_LOG(
                             LogTemp,
                             Warning,
-                            TEXT("LaCAM: solution found. Cost=%d Depth=%d Loop=%d Elapsed=%.2f ms"),
+                            TEXT("LaCAM-UTM: solution found. Cost=%d Depth=%d Loop=%d Elapsed=%.2f ms"),
                             GoalNode->G,
                             GoalNode->Depth,
                             LoopCount,
@@ -798,6 +1000,12 @@ namespace LaCAMOriginal
                         break;
                     }
 
+                    continue;
+                }
+
+                if (CurrentNode->Depth >= MaxTimeStep)
+                {
+                    Open.pop_front();
                     continue;
                 }
 
@@ -822,7 +1030,8 @@ namespace LaCAMOriginal
                 }
 
                 Config NextConfig(Instance->Starts.size(), nullptr);
-                const bool bHasValidSuccessor = SetNewConfig(CurrentNode, LowLevelNode, NextConfig);
+                const int32 NextTimeStep = CurrentNode->Depth + 1;
+                const bool bHasValidSuccessor = SetNewConfig(CurrentNode, LowLevelNode, NextConfig, NextTimeStep);
                 delete LowLevelNode;
 
                 if (!bHasValidSuccessor)
@@ -830,14 +1039,22 @@ namespace LaCAMOriginal
                     continue;
                 }
 
-                auto ExistingNodeIt = Explored.find(NextConfig);
+                FTimedConfigKey NextKey;
+                NextKey.Q = NextConfig;
+                NextKey.TimeStep = NextTimeStep;
+
+                auto ExistingNodeIt = Explored.find(NextKey);
                 if (ExistingNodeIt == Explored.end())
                 {
                     const int32 GValue = GetGValue(CurrentNode, NextConfig);
                     const int32 HValue = GetHValue(NextConfig);
                     FHNode* NewNode = new FHNode(std::move(NextConfig), DistTable, CurrentNode, GValue, HValue);
                     Open.push_front(NewNode);
-                    Explored[NewNode->Q] = NewNode;
+
+                    FTimedConfigKey NewKey;
+                    NewKey.Q = NewNode->Q;
+                    NewKey.TimeStep = NewNode->Depth;
+                    Explored[NewKey] = NewNode;
                     AllNodes.push_back(NewNode);
                 }
                 else
@@ -872,14 +1089,14 @@ namespace LaCAMOriginal
         }
 
     private:
-        bool SetNewConfig(FHNode* HighLevelNode, FLNode* LowLevelNode, Config& OutConfig)
+        bool SetNewConfig(FHNode* HighLevelNode, FLNode* LowLevelNode, Config& OutConfig, int32 NextTimeStep)
         {
             for (uint32 DepthIndex = 0; DepthIndex < LowLevelNode->Depth; ++DepthIndex)
             {
                 OutConfig[LowLevelNode->AgentIndices[DepthIndex]] = LowLevelNode->AssignedVertices[DepthIndex];
             }
 
-            return PIBT.SetNewConfig(HighLevelNode->Q, OutConfig, HighLevelNode->Order);
+            return PIBT.SetNewConfig(HighLevelNode->Q, OutConfig, HighLevelNode->Order, NextTimeStep);
         }
 
         void Rewrite(FHNode* FromNode, FHNode* ToNode)
@@ -907,7 +1124,6 @@ namespace LaCAMOriginal
                         NeighborNode->G = GValue;
                         NeighborNode->F = NeighborNode->G + NeighborNode->H;
                         NeighborNode->Parent = SourceNode;
-                        NeighborNode->Depth = SourceNode->Depth + 1;
                         Queue.push(NeighborNode);
 
                         if (GoalNode != nullptr && NeighborNode->F < GoalNode->F)
@@ -953,6 +1169,7 @@ namespace LaCAMOriginal
         const FInstance* Instance = nullptr;
         FDistTable* DistTable = nullptr;
         const FDeadline* Deadline = nullptr;
+        int32 MaxTimeStep = 0;
         std::mt19937 MT;
         std::uniform_real_distribution<float> RandomReal;
         int32 VerboseLevel = 0;
@@ -966,19 +1183,21 @@ namespace LaCAMOriginal
     };
 }
 
-FLaCAMPlanner::FLaCAMPlanner(
+FLaCAMUTMPlanner::FLaCAMUTMPlanner(
     double InTimeLimitMs,
     int32 InRandomSeed,
     bool bInAnytime,
-    int32 InVerboseLevel)
+    int32 InVerboseLevel,
+    const TArray<FTemporalNoFlyZoneConfig>& InNoFlyZoneConfigs)
     : TimeLimitMs(FMath::Max(0.0, InTimeLimitMs))
     , RandomSeed(InRandomSeed)
     , bAnytime(bInAnytime)
     , VerboseLevel(FMath::Max(0, InVerboseLevel))
+    , NoFlyZoneConfigs(InNoFlyZoneConfigs)
 {
 }
 
-bool FLaCAMPlanner::PlanMissions(
+bool FLaCAMUTMPlanner::PlanMissions(
     const FGridMap3D& GridMap,
     const TArray<FDroneMissionConfig>& Missions,
     TMap<int32, TArray<FVector>>& OutPaths)
@@ -987,7 +1206,7 @@ bool FLaCAMPlanner::PlanMissions(
 
     if (Missions.Num() <= 0)
     {
-        UE_LOG(LogTemp, Warning, TEXT("LaCAM: no missions to plan"));
+        UE_LOG(LogTemp, Warning, TEXT("LaCAM-UTM: no missions to plan"));
         return false;
     }
 
@@ -1003,10 +1222,10 @@ bool FLaCAMPlanner::PlanMissions(
             return Left.MissionId < Right.MissionId;
         });
 
-    LaCAMOriginal::FInstance Instance(GridMap);
+    LaCAMUE::FInstance Instance(GridMap);
     if (Instance.Graph.Size() <= 0)
     {
-        UE_LOG(LogTemp, Error, TEXT("LaCAM: grid graph contains no traversable cells"));
+        UE_LOG(LogTemp, Error, TEXT("LaCAM-UTM: grid graph contains no traversable cells"));
         return false;
     }
 
@@ -1072,8 +1291,8 @@ bool FLaCAMPlanner::PlanMissions(
             return false;
         }
 
-        LaCAMOriginal::FVertex* StartVertex = Instance.Graph.GetVertex(StartCell);
-        LaCAMOriginal::FVertex* GoalVertex = Instance.Graph.GetVertex(GoalCell);
+        LaCAMUE::FVertex* StartVertex = Instance.Graph.GetVertex(StartCell);
+        LaCAMUE::FVertex* GoalVertex = Instance.Graph.GetVertex(GoalCell);
         if (StartVertex == nullptr)
         {
             UE_LOG(
@@ -1107,12 +1326,44 @@ bool FLaCAMPlanner::PlanMissions(
         MissionIds.Add(Mission.MissionId);
     }
 
-    LaCAMOriginal::FDistTable DistTable(Instance);
-    LaCAMOriginal::FDeadline Deadline(TimeLimitMs);
-    LaCAMOriginal::FSolver Solver(
+    LaCAMUE::FNoFlyZoneTable NoFlyZoneTable;
+    NoFlyZoneTable.Build(GridMap, NoFlyZoneConfigs);
+
+    for (int32 AgentIndex = 0; AgentIndex < MissionIds.Num(); ++AgentIndex)
+    {
+        if (NoFlyZoneTable.IsBlockedAtTime(Instance.Starts[AgentIndex]->Cell, 0))
+        {
+            UE_LOG(
+                LogTemp,
+                Error,
+                TEXT("LaCAM-UTM: mission %d start cell is blocked by a temporal no-fly zone at t=0: (%d,%d,%d)"),
+                MissionIds[AgentIndex],
+                Instance.Starts[AgentIndex]->Cell.X,
+                Instance.Starts[AgentIndex]->Cell.Y,
+                Instance.Starts[AgentIndex]->Cell.Z);
+            return false;
+        }
+    }
+
+    LaCAMUE::FDistTable DistTable(Instance);
+    int32 MakespanLowerBound = 0;
+    for (int32 AgentIndex = 0; AgentIndex < MissionIds.Num(); ++AgentIndex)
+    {
+        MakespanLowerBound = FMath::Max(MakespanLowerBound, DistTable.Get(AgentIndex, Instance.Starts[AgentIndex]));
+    }
+
+    const int32 SearchSlack =
+        FMath::Clamp(Instance.Graph.Size() / 4 + MissionIds.Num() * 8, 64, 8192);
+    const int32 MaxTimeStep =
+        FMath::Max(NoFlyZoneTable.GetMaxBlockedTime() + 1, MakespanLowerBound) + SearchSlack;
+
+    LaCAMUE::FDeadline Deadline(TimeLimitMs);
+    LaCAMUE::FSolver Solver(
         &Instance,
         &DistTable,
+        &NoFlyZoneTable,
         &Deadline,
+        MaxTimeStep,
         RandomSeed,
         bAnytime,
         VerboseLevel);
@@ -1122,17 +1373,20 @@ bool FLaCAMPlanner::PlanMissions(
         UE_LOG(
             LogTemp,
             Warning,
-            TEXT("LaCAM: planning %d missions, time limit %.2f ms, seed %d, anytime=%s"),
+            TEXT("LaCAM-UTM: planning %d missions, time limit %.2f ms, seed %d, anytime=%s, no-fly zones=%d, max blocked time=%d, max time step=%d"),
             OrderedMissions.Num(),
             TimeLimitMs,
             RandomSeed,
-            bAnytime ? TEXT("true") : TEXT("false"));
+            bAnytime ? TEXT("true") : TEXT("false"),
+            NoFlyZoneConfigs.Num(),
+            NoFlyZoneTable.GetMaxBlockedTime(),
+            MaxTimeStep);
     }
 
-    const LaCAMOriginal::Solution Solution = Solver.Solve();
+    const LaCAMUE::Solution Solution = Solver.Solve();
     if (Solution.empty())
     {
-        UE_LOG(LogTemp, Error, TEXT("LaCAM: failed to find a solution within %.2f ms"), TimeLimitMs);
+        UE_LOG(LogTemp, Error, TEXT("LaCAM-UTM: failed to find a solution within %.2f ms"), TimeLimitMs);
         return false;
     }
 
@@ -1141,7 +1395,7 @@ bool FLaCAMPlanner::PlanMissions(
         TArray<FVector> PathPoints;
         PathPoints.Reserve(Solution.size());
 
-        for (const LaCAMOriginal::Config& ConfigAtTime : Solution)
+        for (const LaCAMUE::Config& ConfigAtTime : Solution)
         {
             PathPoints.Add(GridMap.CellToWorld(ConfigAtTime[AgentIndex]->Cell));
         }
@@ -1152,7 +1406,7 @@ bool FLaCAMPlanner::PlanMissions(
     UE_LOG(
         LogTemp,
         Warning,
-        TEXT("LaCAM: solved %d missions. Makespan=%d Elapsed=%.2f ms"),
+        TEXT("LaCAM-UTM: solved %d missions. Makespan=%d Elapsed=%.2f ms"),
         OrderedMissions.Num(),
         Solution.size() > 0 ? Solution.size() - 1 : 0,
         Deadline.ElapsedMs());
