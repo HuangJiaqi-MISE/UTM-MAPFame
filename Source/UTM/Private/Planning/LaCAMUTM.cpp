@@ -250,6 +250,114 @@ namespace LaCAMUE
         }
     };
 
+    enum class EConflictType : uint8
+    {
+        None,
+        ProtectionFootprint,
+        TransitionFootprint,
+        Downwash
+    };
+
+    const TCHAR* LexToString(EConflictType ConflictType)
+    {
+        switch (ConflictType)
+        {
+        case EConflictType::ProtectionFootprint:
+            return TEXT("ProtectionFootprintConflict");
+        case EConflictType::TransitionFootprint:
+            return TEXT("TransitionFootprintConflict");
+        case EConflictType::Downwash:
+            return TEXT("DownwashConflict");
+        default:
+            return TEXT("None");
+        }
+    }
+
+    struct FFootprintBox
+    {
+        FIntVector Min = FIntVector::ZeroValue;
+        FIntVector Max = FIntVector::ZeroValue;
+        bool bValid = false;
+    };
+
+    FFootprintBox MakeUnionBox(const FFootprintBox& Left, const FFootprintBox& Right)
+    {
+        if (!Left.bValid)
+        {
+            return Right;
+        }
+
+        if (!Right.bValid)
+        {
+            return Left;
+        }
+
+        FFootprintBox Result;
+        Result.bValid = true;
+        Result.Min = FIntVector(
+            FMath::Min(Left.Min.X, Right.Min.X),
+            FMath::Min(Left.Min.Y, Right.Min.Y),
+            FMath::Min(Left.Min.Z, Right.Min.Z));
+        Result.Max = FIntVector(
+            FMath::Max(Left.Max.X, Right.Max.X),
+            FMath::Max(Left.Max.Y, Right.Max.Y),
+            FMath::Max(Left.Max.Z, Right.Max.Z));
+        return Result;
+    }
+
+    bool BoxesOverlap(const FFootprintBox& Left, const FFootprintBox& Right)
+    {
+        return Left.bValid
+            && Right.bValid
+            && Left.Min.X <= Right.Max.X && Right.Min.X <= Left.Max.X
+            && Left.Min.Y <= Right.Max.Y && Right.Min.Y <= Left.Max.Y
+            && Left.Min.Z <= Right.Max.Z && Right.Min.Z <= Left.Max.Z;
+    }
+
+    struct FAgentProtectionProfile
+    {
+        int32 ProtectionXYRadiusCells = 0;
+        int32 ProtectionZUpCells = 0;
+        int32 ProtectionZDownCells = 0;
+        int32 DownwashXYRadiusCells = 0;
+        int32 DownwashZBelowCells = 0;
+
+        FFootprintBox MakeProtectionBox(const FIntVector& CenterCell) const
+        {
+            FFootprintBox Result;
+            Result.bValid = true;
+            Result.Min = FIntVector(
+                CenterCell.X - ProtectionXYRadiusCells,
+                CenterCell.Y - ProtectionXYRadiusCells,
+                CenterCell.Z - ProtectionZDownCells);
+            Result.Max = FIntVector(
+                CenterCell.X + ProtectionXYRadiusCells,
+                CenterCell.Y + ProtectionXYRadiusCells,
+                CenterCell.Z + ProtectionZUpCells);
+            return Result;
+        }
+
+        FFootprintBox MakeDownwashBox(const FIntVector& CenterCell) const
+        {
+            if (DownwashZBelowCells <= 0)
+            {
+                return FFootprintBox();
+            }
+
+            FFootprintBox Result;
+            Result.bValid = true;
+            Result.Min = FIntVector(
+                CenterCell.X - DownwashXYRadiusCells,
+                CenterCell.Y - DownwashXYRadiusCells,
+                CenterCell.Z - DownwashZBelowCells);
+            Result.Max = FIntVector(
+                CenterCell.X + DownwashXYRadiusCells,
+                CenterCell.Y + DownwashXYRadiusCells,
+                CenterCell.Z - 1);
+            return Result;
+        }
+    };
+
     struct FInstance
     {
         explicit FInstance(const FGridMap3D& GridMap)
@@ -260,6 +368,7 @@ namespace LaCAMUE
         FGraph Graph;
         Config Starts;
         Config Goals;
+        std::vector<FAgentProtectionProfile> Profiles;
     };
 
     struct FBlockedInterval
@@ -511,6 +620,19 @@ namespace LaCAMUE
 
             if (bSuccess)
             {
+                for (int32 AgentIndex = 0; AgentIndex < AgentCount; ++AgentIndex)
+                {
+                    if (QTo[AgentIndex] != nullptr
+                        && !ResolveConflictsForAssignedAgent(AgentIndex, QFrom, QTo, NextTimeStep))
+                    {
+                        bSuccess = false;
+                        break;
+                    }
+                }
+            }
+
+            if (bSuccess)
+            {
                 for (int32 AgentIndex : Order)
                 {
                     if (QTo[AgentIndex] == nullptr && !FuncPIBT(AgentIndex, QFrom, QTo, NextTimeStep))
@@ -534,6 +656,40 @@ namespace LaCAMUE
         }
 
     private:
+        bool ResolveConflictsForAssignedAgent(
+            int32 AgentIndex,
+            const Config& QFrom,
+            Config& QTo,
+            int32 NextTimeStep)
+        {
+            while (true)
+            {
+                int32 ConflictingAgent = NoAgent;
+                bool bConflictingAgentAssigned = false;
+                EConflictType ConflictType = EConflictType::None;
+                if (!FindFirstConflict(
+                    AgentIndex,
+                    QFrom,
+                    QTo,
+                    ConflictingAgent,
+                    bConflictingAgentAssigned,
+                    ConflictType))
+                {
+                    return true;
+                }
+
+                if (bConflictingAgentAssigned || ConflictingAgent == AgentIndex)
+                {
+                    return false;
+                }
+
+                if (!FuncPIBT(ConflictingAgent, QFrom, QTo, NextTimeStep))
+                {
+                    return false;
+                }
+            }
+        }
+
         bool FuncPIBT(int32 AgentIndex, const Config& QFrom, Config& QTo, int32 NextTimeStep)
         {
             std::vector<int32> NeighborAgents;
@@ -610,7 +766,7 @@ namespace LaCAMUE
                     });
             }
 
-            auto PerformSwap = [&]()
+            auto PerformSwap = [&]() -> bool
                 {
                     if (SwapAgent != NoAgent
                         && QTo[SwapAgent] == nullptr
@@ -618,7 +774,10 @@ namespace LaCAMUE
                     {
                         OccupiedNext[QFrom[AgentIndex]->Id] = SwapAgent;
                         QTo[SwapAgent] = QFrom[AgentIndex];
+                        return true;
                     }
+
+                    return false;
                 };
 
             for (size_t OrderIndex = 0; OrderIndex < CandidateOrder.size(); ++OrderIndex)
@@ -643,22 +802,46 @@ namespace LaCAMUE
                 OccupiedNext[NextVertex->Id] = AgentIndex;
                 QTo[AgentIndex] = NextVertex;
 
+                bool bAccepted = true;
+
                 if (BlockingAgent != NoAgent
                     && NextVertex != QFrom[AgentIndex]
-                    && QTo[BlockingAgent] == nullptr
-                    && !FuncPIBT(BlockingAgent, QFrom, QTo, NextTimeStep))
+                    && QTo[BlockingAgent] == nullptr)
+
                 {
-                    OccupiedNext[NextVertex->Id] = NoAgent;
-                    QTo[AgentIndex] = nullptr;
-                    continue;
+                    bAccepted = FuncPIBT(BlockingAgent, QFrom, QTo, NextTimeStep);
+
+
                 }
 
-                if (OrderIndex == 0)
+                if (bAccepted)
                 {
-                    PerformSwap();
+                    bAccepted = ResolveConflictsForAssignedAgent(AgentIndex, QFrom, QTo, NextTimeStep);
                 }
 
-                return true;
+                bool bDidSwap = false;
+                if (bAccepted && OrderIndex == 0)
+                {
+                    bDidSwap = PerformSwap();
+                    if (bDidSwap)
+                    {
+                        bAccepted = ResolveConflictsForAssignedAgent(SwapAgent, QFrom, QTo, NextTimeStep);
+                    }
+                }
+
+                if (bAccepted)
+                {
+                    return true;
+                }
+
+                if (bDidSwap && QTo[SwapAgent] != nullptr)
+                {
+                    OccupiedNext[QTo[SwapAgent]->Id] = NoAgent;
+                    QTo[SwapAgent] = nullptr;
+                }
+
+                OccupiedNext[NextVertex->Id] = NoAgent;
+                QTo[AgentIndex] = nullptr;
             }
 
             if (NoFlyZoneTable != nullptr && NoFlyZoneTable->IsBlockedAtTime(QFrom[AgentIndex]->Cell, NextTimeStep))
@@ -670,6 +853,130 @@ namespace LaCAMUE
             OccupiedNext[QFrom[AgentIndex]->Id] = AgentIndex;
             QTo[AgentIndex] = QFrom[AgentIndex];
             return false;
+        }
+
+        bool FindFirstConflict(
+            int32 AgentIndex,
+            const Config& QFrom,
+            const Config& QTo,
+            int32& OutConflictingAgent,
+            bool& bOutConflictingAgentAssigned,
+            EConflictType& OutConflictType) const
+        {
+            OutConflictingAgent = NoAgent;
+            bOutConflictingAgentAssigned = false;
+            OutConflictType = EConflictType::None;
+
+            if (QTo[AgentIndex] == nullptr)
+            {
+                return false;
+            }
+
+            for (int32 OtherAgent = 0; OtherAgent < AgentCount; ++OtherAgent)
+            {
+                if (OtherAgent == AgentIndex)
+                {
+                    continue;
+                }
+
+                const bool bOtherAssigned = QTo[OtherAgent] != nullptr;
+                FVertex* OtherTo = bOtherAssigned ? QTo[OtherAgent] : QFrom[OtherAgent];
+                const EConflictType ConflictType =
+                    GetPairConflict(
+                        AgentIndex,
+                        QFrom[AgentIndex],
+                        QTo[AgentIndex],
+                        OtherAgent,
+                        QFrom[OtherAgent],
+                        OtherTo);
+
+                if (ConflictType == EConflictType::None)
+                {
+                    continue;
+                }
+
+                OutConflictingAgent = OtherAgent;
+                bOutConflictingAgentAssigned = bOtherAssigned;
+                OutConflictType = ConflictType;
+                return true;
+            }
+
+            return false;
+        }
+
+        EConflictType GetPairConflict(
+            int32 AgentA,
+            const FVertex* FromA,
+            const FVertex* ToA,
+            int32 AgentB,
+            const FVertex* FromB,
+            const FVertex* ToB) const
+        {
+            const FAgentProtectionProfile& ProfileA = Instance->Profiles[AgentA];
+            const FAgentProtectionProfile& ProfileB = Instance->Profiles[AgentB];
+
+            const FFootprintBox ProtectionNextA = ProfileA.MakeProtectionBox(ToA->Cell);
+            const FFootprintBox ProtectionNextB = ProfileB.MakeProtectionBox(ToB->Cell);
+            if (BoxesOverlap(ProtectionNextA, ProtectionNextB))
+            {
+                return EConflictType::ProtectionFootprint;
+            }
+
+            const FFootprintBox ProtectionSweepA =
+                MakeUnionBox(ProfileA.MakeProtectionBox(FromA->Cell), ProtectionNextA);
+            const FFootprintBox ProtectionSweepB =
+                MakeUnionBox(ProfileB.MakeProtectionBox(FromB->Cell), ProtectionNextB);
+            if (BoxesOverlap(ProtectionSweepA, ProtectionSweepB))
+            {
+                return EConflictType::TransitionFootprint;
+            }
+
+            if (HasDownwashConflict(FromA, ToA, ProfileA, FromB, ToB, ProfileB)
+                || HasDownwashConflict(FromB, ToB, ProfileB, FromA, ToA, ProfileA))
+            {
+                return EConflictType::Downwash;
+            }
+
+            return EConflictType::None;
+        }
+
+        bool HasDownwashConflict(
+            const FVertex* FromUpper,
+            const FVertex* ToUpper,
+            const FAgentProtectionProfile& UpperProfile,
+            const FVertex* FromOther,
+            const FVertex* ToOther,
+            const FAgentProtectionProfile& OtherProfile) const
+        {
+            if (UpperProfile.DownwashZBelowCells <= 0)
+            {
+                return false;
+            }
+
+            if (ToUpper->Cell.Z > ToOther->Cell.Z
+                && BoxesOverlap(
+                    UpperProfile.MakeDownwashBox(ToUpper->Cell),
+                    OtherProfile.MakeProtectionBox(ToOther->Cell)))
+            {
+                return true;
+            }
+
+            const bool bUpperDuringTransition =
+                FMath::Max(FromUpper->Cell.Z, ToUpper->Cell.Z) > FMath::Min(FromOther->Cell.Z, ToOther->Cell.Z);
+            if (!bUpperDuringTransition)
+            {
+                return false;
+            }
+
+            const FFootprintBox SweptDownwash =
+                MakeUnionBox(
+                    UpperProfile.MakeDownwashBox(FromUpper->Cell),
+                    UpperProfile.MakeDownwashBox(ToUpper->Cell));
+            const FFootprintBox SweptBody =
+                MakeUnionBox(
+                    OtherProfile.MakeProtectionBox(FromOther->Cell),
+                    OtherProfile.MakeProtectionBox(ToOther->Cell));
+            return BoxesOverlap(SweptDownwash, SweptBody);
         }
 
         int32 IsSwapRequiredAndPossible(
@@ -1233,6 +1540,47 @@ bool FLaCAMUTMPlanner::PlanMissions(
     TSet<FIntVector> SeenGoalCells;
     TArray<int32> MissionIds;
     MissionIds.Reserve(OrderedMissions.Num());
+    Instance.Profiles.reserve(OrderedMissions.Num());
+
+    const auto BuildProfileFromMission =
+        [](const FDroneMissionConfig& Mission) -> LaCAMUE::FAgentProtectionProfile
+        {
+            LaCAMUE::FAgentProtectionProfile Profile;
+            Profile.ProtectionXYRadiusCells = FMath::Max(0, Mission.ProtectionXYRadiusCells);
+            Profile.ProtectionZUpCells = FMath::Max(0, Mission.ProtectionZUpCells);
+            Profile.ProtectionZDownCells = FMath::Max(0, Mission.ProtectionZDownCells);
+            Profile.DownwashXYRadiusCells = FMath::Max(0, Mission.DownwashXYRadiusCells);
+            Profile.DownwashZBelowCells = FMath::Max(0, Mission.DownwashZBelowCells);
+            return Profile;
+        };
+
+    const auto GetPairConflictAtConfig =
+        [](const FIntVector& CellA,
+            const LaCAMUE::FAgentProtectionProfile& ProfileA,
+            const FIntVector& CellB,
+            const LaCAMUE::FAgentProtectionProfile& ProfileB) -> LaCAMUE::EConflictType
+        {
+            const LaCAMUE::FFootprintBox ProtectionA = ProfileA.MakeProtectionBox(CellA);
+            const LaCAMUE::FFootprintBox ProtectionB = ProfileB.MakeProtectionBox(CellB);
+            if (LaCAMUE::BoxesOverlap(ProtectionA, ProtectionB))
+            {
+                return LaCAMUE::EConflictType::ProtectionFootprint;
+            }
+
+            if (CellA.Z > CellB.Z
+                && LaCAMUE::BoxesOverlap(ProfileA.MakeDownwashBox(CellA), ProtectionB))
+            {
+                return LaCAMUE::EConflictType::Downwash;
+            }
+
+            if (CellB.Z > CellA.Z
+                && LaCAMUE::BoxesOverlap(ProfileB.MakeDownwashBox(CellB), ProtectionA))
+            {
+                return LaCAMUE::EConflictType::Downwash;
+            }
+
+            return LaCAMUE::EConflictType::None;
+        };
 
     for (const FDroneMissionConfig& Mission : OrderedMissions)
     {
@@ -1323,6 +1671,7 @@ bool FLaCAMUTMPlanner::PlanMissions(
         SeenGoalCells.Add(GoalCell);
         Instance.Starts.push_back(StartVertex);
         Instance.Goals.push_back(GoalVertex);
+        Instance.Profiles.push_back(BuildProfileFromMission(Mission));
         MissionIds.Add(Mission.MissionId);
     }
 
@@ -1342,6 +1691,48 @@ bool FLaCAMUTMPlanner::PlanMissions(
                 Instance.Starts[AgentIndex]->Cell.Y,
                 Instance.Starts[AgentIndex]->Cell.Z);
             return false;
+        }
+    }
+
+    for (int32 AgentA = 0; AgentA < MissionIds.Num(); ++AgentA)
+    {
+        for (int32 AgentB = AgentA + 1; AgentB < MissionIds.Num(); ++AgentB)
+        {
+            const LaCAMUE::EConflictType StartConflict =
+                GetPairConflictAtConfig(
+                    Instance.Starts[AgentA]->Cell,
+                    Instance.Profiles[AgentA],
+                    Instance.Starts[AgentB]->Cell,
+                    Instance.Profiles[AgentB]);
+            if (StartConflict != LaCAMUE::EConflictType::None)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Error,
+                    TEXT("LaCAM-UTM: start configuration conflict between mission %d and mission %d, type=%s"),
+                    MissionIds[AgentA],
+                    MissionIds[AgentB],
+                    LaCAMUE::LexToString(StartConflict));
+                return false;
+            }
+
+            const LaCAMUE::EConflictType GoalConflict =
+                GetPairConflictAtConfig(
+                    Instance.Goals[AgentA]->Cell,
+                    Instance.Profiles[AgentA],
+                    Instance.Goals[AgentB]->Cell,
+                    Instance.Profiles[AgentB]);
+            if (GoalConflict != LaCAMUE::EConflictType::None)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Error,
+                    TEXT("LaCAM-UTM: goal configuration conflict between mission %d and mission %d, type=%s"),
+                    MissionIds[AgentA],
+                    MissionIds[AgentB],
+                    LaCAMUE::LexToString(GoalConflict));
+                return false;
+            }
         }
     }
 
