@@ -11,6 +11,7 @@
 #include "Planning/AStarPlanner.h"
 #include "Planning/CBSPlanner.h"
 #include "Planning/ECBSPlanner.h"
+#include "Planning/LaCAMPlanner.h"
 #include "Planning/PBSPlanner.h"
 #include "Planning/SIPPPlanner.h"
 
@@ -115,6 +116,8 @@ void APathPlanningDemoActor::RunPlanning()
     }
 
     SpawnedDrones.Reset();
+    SpawnedDroneByMissionId.Reset();
+    ResetExecutionCache();
 
     if (DestroyedDroneCount > 0)
     {
@@ -222,6 +225,11 @@ void APathPlanningDemoActor::RunPlanning()
 
     LogPlanningStatsSummary();
 
+    if (bOverallSuccess && IsMultiAgentPlannerType() && bUseCentralizedExecution)
+    {
+        InitializeExecutionStates();
+    }
+
     if (bValidatePathsAgainstNoFlyZones)
     {
         ValidateLastPlannedPathsAgainstNoFlyZones();
@@ -238,6 +246,25 @@ void APathPlanningDemoActor::RunPlanning()
 void APathPlanningDemoActor::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
+
+    if (!bExecutionRunning || !IsMultiAgentPlannerType() || !bUseCentralizedExecution)
+    {
+        return;
+    }
+
+    ExecutionAccumulator += DeltaTime;
+
+    while (ExecutionAccumulator >= CBSStepDuration)
+    {
+        ExecutionAccumulator -= CBSStepDuration;
+        AdvanceExecutionOneStep();
+    }
+
+    const float Alpha = (CBSStepDuration > KINDA_SMALL_NUMBER)
+        ? FMath::Clamp(ExecutionAccumulator / CBSStepDuration, 0.f, 1.f)
+        : 1.f;
+
+    UpdateExecutionVisuals(Alpha);
 }
 
 bool APathPlanningDemoActor::ParseTaggedId(AActor* Actor, const FString& Prefix, int32& OutId) const
@@ -635,6 +662,7 @@ void APathPlanningDemoActor::LogNoFlyZonePathValidationSummary(
 void APathPlanningDemoActor::CachePlannedPath(int32 MissionId, const TArray<FVector>& PathPoints)
 {
     LastPlannedPathsByMission.Add(MissionId, PathPoints);
+    PlannedCellPathsByMission.Add(MissionId, BuildCellPathFromWorldPath(PathPoints));
 }
 
 void APathPlanningDemoActor::ResetPathValidationCache()
@@ -653,6 +681,340 @@ void APathPlanningDemoActor::ValidateLastPlannedPathsAgainstNoFlyZones()
     }
 
     LogNoFlyZonePathValidationSummary(LastNoFlyZonePathValidation);
+}
+
+// 大类：新增执行器代码
+// 将世界坐标路径转换为网格坐标路径，方便后续执行和验证使用
+TArray<FIntVector> APathPlanningDemoActor::BuildCellPathFromWorldPath(const TArray<FVector>& PathPoints) const
+{
+    TArray<FIntVector> Result;
+    Result.Reserve(PathPoints.Num());
+
+    for (const FVector& P : PathPoints)
+    {
+        Result.Add(GridMap.WorldToCell(P));
+    }
+
+    return Result;
+}
+
+FIntVector APathPlanningDemoActor::GetCellAtTime(const TArray<FIntVector>& Cells, int32 TimeStep) const
+{
+    if (Cells.Num() <= 0)
+    {
+        return FIntVector::ZeroValue;
+    }
+
+    if (TimeStep <= 0)
+    {
+        return Cells[0];
+    }
+
+    if (TimeStep < Cells.Num())
+    {
+        return Cells[TimeStep];
+    }
+
+    return Cells.Last();
+}
+
+void APathPlanningDemoActor::ResetExecutionCache()
+{
+    PlannedCellPathsByMission.Reset();
+    ExecutionStates.Reset();
+    ExecutionConflicts.Reset();
+
+    ExecutionAccumulator = 0.f;
+    CurrentExecutionTimeStep = 0;
+    bExecutionRunning = false;
+}
+
+void APathPlanningDemoActor::InitializeExecutionStates()
+{
+    ExecutionStates.Reset();
+    ExecutionConflicts.Reset();
+
+    ExecutionRandom.Initialize(ExecutionRandomSeed);
+    ExecutionAccumulator = 0.f;
+    CurrentExecutionTimeStep = 0;
+    bExecutionRunning = false;
+
+    for (const TPair<int32, TArray<FIntVector>>& KVP : PlannedCellPathsByMission)
+    {
+        const int32 MissionId = KVP.Key;
+        const TArray<FIntVector>& PlannedCells = KVP.Value;
+
+        if (PlannedCells.Num() <= 0)
+        {
+            continue;
+        }
+
+        FExecutionAgentState State;
+        State.MissionId = MissionId;
+        State.Drone = SpawnedDroneByMissionId.FindRef(MissionId);
+        State.PlannedCells = PlannedCells;
+        State.ActualCells.Add(PlannedCells[0]);
+        State.ExecutedPlanIndex = 0;
+        State.TotalDelaySteps = 0;
+        State.bFinished = (PlannedCells.Num() <= 1);
+        State.DisplayFromCell = PlannedCells[0];
+        State.DisplayToCell = PlannedCells[0];
+
+        if (State.Drone)
+        {
+            State.Drone->SetActorLocation(GridMap.CellToWorld(PlannedCells[0]));
+        }
+
+        ExecutionStates.Add(MissionId, State);
+    }
+
+    bExecutionRunning = (ExecutionStates.Num() > 0);
+
+    DetectExecutionConflictsAtStep(0);
+}
+
+bool APathPlanningDemoActor::ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep) const
+{
+    if (State.bFinished)
+    {
+        return false;
+    }
+
+    if (StepDelayProbability <= 0.f)
+    {
+        return false;
+    }
+
+    return ExecutionRandom.FRand() < StepDelayProbability;
+}
+
+void APathPlanningDemoActor::AdvanceExecutionOneStep()
+{
+    CurrentExecutionTimeStep++;
+
+    bool bAnyActive = false;
+
+    for (TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
+    {
+        FExecutionAgentState& State = KVP.Value;
+
+        if (State.PlannedCells.Num() <= 0)
+        {
+            continue;
+        }
+
+        const int32 CurrentIndex = FMath::Clamp(State.ExecutedPlanIndex, 0, State.PlannedCells.Num() - 1);
+        const FIntVector CurrentCell = State.PlannedCells[CurrentIndex];
+
+        State.DisplayFromCell = CurrentCell;
+
+        const bool bCanAdvance = (State.ExecutedPlanIndex + 1 < State.PlannedCells.Num());
+        const bool bDelay = bCanAdvance && ShouldDelayThisStep(State, CurrentExecutionTimeStep);
+
+        if (bCanAdvance && !bDelay)
+        {
+            State.ExecutedPlanIndex++;
+        }
+        else if (bDelay)
+        {
+            State.TotalDelaySteps++;
+
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[ExecutionDelay] t=%d Mission=%d stay at Cell=(%d,%d,%d)"),
+                CurrentExecutionTimeStep,
+                State.MissionId,
+                CurrentCell.X,
+                CurrentCell.Y,
+                CurrentCell.Z
+            );
+        }
+
+        const int32 NewIndex = FMath::Clamp(State.ExecutedPlanIndex, 0, State.PlannedCells.Num() - 1);
+        const FIntVector NewCell = State.PlannedCells[NewIndex];
+
+        State.DisplayToCell = NewCell;
+        State.ActualCells.Add(NewCell);
+        State.bFinished = (State.ExecutedPlanIndex >= State.PlannedCells.Num() - 1);
+
+        if (!State.bFinished)
+        {
+            bAnyActive = true;
+        }
+    }
+
+    DetectExecutionConflictsAtStep(CurrentExecutionTimeStep);
+
+    if (!bAnyActive)
+    {
+        bExecutionRunning = false;
+        UpdateExecutionVisuals(1.f);
+        return;
+    }
+
+    bExecutionRunning = true;
+}
+
+void APathPlanningDemoActor::DetectExecutionConflictsAtStep(int32 TimeStep)
+{
+    TArray<int32> MissionIds;
+    ExecutionStates.GetKeys(MissionIds);
+
+    for (int32 I = 0; I < MissionIds.Num(); ++I)
+    {
+        const FExecutionAgentState* A = ExecutionStates.Find(MissionIds[I]);
+        if (!A)
+        {
+            continue;
+        }
+
+        for (int32 J = I + 1; J < MissionIds.Num(); ++J)
+        {
+            const FExecutionAgentState* B = ExecutionStates.Find(MissionIds[J]);
+            if (!B)
+            {
+                continue;
+            }
+
+            const FIntVector ACell = GetCellAtTime(A->ActualCells, TimeStep);
+            const FIntVector BCell = GetCellAtTime(B->ActualCells, TimeStep);
+
+            if (ACell == BCell)
+            {
+                FExecutionConflict Conflict;
+                Conflict.TimeStep = TimeStep;
+                Conflict.AgentA = A->MissionId;
+                Conflict.AgentB = B->MissionId;
+                Conflict.bIsEdgeConflict = false;
+                Conflict.Cell = ACell;
+                ExecutionConflicts.Add(Conflict);
+
+                UE_LOG(
+                    LogTemp,
+                    Error,
+                    TEXT("[ExecutionConflict][Vertex] t=%d Agent=%d Agent=%d Cell=(%d,%d,%d)"),
+                    TimeStep,
+                    A->MissionId,
+                    B->MissionId,
+                    ACell.X,
+                    ACell.Y,
+                    ACell.Z
+                );
+            }
+
+            if (TimeStep > 0)
+            {
+                const FIntVector APrev = GetCellAtTime(A->ActualCells, TimeStep - 1);
+                const FIntVector BPrev = GetCellAtTime(B->ActualCells, TimeStep - 1);
+
+                const bool bEdgeConflict =
+                    (APrev == BCell) &&
+                    (BPrev == ACell) &&
+                    (ACell != BCell);
+
+                if (bEdgeConflict)
+                {
+                    FExecutionConflict Conflict;
+                    Conflict.TimeStep = TimeStep;
+                    Conflict.AgentA = A->MissionId;
+                    Conflict.AgentB = B->MissionId;
+                    Conflict.bIsEdgeConflict = true;
+                    Conflict.FromA = APrev;
+                    Conflict.ToA = ACell;
+                    Conflict.FromB = BPrev;
+                    Conflict.ToB = BCell;
+                    ExecutionConflicts.Add(Conflict);
+
+                    UE_LOG(
+                        LogTemp,
+                        Error,
+                        TEXT("[ExecutionConflict][Edge] t=%d Agent=%d (%d,%d,%d)->(%d,%d,%d), Agent=%d (%d,%d,%d)->(%d,%d,%d)"),
+                        TimeStep,
+                        A->MissionId,
+                        APrev.X, APrev.Y, APrev.Z,
+                        ACell.X, ACell.Y, ACell.Z,
+                        B->MissionId,
+                        BPrev.X, BPrev.Y, BPrev.Z,
+                        BCell.X, BCell.Y, BCell.Z
+                    );
+                }
+            }
+        }
+    }
+}
+
+void APathPlanningDemoActor::UpdateExecutionVisuals(float Alpha)
+{
+    for (TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
+    {
+        FExecutionAgentState& State = KVP.Value;
+
+        if (State.Drone)
+        {
+            const FVector FromWorld = GridMap.CellToWorld(State.DisplayFromCell);
+            const FVector ToWorld = GridMap.CellToWorld(State.DisplayToCell);
+            const FVector NewLocation = FMath::Lerp(FromWorld, ToWorld, Alpha);
+
+            State.Drone->SetActorLocation(NewLocation);
+        }
+
+        DrawExecutionDebugForState(State, CurrentExecutionTimeStep);
+    }
+}
+
+void APathPlanningDemoActor::DrawExecutionDebugForState(const FExecutionAgentState& State, int32 TimeStep) const
+{
+    if (!GetWorld())
+    {
+        return;
+    }
+
+    const FIntVector PlannedCell = GetCellAtTime(State.PlannedCells, TimeStep);
+    const FIntVector ActualCell = GetCellAtTime(State.ActualCells, TimeStep);
+
+    const FVector PlannedWorld = GridMap.CellToWorld(PlannedCell) + FVector(0.f, 0.f, 20.f);
+    const FVector ActualWorld = GridMap.CellToWorld(ActualCell) + FVector(0.f, 0.f, 60.f);
+    const FVector Extent(CellSize * 0.30f, CellSize * 0.30f, CellSize * 0.30f);
+
+    if (bDrawExecutionCells)
+    {
+        DrawDebugBox(GetWorld(), PlannedWorld, Extent, FColor::Blue, false, ExecutionDebugDrawTime, 0, 3.f);
+        DrawDebugBox(GetWorld(), ActualWorld, Extent, FColor::Red, false, ExecutionDebugDrawTime, 0, 3.f);
+
+        DrawDebugLine(
+            GetWorld(),
+            PlannedWorld,
+            ActualWorld,
+            (PlannedCell == ActualCell) ? FColor::Green : FColor::Yellow,
+            false,
+            ExecutionDebugDrawTime,
+            0,
+            2.f
+        );
+    }
+
+    if (bDrawExecutionText && State.Drone)
+    {
+        const FString Text = FString::Printf(
+            TEXT("M%d  t=%d\nPlanned=(%d,%d,%d)\nActual=(%d,%d,%d)\nDelay=%d"),
+            State.MissionId,
+            TimeStep,
+            PlannedCell.X, PlannedCell.Y, PlannedCell.Z,
+            ActualCell.X, ActualCell.Y, ActualCell.Z,
+            State.TotalDelaySteps
+        );
+
+        DrawDebugString(
+            GetWorld(),
+            State.Drone->GetActorLocation() + FVector(0.f, 0.f, 140.f),
+            Text,
+            nullptr,
+            (PlannedCell == ActualCell) ? FColor::Green : FColor::Yellow,
+            ExecutionDebugDrawTime,
+            false
+        );
+    }
 }
 
 
@@ -718,19 +1080,29 @@ ADroneActor* APathPlanningDemoActor::SpawnDroneForPath(const TArray<FVector>& Pa
     // 重复路径点会原地等待完整一个时间步，不再只等一个 Tick。
     // 所有路径段都在同一时长内完成，和 CBS / ECBS 的离散 timestep 语义一致。
     // 非多智能体算法仍然走原来的连续速度模式，不会影响单智能体链路。
-    if (IsMultiAgentPlannerType())
+    // 只有SAPFA DroneActor 自己才会完美执行路径
+    SpawnedDrones.Add(NewDrone);
+    SpawnedDroneByMissionId.Add(PairId, NewDrone);
+
+    if (IsMultiAgentPlannerType() && bUseCentralizedExecution)
     {
-        NewDrone->ConfigureDiscretePlanTiming(true, CBSStepDuration);
+        NewDrone->StopMove();
+        NewDrone->SetActorLocation(PathPoints[0]);
     }
     else
     {
-        NewDrone->ConfigureDiscretePlanTiming(false, 0.f);
+        if (IsMultiAgentPlannerType())
+        {
+            NewDrone->ConfigureDiscretePlanTiming(true, CBSStepDuration);
+        }
+        else
+        {
+            NewDrone->ConfigureDiscretePlanTiming(false, 0.f);
+        }
+
+        NewDrone->SetPath(PathPoints);
+        NewDrone->StartMove();
     }
-
-    NewDrone->SetPath(PathPoints);
-    NewDrone->StartMove();
-
-    SpawnedDrones.Add(NewDrone);
 
     UE_LOG(LogTemp, Warning, TEXT("Spawned drone for pair %d: %s"), PairId, *NewDrone->GetName());
 
@@ -1032,6 +1404,12 @@ bool APathPlanningDemoActor::PlanMultiAgentMissions(
         return Planner.PlanMissions(GridMap, Missions, OutPaths);
     }
 
+    if (PlannerType == EPlannerType::LaCAM)
+    {
+        FLaCAMPlanner Planner(LaCAMTimeLimitMs, LaCAMRandomSeed, bLaCAMAnytime, LaCAMVerboseLevel);
+        return Planner.PlanMissions(GridMap, Missions, OutPaths);
+    }
+
     UE_LOG(LogTemp, Error, TEXT("PlannerType=%d is not a multi-agent planner"), (int32)PlannerType);
     return false;
 }
@@ -1040,7 +1418,8 @@ bool APathPlanningDemoActor::IsMultiAgentPlannerType() const
 {
     return PlannerType == EPlannerType::CBS
         || PlannerType == EPlannerType::ECBS
-        || PlannerType == EPlannerType::PBS;
+        || PlannerType == EPlannerType::PBS
+        || PlannerType == EPlannerType::LaCAM;
 }
 
 // 根据 PlannerType 创建对应的路径规划器实例
@@ -1071,6 +1450,7 @@ TUniquePtr<IPathPlannerBase> APathPlanningDemoActor::CreatePlannerByType() const
 
     case EPlannerType::CBS:
     case EPlannerType::ECBS:
+    case EPlannerType::LaCAM:
         UE_LOG(LogTemp, Warning, TEXT("%s is a multi-agent planner and is not created by CreatePlannerByType()"), *GetPlannerTypeName());
         return nullptr;
 
@@ -1098,6 +1478,8 @@ FString APathPlanningDemoActor::GetPlannerTypeName() const
         return TEXT("ECBS");
     case EPlannerType::PBS:
         return TEXT("PBS");
+    case EPlannerType::LaCAM:
+        return TEXT("LaCAM");
     default:
         return TEXT("Unknown");
     }

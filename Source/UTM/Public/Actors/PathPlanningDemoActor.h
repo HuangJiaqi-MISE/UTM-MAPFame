@@ -26,7 +26,8 @@ enum class EPlannerType : uint8
     JPS        UMETA(DisplayName = "JPS"),
     CBS        UMETA(DisplayName = "CBS"),
     ECBS       UMETA(DisplayName = "ECBS"),
-    PBS        UMETA(DisplayName = "PBS")
+    PBS        UMETA(DisplayName = "PBS"),
+    LaCAM      UMETA(DisplayName = "LaCAM")
 };
 
 UENUM(BlueprintType)
@@ -133,6 +134,69 @@ struct FNoFlyZonePathValidationSummary
     TArray<FNoFlyZonePathViolation> Violations;
 };
 
+USTRUCT(BlueprintType)
+struct FExecutionAgentState
+{
+    GENERATED_BODY()
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    int32 MissionId = INDEX_NONE;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    TObjectPtr<ADroneActor> Drone = nullptr;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    TArray<FIntVector> PlannedCells;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    TArray<FIntVector> ActualCells;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    int32 ExecutedPlanIndex = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    int32 TotalDelaySteps = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    bool bFinished = false;
+
+    FIntVector DisplayFromCell = FIntVector::ZeroValue;
+    FIntVector DisplayToCell = FIntVector::ZeroValue;
+};
+
+USTRUCT(BlueprintType)
+struct FExecutionConflict
+{
+    GENERATED_BODY()
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    int32 TimeStep = -1;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    int32 AgentA = INDEX_NONE;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    int32 AgentB = INDEX_NONE;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    bool bIsEdgeConflict = false;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    FIntVector Cell = FIntVector::ZeroValue;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    FIntVector FromA = FIntVector::ZeroValue;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    FIntVector ToA = FIntVector::ZeroValue;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    FIntVector FromB = FIntVector::ZeroValue;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
+    FIntVector ToB = FIntVector::ZeroValue;
+};
+
 
 UCLASS()
 class UTM_API APathPlanningDemoActor : public AActor
@@ -165,6 +229,17 @@ private:
     void CachePlannedPath(int32 MissionId, const TArray<FVector>& PathPoints);
     void ResetPathValidationCache();
 
+private:
+    TArray<FIntVector> BuildCellPathFromWorldPath(const TArray<FVector>& PathPoints) const;
+    FIntVector GetCellAtTime(const TArray<FIntVector>& Cells, int32 TimeStep) const;
+
+    void ResetExecutionCache();
+    void InitializeExecutionStates();
+    void AdvanceExecutionOneStep();
+    void UpdateExecutionVisuals(float Alpha);
+    bool ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep) const;
+    void DetectExecutionConflictsAtStep(int32 TimeStep);
+    void DrawExecutionDebugForState(const FExecutionAgentState& State, int32 TimeStep) const;
 
 private:
     FGridMap3D GridMap;
@@ -232,6 +307,16 @@ protected:
 private:
     TArray<TObjectPtr<ADroneActor>> SpawnedDrones;
 
+    TMap<int32, TObjectPtr<ADroneActor>> SpawnedDroneByMissionId;
+    TMap<int32, TArray<FIntVector>> PlannedCellPathsByMission;
+    TMap<int32, FExecutionAgentState> ExecutionStates;
+    TArray<FExecutionConflict> ExecutionConflicts;
+
+    FRandomStream ExecutionRandom;
+    bool bExecutionRunning = false;
+    int32 CurrentExecutionTimeStep = 0;
+    float ExecutionAccumulator = 0.f;
+
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Spawn")
     TSubclassOf<ADroneActor> DroneClass;
@@ -241,6 +326,26 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Spawn", meta = (ClampMin = "0.01"))
     float CBSStepDuration = 0.333f;
+
+    // 执行器构建
+public:
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
+    bool bUseCentralizedExecution = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float StepDelayProbability = 0.20f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
+    int32 ExecutionRandomSeed = 12345;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution Debug")
+    bool bDrawExecutionCells = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution Debug")
+    bool bDrawExecutionText = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution Debug")
+    float ExecutionDebugDrawTime = 0.4f;
 
     // 无人机数量+序号配置
     // 如果不使用 MissionConfigs，则从场景里手动配置 Start_i / Goal_i 来指定任务数量和起终点
@@ -272,7 +377,17 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planner", meta = (ClampMin = "1.0"))
     float ECBSSuboptimalityBound = 1.5f;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planner", meta = (ClampMin = "1"))
+    int32 LaCAMTimeLimitMs = 8000;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planner")
+    int32 LaCAMRandomSeed = 12345;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planner")
+    bool bLaCAMAnytime = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planner", meta = (ClampMin = "0"))
+    int32 LaCAMVerboseLevel = 0;
 
 
     // UI导入起点、终点配置
