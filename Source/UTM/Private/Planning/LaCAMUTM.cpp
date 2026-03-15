@@ -915,6 +915,8 @@ namespace LaCAMUE
             const FAgentProtectionProfile& ProfileA = Instance->Profiles[AgentA];
             const FAgentProtectionProfile& ProfileB = Instance->Profiles[AgentB];
 
+            // ProtectionFootprint表示“下一时刻的静态保护体冲突”。系统先给每个 agent 在目标格 To 上生成一个保护盒 MakeProtectionBox(To)，
+            // 如果两个保护盒重叠，就判冲突。直观上就是“同一时刻两架机体安全间隔不够”。
             const FFootprintBox ProtectionNextA = ProfileA.MakeProtectionBox(ToA->Cell);
             const FFootprintBox ProtectionNextB = ProfileB.MakeProtectionBox(ToB->Cell);
             if (BoxesOverlap(ProtectionNextA, ProtectionNextB))
@@ -922,15 +924,23 @@ namespace LaCAMUE
                 return EConflictType::ProtectionFootprint;
             }
 
+            // “同一个时间步移动过程中的扫掠保护体冲突”。它不是只看终点，而是把 From 和 To 的保护盒做并集，
+            // 近似成这一步运动时扫过的空间；两个 sweep box 重叠就判冲突，直观上就是“飞行过程中擦肩、交叉、跟车过近”。
+			// 占用搜索时间过大，先不启用这个冲突类型了，后续如果需要更精细的冲突检测再考虑优化算法实现
+            /*
             const FFootprintBox ProtectionSweepA =
                 MakeUnionBox(ProfileA.MakeProtectionBox(FromA->Cell), ProtectionNextA);
             const FFootprintBox ProtectionSweepB =
                 MakeUnionBox(ProfileB.MakeProtectionBox(FromB->Cell), ProtectionNextB);
+            
             if (BoxesOverlap(ProtectionSweepA, ProtectionSweepB))
             {
                 return EConflictType::TransitionFootprint;
             }
+            */
 
+            // Downwash表示“上方飞行器的下洗气流影响到下方飞行器”。它会检查上方 agent 的 DownwashBox 是否和下方 agent 的 ProtectionBox 重叠，
+            // 既检查终点状态，也检查过渡过程，直观上就是“上机在下机头顶或掠过其上方，气流安全距离不够”。
             if (HasDownwashConflict(FromA, ToA, ProfileA, FromB, ToB, ProfileB)
                 || HasDownwashConflict(FromB, ToB, ProfileB, FromA, ToA, ProfileA))
             {

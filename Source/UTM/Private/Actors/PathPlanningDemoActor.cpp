@@ -10,6 +10,7 @@
 
 #include "Planning/AStarPlanner.h"
 #include "Planning/CBSPlanner.h"
+#include "Planning/DiscreteAlignmentManager.h"
 #include "Planning/ECBSPlanner.h"
 #include "Planning/LaCAMPlanner.h"
 #include "Planning/LaCAMUTM.h"
@@ -762,6 +763,8 @@ void APathPlanningDemoActor::InitializeExecutionStates()
         State.bFinished = (PlannedCells.Num() <= 1);
         State.DisplayFromCell = PlannedCells[0];
         State.DisplayToCell = PlannedCells[0];
+        State.LastObservedCell = PlannedCells[0];
+        State.LastAlignmentAction = TEXT("Initialize");
 
         if (State.Drone)
         {
@@ -810,6 +813,41 @@ bool APathPlanningDemoActor::IsForcedDelayStep(const FExecutionAgentState& State
     return Config->ForcedDelaySteps.Contains(TimeStep);
 }
 
+FIntVector APathPlanningDemoActor::GetObservedExecutionCell(const FExecutionAgentState& State) const
+{
+    auto ClampCellToGrid = [&](const FIntVector& Cell) -> FIntVector
+        {
+            return FIntVector(
+                FMath::Clamp(Cell.X, 0, FMath::Max(0, GridMap.GridDim.X - 1)),
+                FMath::Clamp(Cell.Y, 0, FMath::Max(0, GridMap.GridDim.Y - 1)),
+                FMath::Clamp(Cell.Z, 0, FMath::Max(0, GridMap.GridDim.Z - 1)));
+        };
+
+    if (State.Drone)
+    {
+        return ClampCellToGrid(GridMap.WorldToCell(State.Drone->GetActorLocation()));
+    }
+
+    if (State.ActualCells.Num() > 0)
+    {
+        return ClampCellToGrid(State.ActualCells.Last());
+    }
+
+    return ClampCellToGrid(GetCellAtTime(State.PlannedCells, State.ExecutedPlanIndex));
+}
+
+FDiscreteAlignmentSettings APathPlanningDemoActor::BuildDiscreteAlignmentSettings() const
+{
+    FDiscreteAlignmentSettings Settings;
+    Settings.bEnabled = bEnableDiscreteAlignment;
+    Settings.SearchRadiusSteps = FMath::Max(1, AlignmentSearchRadiusSteps);
+    Settings.MaxSpatialErrorCells = FMath::Max(0, AlignmentMaxSpatialErrorCells);
+    Settings.MaxSnapAheadSteps = FMath::Max(0, AlignmentMaxSnapAheadSteps);
+    Settings.bAllowRecoveryMoves = bAlignmentAllowRecoveryMoves;
+    Settings.bHoldPositionOnFailure = bAlignmentHoldPositionOnFailure;
+    return Settings;
+}
+
 bool APathPlanningDemoActor::ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep)
 {
     if (State.bFinished)
@@ -847,9 +885,12 @@ bool APathPlanningDemoActor::ShouldDelayThisStep(const FExecutionAgentState& Sta
 
 void APathPlanningDemoActor::AdvanceExecutionOneStep()
 {
+    // Snap the previous segment to its terminal cell before sampling the current position.
+    UpdateExecutionVisuals(1.f);
     CurrentExecutionTimeStep++;
 
     bool bAnyActive = false;
+    const FDiscreteAlignmentManager AlignmentManager(BuildDiscreteAlignmentSettings());
 
     for (TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
     {
@@ -860,40 +901,120 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             continue;
         }
 
-        const int32 CurrentIndex = FMath::Clamp(State.ExecutedPlanIndex, 0, State.PlannedCells.Num() - 1);
-        const FIntVector CurrentCell = State.PlannedCells[CurrentIndex];
-
-        State.DisplayFromCell = CurrentCell;
+        const FIntVector ObservedCell = GetObservedExecutionCell(State);
+        State.LastObservedCell = ObservedCell;
+        State.DisplayFromCell = ObservedCell;
 
         const bool bCanAdvance = (State.ExecutedPlanIndex + 1 < State.PlannedCells.Num());
         const bool bDelay = bCanAdvance && ShouldDelayThisStep(State, CurrentExecutionTimeStep);
-
-        if (bCanAdvance && !bDelay)
-        {
-            State.ExecutedPlanIndex++;
-        }
-        else if (bDelay)
-        {
-            State.TotalDelaySteps++;
-
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[ExecutionDelay] t=%d Mission=%d stay at Cell=(%d,%d,%d)"),
+        const FDiscreteAlignmentResult AlignmentResult =
+            AlignmentManager.AlignStep(
+                GridMap,
+                State.PlannedCells,
+                State.ExecutedPlanIndex,
                 CurrentExecutionTimeStep,
-                State.MissionId,
-                CurrentCell.X,
-                CurrentCell.Y,
-                CurrentCell.Z
-            );
-        }
+                ObservedCell,
+                bDelay);
 
-        const int32 NewIndex = FMath::Clamp(State.ExecutedPlanIndex, 0, State.PlannedCells.Num() - 1);
-        const FIntVector NewCell = State.PlannedCells[NewIndex];
+        FIntVector NewCell = ObservedCell;
+        if (AlignmentResult.bValid)
+        {
+            State.ExecutedPlanIndex = FMath::Clamp(
+                AlignmentResult.NextPlanIndex,
+                0,
+                State.PlannedCells.Num() - 1);
+            NewCell = AlignmentResult.NextCell;
+            State.LastAlignmentAction = FDiscreteAlignmentManager::LexToString(AlignmentResult.Action);
+            State.MaxAlignmentSpatialError = FMath::Max(State.MaxAlignmentSpatialError, AlignmentResult.SpatialErrorCells);
+            State.MaxAlignmentTemporalError = FMath::Max(State.MaxAlignmentTemporalError, FMath::Abs(AlignmentResult.TemporalErrorSteps));
+
+            if (AlignmentResult.Action == EDiscreteAlignmentAction::SnapToPlanIndex)
+            {
+                State.AlignmentSnapCount++;
+            }
+            else if (AlignmentResult.Action == EDiscreteAlignmentAction::RecoverTowardPlan)
+            {
+                State.AlignmentCorrectionCount++;
+            }
+            else if (AlignmentResult.Action == EDiscreteAlignmentAction::HoldForAlignment)
+            {
+                State.AlignmentHoldCount++;
+            }
+
+            if (AlignmentResult.bRequiresReplan)
+            {
+                State.AlignmentReplanRequestCount++;
+                State.bAlignmentLost = true;
+            }
+
+            if (bDelay)
+            {
+                State.TotalDelaySteps++;
+
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[ExecutionDelay] t=%d Mission=%d stay at Cell=(%d,%d,%d)"),
+                    CurrentExecutionTimeStep,
+                    State.MissionId,
+                    ObservedCell.X,
+                    ObservedCell.Y,
+                    ObservedCell.Z
+                );
+            }
+
+            if (bLogAlignmentEvents && AlignmentResult.Action != EDiscreteAlignmentAction::FollowPlan)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[Alignment] t=%d Mission=%d Action=%s Observed=(%d,%d,%d) RefIndex=%d RefCell=(%d,%d,%d) NextCell=(%d,%d,%d) SpatialError=%d TemporalError=%d Replan=%s Reason=%s"),
+                    CurrentExecutionTimeStep,
+                    State.MissionId,
+                    FDiscreteAlignmentManager::LexToString(AlignmentResult.Action),
+                    AlignmentResult.ObservedCell.X,
+                    AlignmentResult.ObservedCell.Y,
+                    AlignmentResult.ObservedCell.Z,
+                    AlignmentResult.ReferencePlanIndex,
+                    AlignmentResult.ReferenceCell.X,
+                    AlignmentResult.ReferenceCell.Y,
+                    AlignmentResult.ReferenceCell.Z,
+                    AlignmentResult.NextCell.X,
+                    AlignmentResult.NextCell.Y,
+                    AlignmentResult.NextCell.Z,
+                    AlignmentResult.SpatialErrorCells,
+                    AlignmentResult.TemporalErrorSteps,
+                    AlignmentResult.bRequiresReplan ? TEXT("true") : TEXT("false"),
+                    *AlignmentResult.Reason);
+            }
+        }
+        else
+        {
+            State.AlignmentHoldCount++;
+            State.AlignmentReplanRequestCount++;
+            State.bAlignmentLost = true;
+            State.LastAlignmentAction = TEXT("InvalidAlignment");
+
+            if (bLogAlignmentEvents)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[Alignment] t=%d Mission=%d invalid result, hold at Cell=(%d,%d,%d), reason=%s"),
+                    CurrentExecutionTimeStep,
+                    State.MissionId,
+                    ObservedCell.X,
+                    ObservedCell.Y,
+                    ObservedCell.Z,
+                    *AlignmentResult.Reason);
+            }
+        }
 
         State.DisplayToCell = NewCell;
         State.ActualCells.Add(NewCell);
-        State.bFinished = (State.ExecutedPlanIndex >= State.PlannedCells.Num() - 1);
+        State.bFinished =
+            (State.ExecutedPlanIndex >= State.PlannedCells.Num() - 1) &&
+            (NewCell == State.PlannedCells.Last());
 
         if (!State.bFinished)
         {
@@ -960,6 +1081,13 @@ void APathPlanningDemoActor::BuildExecutionSummary()
             (State.PlannedCells.Num() > 0) &&
             (State.ActualCells.Num() > 0) &&
             (State.PlannedCells.Last() == State.ActualCells.Last());
+        Item.AlignmentCorrectionCount = State.AlignmentCorrectionCount;
+        Item.AlignmentHoldCount = State.AlignmentHoldCount;
+        Item.AlignmentSnapCount = State.AlignmentSnapCount;
+        Item.AlignmentReplanRequestCount = State.AlignmentReplanRequestCount;
+        Item.MaxAlignmentSpatialError = State.MaxAlignmentSpatialError;
+        Item.MaxAlignmentTemporalError = State.MaxAlignmentTemporalError;
+        Item.bAlignmentLost = State.bAlignmentLost;
 
         if (Item.bReachedGoal)
         {
@@ -973,6 +1101,10 @@ void APathPlanningDemoActor::BuildExecutionSummary()
             FMath::Max(LastExecutionSummary.ActualMakespan, Item.ActualMakespan);
 
         LastExecutionSummary.TotalDelaySteps += Item.TotalDelaySteps;
+        LastExecutionSummary.AlignmentCorrectionCount += Item.AlignmentCorrectionCount;
+        LastExecutionSummary.AlignmentHoldCount += Item.AlignmentHoldCount;
+        LastExecutionSummary.AlignmentSnapCount += Item.AlignmentSnapCount;
+        LastExecutionSummary.AlignmentReplanRequestCount += Item.AlignmentReplanRequestCount;
         LastExecutionSummary.AgentSummaries.Add(Item);
     }
 
@@ -1006,6 +1138,13 @@ void APathPlanningDemoActor::LogExecutionSummary() const
     UE_LOG(LogTemp, Warning, TEXT("============= Execution Summary ============="));
     UE_LOG(LogTemp, Warning, TEXT("DelayMode = %s"),
         *UEnum::GetValueAsString(DelayMode));
+    UE_LOG(LogTemp, Warning, TEXT("AlignmentEnabled = %s, SearchRadius = %d, MaxSpatialError = %d, MaxSnapAhead = %d, RecoveryMoves = %s, HoldOnFailure = %s"),
+        bEnableDiscreteAlignment ? TEXT("true") : TEXT("false"),
+        AlignmentSearchRadiusSteps,
+        AlignmentMaxSpatialErrorCells,
+        AlignmentMaxSnapAheadSteps,
+        bAlignmentAllowRecoveryMoves ? TEXT("true") : TEXT("false"),
+        bAlignmentHoldPositionOnFailure ? TEXT("true") : TEXT("false"));
 
     UE_LOG(LogTemp, Warning, TEXT("AgentCount = %d, CompletedAgentCount = %d"),
         LastExecutionSummary.AgentCount,
@@ -1019,6 +1158,12 @@ void APathPlanningDemoActor::LogExecutionSummary() const
     UE_LOG(LogTemp, Warning, TEXT("TotalDelaySteps = %d"),
         LastExecutionSummary.TotalDelaySteps);
 
+    UE_LOG(LogTemp, Warning, TEXT("AlignmentCorrectionCount = %d, AlignmentHoldCount = %d, AlignmentSnapCount = %d, AlignmentReplanRequestCount = %d"),
+        LastExecutionSummary.AlignmentCorrectionCount,
+        LastExecutionSummary.AlignmentHoldCount,
+        LastExecutionSummary.AlignmentSnapCount,
+        LastExecutionSummary.AlignmentReplanRequestCount);
+
     UE_LOG(LogTemp, Warning, TEXT("VertexConflictCount = %d, EdgeConflictCount = %d, FirstConflictTime = %d"),
         LastExecutionSummary.VertexConflictCount,
         LastExecutionSummary.EdgeConflictCount,
@@ -1027,7 +1172,7 @@ void APathPlanningDemoActor::LogExecutionSummary() const
     for (const FExecutionAgentSummary& Item : LastExecutionSummary.AgentSummaries)
     {
         UE_LOG(LogTemp, Warning,
-            TEXT("Mission %d | PlannedCells=%d ActualCells=%d | PlannedMakespan=%d ActualMakespan=%d | Delay=%d | FirstMismatch=%d | ReachedGoal=%s"),
+            TEXT("Mission %d | PlannedCells=%d ActualCells=%d | PlannedMakespan=%d ActualMakespan=%d | Delay=%d | FirstMismatch=%d | ReachedGoal=%s | AlignCorrection=%d Hold=%d Snap=%d Replan=%d | MaxSpatialError=%d MaxTemporalError=%d | AlignmentLost=%s"),
             Item.MissionId,
             Item.PlannedCellCount,
             Item.ActualCellCount,
@@ -1035,7 +1180,14 @@ void APathPlanningDemoActor::LogExecutionSummary() const
             Item.ActualMakespan,
             Item.TotalDelaySteps,
             Item.FirstMismatchTime,
-            Item.bReachedGoal ? TEXT("true") : TEXT("false"));
+            Item.bReachedGoal ? TEXT("true") : TEXT("false"),
+            Item.AlignmentCorrectionCount,
+            Item.AlignmentHoldCount,
+            Item.AlignmentSnapCount,
+            Item.AlignmentReplanRequestCount,
+            Item.MaxAlignmentSpatialError,
+            Item.MaxAlignmentTemporalError,
+            Item.bAlignmentLost ? TEXT("true") : TEXT("false"));
     }
 
     if (DelayMode == EExecutionDelayMode::PerAgentProbability ||
@@ -1208,12 +1360,13 @@ void APathPlanningDemoActor::DrawExecutionDebugForState(const FExecutionAgentSta
     if (bDrawExecutionText && State.Drone)
     {
         const FString Text = FString::Printf(
-            TEXT("M%d  t=%d\nPlanned=(%d,%d,%d)\nActual=(%d,%d,%d)\nDelay=%d"),
+            TEXT("M%d  t=%d\nPlanned=(%d,%d,%d)\nActual=(%d,%d,%d)\nDelay=%d\nAlign=%s"),
             State.MissionId,
             TimeStep,
             PlannedCell.X, PlannedCell.Y, PlannedCell.Z,
             ActualCell.X, ActualCell.Y, ActualCell.Z,
-            State.TotalDelaySteps
+            State.TotalDelaySteps,
+            *State.LastAlignmentAction
         );
 
         DrawDebugString(
@@ -2918,9 +3071,9 @@ void APathPlanningDemoActor::EditorReadNoFlyZoneMarkersToConfigs()
     }
 
     NoFlyZoneConfigs.Sort([](const FTemporalNoFlyZoneConfig& A, const FTemporalNoFlyZoneConfig& B)
-    {
-        return A.ZoneId < B.ZoneId;
-    });
+        {
+            return A.ZoneId < B.ZoneId;
+        });
 
     UE_LOG(LogTemp, Warning, TEXT("EditorReadNoFlyZoneMarkersToConfigs done. Zone count=%d"), NoFlyZoneConfigs.Num());
 }

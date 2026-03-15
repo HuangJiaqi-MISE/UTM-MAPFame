@@ -28,7 +28,7 @@ public:
 
     // 表示保护体积向下额外扩张多少层。如果是 2，就表示当前层下面再多占 2 层安全空间。
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UTM Safety", meta = (ClampMin = "0"))
-    int32 ProtectionZDownCells = 5;
+    int32 ProtectionZDownCells = 0;
 
     // 表示下洗危险区在水平面的扩张半径。它不是普通保护盒，而是“只在无人机下方”的风险区。如果设为 1，表示下洗区在 XY 上覆盖 3x3；如果是 2，覆盖 5x5。
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UTM Safety", meta = (ClampMin = "0"))

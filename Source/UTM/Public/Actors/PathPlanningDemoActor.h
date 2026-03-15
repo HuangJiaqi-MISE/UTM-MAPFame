@@ -5,6 +5,7 @@
 #include "Planning/GridMap3D.h"
 #include "Planning/AStarPlanner.h"
 #include "Planning/DStarLitePlanner.h"
+#include "Planning/DiscreteAlignmentManager.h"
 #include "Planning/PathPlannerBase.h"
 #include "Planning/PlanningInputValidator.h"
 #include "Planning/DroneMissionTypes.h"
@@ -174,8 +175,31 @@ struct FExecutionAgentState
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
     bool bFinished = false;
 
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
+    int32 AlignmentCorrectionCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
+    int32 AlignmentHoldCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
+    int32 AlignmentSnapCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
+    int32 AlignmentReplanRequestCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
+    int32 MaxAlignmentSpatialError = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
+    int32 MaxAlignmentTemporalError = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
+    bool bAlignmentLost = false;
+
     FIntVector DisplayFromCell = FIntVector::ZeroValue;
     FIntVector DisplayToCell = FIntVector::ZeroValue;
+    FIntVector LastObservedCell = FIntVector::ZeroValue;
+    FString LastAlignmentAction;
 };
 
 USTRUCT(BlueprintType)
@@ -254,6 +278,27 @@ struct FExecutionAgentSummary
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
     bool bReachedGoal = false;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentCorrectionCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentHoldCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentSnapCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentReplanRequestCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 MaxAlignmentSpatialError = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 MaxAlignmentTemporalError = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    bool bAlignmentLost = false;
 };
 
 USTRUCT(BlueprintType)
@@ -284,6 +329,18 @@ struct FExecutionSummary
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
     int32 FirstConflictTime = -1;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentCorrectionCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentHoldCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentSnapCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentReplanRequestCount = 0;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
     TArray<FExecutionAgentSummary> AgentSummaries;
@@ -334,6 +391,8 @@ private:
     void DrawExecutionDebugForState(const FExecutionAgentState& State, int32 TimeStep) const;
     const FAgentDelayConfig* FindAgentDelayConfig(int32 MissionId) const;
     bool IsForcedDelayStep(const FExecutionAgentState& State, int32 TimeStep) const;
+    FIntVector GetObservedExecutionCell(const FExecutionAgentState& State) const;
+    FDiscreteAlignmentSettings BuildDiscreteAlignmentSettings() const;
     int32 ComputeFirstMismatchTime(const FExecutionAgentState& State) const;
     void BuildExecutionSummary();
     void LogExecutionSummary() const;
@@ -447,6 +506,27 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
     int32 ExecutionRandomSeed = 12345;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
+    bool bEnableDiscreteAlignment = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "1"))
+    int32 AlignmentSearchRadiusSteps = 6;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "0"))
+    int32 AlignmentMaxSpatialErrorCells = 1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "0"))
+    int32 AlignmentMaxSnapAheadSteps = 3;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
+    bool bAlignmentAllowRecoveryMoves = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
+    bool bAlignmentHoldPositionOnFailure = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
+    bool bLogAlignmentEvents = true;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution Debug")
     bool bDrawExecutionCells = true;
 
@@ -552,7 +632,7 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Mission Editor")
     void EditorReadMissionMarkersToConfigs();
 
-	// UI编辑临时禁飞区配置
+    // UI编辑临时禁飞区配置
     // 保存当前所有禁飞区配置
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor")
     TArray<FTemporalNoFlyZoneConfig> NoFlyZoneConfigs;
@@ -586,7 +666,7 @@ public:
     int32 RandomNoFlyZoneMaxSizeCells = 6;
 
     // 禁飞区最早从哪个时间步开始生效
-	// 举例：MinStartTimeStep = 0   MaxStartTimeStep = 50  表示禁飞区的开始时间会在 0 到 50 个时间步之间随机。
+    // 举例：MinStartTimeStep = 0   MaxStartTimeStep = 50  表示禁飞区的开始时间会在 0 到 50 个时间步之间随机。
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor", meta = (ClampMin = "0"))
     int32 RandomNoFlyZoneMinStartTimeStep = 0;
 
@@ -625,7 +705,7 @@ public:
 
 
 
-// 静态障碍物生成与编辑
+    // 静态障碍物生成与编辑
 private:
     void SpawnCityBuilding(const FVector& Center, const FVector& Extent);
     void GenerateCityLayout_Manhattan(FRandomStream& RandomStream);
@@ -687,24 +767,24 @@ public:
     UFUNCTION(BlueprintCallable, Category = "City Generator")
     void EditorClearCityEnvironment();
 
-//  统计求解时间等数据
+    //  统计求解时间等数据
 public:
-        UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Timing")
-        FPlanningTimingStats LastPlanningStats;
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Timing")
+    FPlanningTimingStats LastPlanningStats;
 
-        UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "No-Fly Zone Validation")
-        FNoFlyZonePathValidationSummary LastNoFlyZonePathValidation;
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "No-Fly Zone Validation")
+    FNoFlyZonePathValidationSummary LastNoFlyZonePathValidation;
 
-        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing")
-        bool bEnablePlanningTimeLog = true;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Timing")
+    bool bEnablePlanningTimeLog = true;
 
-        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City")
-        ECityLayoutType CityLayoutType = ECityLayoutType::Manhattan;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City")
+    ECityLayoutType CityLayoutType = ECityLayoutType::Manhattan;
 
-        bool ProcessStartGoalPairsSingleAgent(
-            const TArray<int32>& Ids,
-            const TMap<int32, TObjectPtr<AActor>>& Starts,
-            const TMap<int32, TObjectPtr<AActor>>& Goals);
+    bool ProcessStartGoalPairsSingleAgent(
+        const TArray<int32>& Ids,
+        const TMap<int32, TObjectPtr<AActor>>& Starts,
+        const TMap<int32, TObjectPtr<AActor>>& Goals);
 
 private:
     void ResetPlanningStats();
