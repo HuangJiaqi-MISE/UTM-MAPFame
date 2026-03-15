@@ -644,7 +644,7 @@ bool FPBSPlanner::BuildRootNode(
     for (const FDroneMissionConfig& Mission : Missions)
     {
         TArray<FIntVector> InitialPath;
-        if (!LowLevelPlanForAgent(GridMap, Mission, EmptyReservation, InitialPath))
+        if (!LowLevelPlanForAgent(GridMap, Mission, EmptyReservation, nullptr, InitialPath))
         {
             UE_LOG(LogTemp, Error, TEXT("PBS: root initial planning failed for MissionId=%d"), Mission.MissionId);
             return false;
@@ -740,9 +740,10 @@ bool FPBSPlanner::ReplanAffectedAgents(
         }
 
         const FReservationTable Reservation = BuildReservationTableForAgent(AgentId, InOutNode);
+        const TArray<FIntVector>* ExistingPathPtr = InOutNode.PathsByAgent.Find(AgentId);
 
         TArray<FIntVector> NewPath;
-        if (!LowLevelPlanForAgent(GridMap, *MissionPtr, Reservation, NewPath))
+        if (!LowLevelPlanForAgent(GridMap, *MissionPtr, Reservation, ExistingPathPtr, NewPath))
         {
             UE_LOG(LogTemp, Warning, TEXT("PBS: replanning failed for AgentId=%d"), AgentId);
             return false;
@@ -758,6 +759,7 @@ bool FPBSPlanner::LowLevelPlanForAgent(
     const FGridMap3D& GridMap,
     const FDroneMissionConfig& Mission,
     const FReservationTable& Reservation,
+    const TArray<FIntVector>* ExistingPath,
     TArray<FIntVector>& OutPath) const
 {
     OutPath.Reset();
@@ -912,9 +914,19 @@ bool FPBSPlanner::LowLevelPlanForAgent(
 
     const int32 SpatialLowerBound = Heuristic(StartCell, GoalCell);
     const int32 TotalCells = GridMap.GridDim.X * GridMap.GridDim.Y * GridMap.GridDim.Z;
-    const int32 MaxTime =
-        FMath::Max3(GoalReadyTime, FMath::Max(Reservation.MaxReservedTime, Reservation.MaxCatTime), SpatialLowerBound) +
-        FMath::Clamp(TotalCells / 8, 64, 4096);
+    const int32 HardConstraintHorizon = FMath::Max3(GoalReadyTime, Reservation.MaxReservedTime, SpatialLowerBound);
+    const int32 IncumbentCost =
+        (ExistingPath && ExistingPath->Num() > 0)
+        ? FMath::Max(0, ExistingPath->Num() - 1)
+        : SpatialLowerBound;
+    // CAT is only a soft tie-breaker. Letting its longest path define the time horizon
+    // makes replanning explode once a few agents accumulate very long paths.
+    const int32 EffectiveCatTime = FMath::Min(Reservation.MaxCatTime, HardConstraintHorizon);
+    int32 HardUpperBound = FMath::Max(HardConstraintHorizon, IncumbentCost + 64);
+    HardUpperBound = FMath::Max(HardUpperBound, SpatialLowerBound + FMath::Clamp(GridMap.GridDim.X + GridMap.GridDim.Y + GridMap.GridDim.Z, 32, 256));
+    HardUpperBound = FMath::Min(HardUpperBound, SpatialLowerBound + FMath::Clamp(TotalCells / 32, 128, 2048));
+    HardUpperBound = FMath::Max(HardUpperBound, HardConstraintHorizon);
+    const int32 MaxTime = HardUpperBound;
 
     struct FQueueEntry
     {
@@ -935,12 +947,17 @@ bool FPBSPlanner::LowLevelPlanForAgent(
                 return A.ConflictScore > B.ConflictScore;
             }
 
-            return A.State.TimeStep > B.State.TimeStep;
+            // Prefer deeper states on the same f-layer to avoid broad wavefront expansion.
+            return A.State.TimeStep < B.State.TimeStep;
         };
 
     TArray<FQueueEntry> OpenHeap;
     TMap<FTimedState, int32> BestConflictScore;
     TMap<FTimedState, FTimedState> Parent;
+    int32 ExpandedStateCount = 0;
+    int32 GeneratedStateCount = 0;
+    int32 RejectedDuplicateStateCount = 0;
+    int32 RejectedDeadlineStateCount = 0;
 
     FTimedState StartState;
     StartState.Cell = StartCell;
@@ -953,6 +970,7 @@ bool FPBSPlanner::LowLevelPlanForAgent(
     StartEntry.ConflictScore = BestConflictScore[StartState];
     StartEntry.F = Heuristic(StartCell, GoalCell);
     OpenHeap.HeapPush(StartEntry, OpenPredicate);
+    GeneratedStateCount = 1;
 
     static const FIntVector Directions[7] =
     {
@@ -970,7 +988,30 @@ bool FPBSPlanner::LowLevelPlanForAgent(
     {
         if (++GuardCounter > PBS_LOW_LEVEL_GUARD_LIMIT)
         {
-            UE_LOG(LogTemp, Error, TEXT("PBS low-level exceeded guard limit for AgentId=%d"), Mission.MissionId);
+            UE_LOG(
+                LogTemp,
+                Error,
+                TEXT("PBS low-level exceeded guard limit for AgentId=%d MaxTime=%d GoalReadyTime=%d MaxReservedTime=%d MaxCatTime=%d HardHorizon=%d EffectiveCatTime=%d Incumbent=%d Expanded=%d Generated=%d RejectedDup=%d RejectedDeadline=%d Open=%d Start=(%d,%d,%d) Goal=(%d,%d,%d) CatTop=%s"),
+                Mission.MissionId,
+                MaxTime,
+                GoalReadyTime,
+                Reservation.MaxReservedTime,
+                Reservation.MaxCatTime,
+                HardConstraintHorizon,
+                EffectiveCatTime,
+                IncumbentCost,
+                ExpandedStateCount,
+                GeneratedStateCount,
+                RejectedDuplicateStateCount,
+                RejectedDeadlineStateCount,
+                OpenHeap.Num(),
+                StartCell.X,
+                StartCell.Y,
+                StartCell.Z,
+                GoalCell.X,
+                GoalCell.Y,
+                GoalCell.Z,
+                *Reservation.CatTopContributors);
             return false;
         }
 
@@ -995,6 +1036,7 @@ bool FPBSPlanner::LowLevelPlanForAgent(
 
         FQueueEntry CurrentEntry;
         OpenHeap.HeapPop(CurrentEntry, OpenPredicate);
+        ++ExpandedStateCount;
 
         if (CurrentEntry.State.Cell == GoalCell && CurrentEntry.State.TimeStep >= GoalReadyTime)
         {
@@ -1050,6 +1092,12 @@ bool FPBSPlanner::LowLevelPlanForAgent(
             FTimedState NextState;
             NextState.Cell = NextCell;
             NextState.TimeStep = NextTime;
+            const int32 RemainingDistance = static_cast<int32>(Heuristic(NextCell, GoalCell));
+            if (NextTime + RemainingDistance > MaxTime)
+            {
+                ++RejectedDeadlineStateCount;
+                continue;
+            }
 
             const int32 WaitConflictCount = (Dir == FIntVector::ZeroValue) ?
                 CountSoftVertexConflicts(CurrentEntry.State.Cell, NextTime, NextTime) :
@@ -1059,12 +1107,9 @@ bool FPBSPlanner::LowLevelPlanForAgent(
                 WaitConflictCount +
                 CountSoftMoveConflicts(CurrentEntry.State.Cell, NextCell, NextTime);
 
-            const bool bShouldUpdate =
-                !BestConflictScore.Contains(NextState) ||
-                TentativeConflictScore < BestConflictScore[NextState];
-
-            if (!bShouldUpdate)
+            if (BestConflictScore.Contains(NextState))
             {
+                ++RejectedDuplicateStateCount;
                 continue;
             }
 
@@ -1076,6 +1121,7 @@ bool FPBSPlanner::LowLevelPlanForAgent(
             NextEntry.ConflictScore = TentativeConflictScore;
             NextEntry.F = (float)NextTime + Heuristic(NextCell, GoalCell);
             OpenHeap.HeapPush(NextEntry, OpenPredicate);
+            ++GeneratedStateCount;
         }
     }
 
@@ -1087,6 +1133,7 @@ FPBSPlanner::FReservationTable FPBSPlanner::BuildReservationTableForAgent(
     const FPBSNode& Node) const
 {
     FReservationTable Result;
+    TArray<TPair<int32, int32>> CatPathLengths;
 
     TSet<int32> HigherAgents;
     CollectHigherPriorityAgents(AgentId, Node.HigherThan, HigherAgents);
@@ -1105,6 +1152,7 @@ FPBSPlanner::FReservationTable FPBSPlanner::BuildReservationTableForAgent(
             continue;
         }
 
+        CatPathLengths.Emplace(OtherAgentId, Path.Num());
         const bool bIsHigherPriorityAgent = HigherAgents.Contains(OtherAgentId);
         for (int32 t = 0; t < Path.Num(); ++t)
         {
@@ -1122,6 +1170,7 @@ FPBSPlanner::FReservationTable FPBSPlanner::BuildReservationTableForAgent(
             if (bIsHigherPriorityAgent)
             {
                 Result.VertexByTime.FindOrAdd(t).Add(Path[t]);
+                Result.MaxReservedTime = FMath::Max(Result.MaxReservedTime, t);
 
                 if (t > 0)
                 {
@@ -1149,6 +1198,48 @@ FPBSPlanner::FReservationTable FPBSPlanner::BuildReservationTableForAgent(
 
             Result.MaxReservedTime = FMath::Max(Result.MaxReservedTime, GoalArrivalTime);
         }
+    }
+
+    CatPathLengths.Sort(
+        [](const TPair<int32, int32>& A, const TPair<int32, int32>& B)
+        {
+            if (A.Value != B.Value)
+            {
+                return A.Value > B.Value;
+            }
+
+            return A.Key < B.Key;
+        });
+
+    const int32 ContributorsToLog = FMath::Min(3, CatPathLengths.Num());
+    for (int32 Index = 0; Index < ContributorsToLog; ++Index)
+    {
+        if (!Result.CatTopContributors.IsEmpty())
+        {
+            Result.CatTopContributors += TEXT(",");
+        }
+
+        Result.CatTopContributors += FString::Printf(
+            TEXT("%d:%d"),
+            CatPathLengths[Index].Key,
+            CatPathLengths[Index].Value);
+    }
+
+    if (ContributorsToLog < CatPathLengths.Num())
+    {
+        if (!Result.CatTopContributors.IsEmpty())
+        {
+            Result.CatTopContributors += TEXT(",");
+        }
+
+        Result.CatTopContributors += FString::Printf(
+            TEXT("+%d more"),
+            CatPathLengths.Num() - ContributorsToLog);
+    }
+
+    if (Result.CatTopContributors.IsEmpty())
+    {
+        Result.CatTopContributors = TEXT("none");
     }
 
     return Result;

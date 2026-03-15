@@ -139,6 +139,10 @@ const TCHAR* FDiscreteAlignmentManager::LexToString(EDiscreteAlignmentAction Act
         return TEXT("RecoverTowardPlan");
     case EDiscreteAlignmentAction::HoldForAlignment:
         return TEXT("HoldForAlignment");
+    case EDiscreteAlignmentAction::HoldForPredictedConflict:
+        return TEXT("HoldForPredictedConflict");
+    case EDiscreteAlignmentAction::HoldForReplan:
+        return TEXT("HoldForReplan");
     case EDiscreteAlignmentAction::GoalHold:
         return TEXT("GoalHold");
     default:

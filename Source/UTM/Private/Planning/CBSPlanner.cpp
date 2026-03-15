@@ -61,7 +61,7 @@ bool FCBSPlanner::PlanMissions(
     OpenNodes.Add(RootNode);
 
     int32 IterationGuard = 0;
-    const int32 MaxIterations = 512;
+    const int32 MaxIterations = 8000;
 
     while (OpenNodes.Num() > 0)
     {

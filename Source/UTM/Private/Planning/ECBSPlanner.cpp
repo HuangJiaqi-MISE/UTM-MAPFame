@@ -203,7 +203,10 @@ bool FECBSPlanner::PlanMissions(
     int32 IterationGuard = 0;
     const int32 MaxIterations = FMath::Clamp(Missions.Num() * Missions.Num() * 4, 2048, 20000);
     const double SearchStartTimeSec = FPlatformTime::Seconds();
-    const double MaxWallTimeSec = FMath::Clamp(static_cast<double>(Missions.Num()) * 0.05, 1.5, 8.0);
+	// ECBS 的搜索时间预算可以根据任务数量进行调整。每个任务增加都会增加搜索空间的复杂度，因此时间预算应该适当增加。
+    // 但同时也需要设置一个上限，防止在极端情况下搜索时间过长。
+    // 这里上限为30秒
+    const double MaxWallTimeSec = FMath::Clamp(static_cast<double>(Missions.Num()) * 0.05, 1.5, 30.0);
 
     while (ActiveNodeIds.Num() > 0)
     {

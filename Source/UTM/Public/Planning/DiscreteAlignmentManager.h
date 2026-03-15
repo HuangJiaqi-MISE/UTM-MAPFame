@@ -11,6 +11,8 @@ enum class EDiscreteAlignmentAction : uint8
     SnapToPlanIndex,
     RecoverTowardPlan,
     HoldForAlignment,
+    HoldForPredictedConflict,
+    HoldForReplan,
     GoalHold
 };
 

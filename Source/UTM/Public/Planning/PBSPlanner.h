@@ -132,6 +132,7 @@ private:
         TMap<int32, TSet<FEdgeKey>> CatEdgeByTime;
         int32 MaxReservedTime = 0;
         int32 MaxCatTime = 0;
+        FString CatTopContributors;
     };
 
     struct FPBSNode
@@ -182,6 +183,7 @@ private:
         const FGridMap3D& GridMap,
         const FDroneMissionConfig& Mission,
         const FReservationTable& Reservation,
+        const TArray<FIntVector>* ExistingPath,
         TArray<FIntVector>& OutPath) const;
 
     FReservationTable BuildReservationTableForAgent(

@@ -46,6 +46,14 @@ enum class EExecutionDelayMode : uint8
 };
 
 UENUM(BlueprintType)
+enum class EExecutionReplanMode : uint8
+{
+    Disabled          UMETA(DisplayName = "Disabled"),
+    LocalConflictSet  UMETA(DisplayName = "Local Conflict Set"),
+    GlobalUnfinished  UMETA(DisplayName = "Global Unfinished")
+};
+
+UENUM(BlueprintType)
 enum class ECityLayoutType : uint8
 {
     Manhattan,
@@ -182,10 +190,16 @@ struct FExecutionAgentState
     int32 AlignmentHoldCount = 0;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
+    int32 AlignmentConflictHoldCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
     int32 AlignmentSnapCount = 0;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
     int32 AlignmentReplanRequestCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
+    int32 AlignmentSuccessfulReplanCount = 0;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment")
     int32 MaxAlignmentSpatialError = 0;
@@ -199,6 +213,9 @@ struct FExecutionAgentState
     FIntVector DisplayFromCell = FIntVector::ZeroValue;
     FIntVector DisplayToCell = FIntVector::ZeroValue;
     FIntVector LastObservedCell = FIntVector::ZeroValue;
+    FIntVector GoalCell = FIntVector::ZeroValue;
+    FVector GoalWorld = FVector::ZeroVector;
+    int32 ConsecutiveConflictHoldCount = 0;
     FString LastAlignmentAction;
 };
 
@@ -286,10 +303,16 @@ struct FExecutionAgentSummary
     int32 AlignmentHoldCount = 0;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentConflictHoldCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
     int32 AlignmentSnapCount = 0;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
     int32 AlignmentReplanRequestCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentSuccessfulReplanCount = 0;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
     int32 MaxAlignmentSpatialError = 0;
@@ -337,10 +360,16 @@ struct FExecutionSummary
     int32 AlignmentHoldCount = 0;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentConflictHoldCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
     int32 AlignmentSnapCount = 0;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
     int32 AlignmentReplanRequestCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
+    int32 AlignmentSuccessfulReplanCount = 0;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
     TArray<FExecutionAgentSummary> AgentSummaries;
@@ -387,6 +416,7 @@ private:
     void AdvanceExecutionOneStep();
     void UpdateExecutionVisuals(float Alpha);
     bool ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep);
+    void CacheExecutionMissionConfigs(const TArray<FDroneMissionConfig>& Missions);
     void DetectExecutionConflictsAtStep(int32 TimeStep);
     void DrawExecutionDebugForState(const FExecutionAgentState& State, int32 TimeStep) const;
     const FAgentDelayConfig* FindAgentDelayConfig(int32 MissionId) const;
@@ -396,6 +426,8 @@ private:
     int32 ComputeFirstMismatchTime(const FExecutionAgentState& State) const;
     void BuildExecutionSummary();
     void LogExecutionSummary() const;
+    bool PlanMultiAgentMissionsOnGrid(const FGridMap3D& PlanningGrid, const TArray<FDroneMissionConfig>& Missions, TMap<int32, TArray<FVector>>& OutPaths) const;
+    bool TryExecutionReplan(const TSet<int32>& RequestedMissionIds, bool bGlobalReplan, TSet<int32>& OutReplannedMissionIds);
 
 private:
     FGridMap3D GridMap;
@@ -465,12 +497,14 @@ private:
 
     TMap<int32, TObjectPtr<ADroneActor>> SpawnedDroneByMissionId;
     TMap<int32, TArray<FIntVector>> PlannedCellPathsByMission;
+    TMap<int32, FDroneMissionConfig> ExecutionMissionConfigsByMissionId;
     TMap<int32, FExecutionAgentState> ExecutionStates;
     TArray<FExecutionConflict> ExecutionConflicts;
 
     FRandomStream ExecutionRandom;
     bool bExecutionRunning = false;
     int32 CurrentExecutionTimeStep = 0;
+    int32 TotalExecutionReplanCount = 0;
     float ExecutionAccumulator = 0.f;
 
 public:
@@ -495,7 +529,7 @@ public:
     TArray<FAgentDelayConfig> AgentDelayConfigs;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
-    bool bLogExecutionSummary = true;
+    bool bLogExecutionDelay = true;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
     FExecutionSummary LastExecutionSummary;
@@ -506,8 +540,43 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
     int32 ExecutionRandomSeed = 12345;
 
+
+    /*
+    * Execution only模式：
+    * ---bEnableDiscreteAlignment=false
+    * ---bEnableConflictAwareAlignment=false
+    * ---ExecutionReplanMode=Disabled
+    * 无人机按执行器推进，有延迟就原地停，不会重新锚定计划时间线，最接近“纯播放 + 扰动”的基线
+    
+    * Alignment v1模式：
+    * ---bEnableDiscreteAlignment=true
+    * ---bEnableConflictAwareAlignment=false
+    * ---ExecutionReplanMode=Disabled
+    * 会读取当前位置并重新匹配计划 step，会通过 snap 把时间偏差拉回计划参考，适合研究“延迟导致的 schedule 失配”
+    * 但不负责避免多机执行期新冲突！！！
+    * 
+    * Alignment v2模式：
+    * ---bEnableDiscreteAlignment=true
+    * ---bEnableConflictAwareAlignment=true
+    * ---ExecutionReplanMode=GlobalUnfinished 或 LocalConflictSet
+    * 先做 v1 对齐，再预测下一步 vertex/edge conflict，冲突时让低优先级无人机先 hold
+    * 如果 hold 不够，再触发 replan，适合研究“执行期安全协调”
+    */
+
+
+    // 使能Alignment v1控制：会做离散“计划-执行时间对齐”，读取无人机实际当前位置
+    // 在计划路径上找当前最合适的参考 step，会用 SearchRadius、MaxSnapAhead 去找当前最匹配的计划索引。
+    // 做时间对齐，主要表现为：FollowPlan、HoldForDelay、SnapToPlanIndex、GoalHold
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
     bool bEnableDiscreteAlignment = true;
+
+    //使能Alignment v2控制：下一步冲突预测,低优先级 hold,由预测冲突触发的 replan
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
+    bool bEnableConflictAwareAlignment = true;
+
+
+
+
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "1"))
     int32 AlignmentSearchRadiusSteps = 6;
@@ -526,6 +595,21 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
     bool bLogAlignmentEvents = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
+    bool bLogConflictPredictionEvents = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
+    EExecutionReplanMode ExecutionReplanMode = EExecutionReplanMode::GlobalUnfinished;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "1"))
+    int32 AlignmentConflictResolutionPasses = 8;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "1"))
+    int32 AlignmentConflictHoldThresholdForReplan = 2;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "0"))
+    int32 MaxExecutionReplanCount = 8;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution Debug")
     bool bDrawExecutionCells = true;
