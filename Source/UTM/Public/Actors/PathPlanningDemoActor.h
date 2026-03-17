@@ -426,6 +426,23 @@ private:
     int32 ComputeFirstMismatchTime(const FExecutionAgentState& State) const;
     void BuildExecutionSummary();
     void LogExecutionSummary() const;
+
+	// 外部日志JSON格式规划结果用的接口
+    void LogStructuredExperimentSummaryJson() const;
+    FString BuildStructuredExperimentSummaryJson() const;
+    void ResolveExperimentMetadata(
+        FString& OutRunId,
+        FString& OutPhase,
+        FString& OutGroupId,
+        FString& OutGroupName,
+        FString& OutScenarioName) const;
+    FString BuildFallbackExperimentRunId(
+        const FString& InPhase,
+        const FString& InGroupId,
+        const FString& InScenarioName) const;
+    FString GetEffectiveExperimentScenarioName() const;
+    int32 GetEnabledNoFlyZoneCount() const;
+
     bool PlanMultiAgentMissionsOnGrid(const FGridMap3D& PlanningGrid, const TArray<FDroneMissionConfig>& Missions, TMap<int32, TArray<FVector>>& OutPaths) const;
     bool TryExecutionReplan(const TSet<int32>& RequestedMissionIds, bool bGlobalReplan, TSet<int32>& OutReplannedMissionIds);
 
@@ -531,6 +548,9 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
     bool bLogExecutionDelay = true;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
+    bool bLogExecutionSummary = true;
+
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
     FExecutionSummary LastExecutionSummary;
 
@@ -538,7 +558,28 @@ public:
     float StepDelayProbability = 0.20f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
-    int32 ExecutionRandomSeed = 12345;
+    int32 ExecutionRandomSeed = 3;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experiment Logging")
+    bool bLogStructuredExperimentJson = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experiment Logging")
+    FString ExperimentRunId;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experiment Logging")
+    FString ExperimentPhase;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experiment Logging")
+    FString ExperimentGroupId;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experiment Logging")
+    FString ExperimentGroupName;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experiment Logging")
+    FString ExperimentScenarioName;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Experiment Logging")
+    FString ExperimentNotes;
 
 
     /*
