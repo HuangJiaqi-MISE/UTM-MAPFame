@@ -20,7 +20,7 @@ public:
 
 	// 表示无人机在水平面上的保护半径，1表示占 3x3，2表示占 5x5，以此类推
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UTM Safety", meta = (ClampMin = "0"))
-    int32 ProtectionXYRadiusCells = 0;
+    int32 ProtectionXYRadiusCells = 1;
 
     // 表示保护体积向上额外扩张多少层。如果是 1，就表示除了当前高度层，还把上面 1 层也算进保护体积。
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UTM Safety", meta = (ClampMin = "0"))

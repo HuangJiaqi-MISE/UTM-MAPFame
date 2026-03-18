@@ -111,6 +111,92 @@ namespace
         return Result.IsEmpty() ? TEXT("Unknown") : Result;
     }
 
+    struct FMissionFootprintBox
+    {
+        bool bValid = false;
+        FIntVector Min = FIntVector::ZeroValue;
+        FIntVector Max = FIntVector::ZeroValue;
+    };
+
+    FMissionFootprintBox MakeMissionProtectionBox(const FIntVector& CenterCell, const FDroneMissionConfig& Mission)
+    {
+        const int32 ProtectionXYRadiusCells = FMath::Max(0, Mission.ProtectionXYRadiusCells);
+        const int32 ProtectionZUpCells = FMath::Max(0, Mission.ProtectionZUpCells);
+        const int32 ProtectionZDownCells = FMath::Max(0, Mission.ProtectionZDownCells);
+
+        FMissionFootprintBox Result;
+        Result.bValid = true;
+        Result.Min = FIntVector(
+            CenterCell.X - ProtectionXYRadiusCells,
+            CenterCell.Y - ProtectionXYRadiusCells,
+            CenterCell.Z - ProtectionZDownCells);
+        Result.Max = FIntVector(
+            CenterCell.X + ProtectionXYRadiusCells,
+            CenterCell.Y + ProtectionXYRadiusCells,
+            CenterCell.Z + ProtectionZUpCells);
+        return Result;
+    }
+
+    FMissionFootprintBox MakeMissionDownwashBox(const FIntVector& CenterCell, const FDroneMissionConfig& Mission)
+    {
+        const int32 DownwashXYRadiusCells = FMath::Max(0, Mission.DownwashXYRadiusCells);
+        const int32 DownwashZBelowCells = FMath::Max(0, Mission.DownwashZBelowCells);
+
+        if (DownwashZBelowCells <= 0)
+        {
+            return FMissionFootprintBox();
+        }
+
+        FMissionFootprintBox Result;
+        Result.bValid = true;
+        Result.Min = FIntVector(
+            CenterCell.X - DownwashXYRadiusCells,
+            CenterCell.Y - DownwashXYRadiusCells,
+            CenterCell.Z - DownwashZBelowCells);
+        Result.Max = FIntVector(
+            CenterCell.X + DownwashXYRadiusCells,
+            CenterCell.Y + DownwashXYRadiusCells,
+            CenterCell.Z - 1);
+        return Result;
+    }
+
+    bool MissionBoxesOverlap(const FMissionFootprintBox& Left, const FMissionFootprintBox& Right)
+    {
+        return Left.bValid
+            && Right.bValid
+            && Left.Min.X <= Right.Max.X && Right.Min.X <= Left.Max.X
+            && Left.Min.Y <= Right.Max.Y && Right.Min.Y <= Left.Max.Y
+            && Left.Min.Z <= Right.Max.Z && Right.Min.Z <= Left.Max.Z;
+    }
+
+    bool HasStaticUTMConfigConflict(
+        const FIntVector& CellA,
+        const FDroneMissionConfig& MissionA,
+        const FIntVector& CellB,
+        const FDroneMissionConfig& MissionB)
+    {
+        const FMissionFootprintBox ProtectionA = MakeMissionProtectionBox(CellA, MissionA);
+        const FMissionFootprintBox ProtectionB = MakeMissionProtectionBox(CellB, MissionB);
+        if (MissionBoxesOverlap(ProtectionA, ProtectionB))
+        {
+            return true;
+        }
+
+        if (CellA.Z > CellB.Z
+            && MissionBoxesOverlap(MakeMissionDownwashBox(CellA, MissionA), ProtectionB))
+        {
+            return true;
+        }
+
+        if (CellB.Z > CellA.Z
+            && MissionBoxesOverlap(MakeMissionDownwashBox(CellB, MissionB), ProtectionA))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
     FString GetDefaultExperimentGroupNameById(const FString& GroupId)
     {
         if (GroupId == TEXT("G1"))
@@ -2928,6 +3014,34 @@ bool APathPlanningDemoActor::TryGenerateSingleMission(
 {
     const int32 MaxTryCount = 500;
 
+    const auto HasConflictWithExistingStarts =
+        [this](const FIntVector& CandidateStartCell, const FDroneMissionConfig& CandidateMission)
+        {
+            for (const FDroneMissionConfig& ExistingMission : MissionConfigs)
+            {
+                const FIntVector ExistingStartCell = GridMap.WorldToCell(ExistingMission.StartWorld);
+                if (HasStaticUTMConfigConflict(CandidateStartCell, CandidateMission, ExistingStartCell, ExistingMission))
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+    const auto HasConflictWithExistingGoals =
+        [this](const FIntVector& CandidateGoalCell, const FDroneMissionConfig& CandidateMission)
+        {
+            for (const FDroneMissionConfig& ExistingMission : MissionConfigs)
+            {
+                const FIntVector ExistingGoalCell = GridMap.WorldToCell(ExistingMission.GoalWorld);
+                if (HasStaticUTMConfigConflict(CandidateGoalCell, CandidateMission, ExistingGoalCell, ExistingMission))
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
     for (int32 TryIndex = 0; TryIndex < MaxTryCount; ++TryIndex)
     {
         const FIntVector StartCell(
@@ -2974,10 +3088,22 @@ bool APathPlanningDemoActor::TryGenerateSingleMission(
                 continue;
             }
 
-            OutMission.MissionId = MissionId;
-            OutMission.StartWorld = GridMap.CellToWorld(StartCell);
-            OutMission.GoalWorld = GridMap.CellToWorld(GoalCell);
+            FDroneMissionConfig CandidateMission = OutMission;
+            CandidateMission.MissionId = MissionId;
+            CandidateMission.StartWorld = GridMap.CellToWorld(StartCell);
+            CandidateMission.GoalWorld = GridMap.CellToWorld(GoalCell);
 
+            if (HasConflictWithExistingStarts(StartCell, CandidateMission))
+            {
+                continue;
+            }
+
+            if (HasConflictWithExistingGoals(GoalCell, CandidateMission))
+            {
+                continue;
+            }
+
+            OutMission = CandidateMission;
             UsedStarts.Add(StartCell);
             UsedGoals.Add(GoalCell);
             return true;
@@ -3004,7 +3130,11 @@ void APathPlanningDemoActor::EditorGenerateRandomMissionConfigs()
 
         if (!TryGenerateSingleMission(RandomStream, MissionId, UsedStarts, UsedGoals, NewMission))
         {
-            UE_LOG(LogTemp, Warning, TEXT("Failed to generate mission %d"), MissionId);
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("Failed to generate mission %d under current random-space and UTM safety constraints. Consider reducing RandomMissionCount or shrinking mission footprints."),
+                MissionId);
             continue;
         }
 
