@@ -353,6 +353,18 @@ struct FExecutionSummary
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
     int32 FirstConflictTime = -1;
 
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 UTMStaticConflictCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 UTMProtectionConflictCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 UTMDownwashConflictCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Summary")
+    int32 FirstUTMConflictTime = -1;
+
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alignment Summary")
     int32 AlignmentCorrectionCount = 0;
 

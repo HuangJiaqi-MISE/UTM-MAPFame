@@ -169,7 +169,14 @@ namespace
             && Left.Min.Z <= Right.Max.Z && Right.Min.Z <= Left.Max.Z;
     }
 
-    bool HasStaticUTMConfigConflict(
+    enum class EStaticUTMConflictType : uint8
+    {
+        None,
+        ProtectionFootprint,
+        Downwash
+    };
+
+    EStaticUTMConflictType GetStaticUTMConfigConflictType(
         const FIntVector& CellA,
         const FDroneMissionConfig& MissionA,
         const FIntVector& CellB,
@@ -179,22 +186,32 @@ namespace
         const FMissionFootprintBox ProtectionB = MakeMissionProtectionBox(CellB, MissionB);
         if (MissionBoxesOverlap(ProtectionA, ProtectionB))
         {
-            return true;
+            return EStaticUTMConflictType::ProtectionFootprint;
         }
 
         if (CellA.Z > CellB.Z
             && MissionBoxesOverlap(MakeMissionDownwashBox(CellA, MissionA), ProtectionB))
         {
-            return true;
+            return EStaticUTMConflictType::Downwash;
         }
 
         if (CellB.Z > CellA.Z
             && MissionBoxesOverlap(MakeMissionDownwashBox(CellB, MissionB), ProtectionA))
         {
-            return true;
+            return EStaticUTMConflictType::Downwash;
         }
 
-        return false;
+        return EStaticUTMConflictType::None;
+    }
+
+    bool HasStaticUTMConfigConflict(
+        const FIntVector& CellA,
+        const FDroneMissionConfig& MissionA,
+        const FIntVector& CellB,
+        const FDroneMissionConfig& MissionB)
+    {
+        return GetStaticUTMConfigConflictType(CellA, MissionA, CellB, MissionB)
+            != EStaticUTMConflictType::None;
     }
 
     FString GetDefaultExperimentGroupNameById(const FString& GroupId)
@@ -1708,6 +1725,70 @@ void APathPlanningDemoActor::BuildExecutionSummary()
         }
     }
 
+    TArray<int32> ExecutionMissionIds;
+    ExecutionStates.GetKeys(ExecutionMissionIds);
+    ExecutionMissionIds.Sort();
+
+    for (int32 TimeStep = 0; TimeStep <= LastExecutionSummary.ActualMakespan; ++TimeStep)
+    {
+        for (int32 I = 0; I < ExecutionMissionIds.Num(); ++I)
+        {
+            const int32 MissionIdA = ExecutionMissionIds[I];
+            const FExecutionAgentState* StateA = ExecutionStates.Find(MissionIdA);
+            const FDroneMissionConfig* ConfigA = ExecutionMissionConfigsByMissionId.Find(MissionIdA);
+            if (!StateA || !ConfigA || StateA->ActualCells.Num() <= 0)
+            {
+                continue;
+            }
+
+            const FIntVector CellA = GetCellAtTime(StateA->ActualCells, TimeStep);
+
+            for (int32 J = I + 1; J < ExecutionMissionIds.Num(); ++J)
+            {
+                const int32 MissionIdB = ExecutionMissionIds[J];
+                const FExecutionAgentState* StateB = ExecutionStates.Find(MissionIdB);
+                const FDroneMissionConfig* ConfigB = ExecutionMissionConfigsByMissionId.Find(MissionIdB);
+                if (!StateB || !ConfigB || StateB->ActualCells.Num() <= 0)
+                {
+                    continue;
+                }
+
+                const FIntVector CellB = GetCellAtTime(StateB->ActualCells, TimeStep);
+
+                const EStaticUTMConflictType UTMConflictType =
+                    GetStaticUTMConfigConflictType(CellA, *ConfigA, CellB, *ConfigB);
+
+                if (UTMConflictType == EStaticUTMConflictType::None)
+                {
+                    continue;
+                }
+
+                LastExecutionSummary.UTMStaticConflictCount++;
+
+                if (UTMConflictType == EStaticUTMConflictType::ProtectionFootprint)
+                {
+                    LastExecutionSummary.UTMProtectionConflictCount++;
+                }
+                else if (UTMConflictType == EStaticUTMConflictType::Downwash)
+                {
+                    LastExecutionSummary.UTMDownwashConflictCount++;
+                }
+
+                if (LastExecutionSummary.FirstUTMConflictTime < 0 ||
+                    TimeStep < LastExecutionSummary.FirstUTMConflictTime)
+                {
+                    LastExecutionSummary.FirstUTMConflictTime = TimeStep;
+                }
+
+                if (LastExecutionSummary.FirstConflictTime < 0 ||
+                    TimeStep < LastExecutionSummary.FirstConflictTime)
+                {
+                    LastExecutionSummary.FirstConflictTime = TimeStep;
+                }
+            }
+        }
+    }
+
     LastExecutionSummary.AgentSummaries.Sort(
         [](const FExecutionAgentSummary& A, const FExecutionAgentSummary& B)
         {
@@ -1755,10 +1836,18 @@ void APathPlanningDemoActor::LogExecutionSummary() const
         LastExecutionSummary.AlignmentReplanRequestCount,
         LastExecutionSummary.AlignmentSuccessfulReplanCount);
 
-    UE_LOG(LogTemp, Warning, TEXT("VertexConflictCount = %d, EdgeConflictCount = %d, FirstConflictTime = %d"),
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("VertexConflictCount = %d, EdgeConflictCount = %d, UTMStaticConflictCount = %d "
+            "(Protection = %d, Downwash = %d), FirstConflictTime = %d, FirstUTMConflictTime = %d"),
         LastExecutionSummary.VertexConflictCount,
         LastExecutionSummary.EdgeConflictCount,
-        LastExecutionSummary.FirstConflictTime);
+        LastExecutionSummary.UTMStaticConflictCount,
+        LastExecutionSummary.UTMProtectionConflictCount,
+        LastExecutionSummary.UTMDownwashConflictCount,
+        LastExecutionSummary.FirstConflictTime,
+        LastExecutionSummary.FirstUTMConflictTime);
 
     for (const FExecutionAgentSummary& Item : LastExecutionSummary.AgentSummaries)
     {
@@ -2070,9 +2159,17 @@ FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
     Root->SetNumberField(TEXT("actual_makespan"), LastExecutionSummary.ActualMakespan);
     Root->SetNumberField(TEXT("expansion"), Expansion);
     Root->SetNumberField(TEXT("total_delay_steps"), LastExecutionSummary.TotalDelaySteps);
+
     Root->SetNumberField(TEXT("vertex_conflict_count"), LastExecutionSummary.VertexConflictCount);
     Root->SetNumberField(TEXT("edge_conflict_count"), LastExecutionSummary.EdgeConflictCount);
     Root->SetNumberField(TEXT("first_conflict_time"), LastExecutionSummary.FirstConflictTime);
+
+    //utm_static_conflict_count = utm_protection_conflict_count + utm_downwash_conflict_count
+    Root->SetNumberField(TEXT("utm_static_conflict_count"), LastExecutionSummary.UTMStaticConflictCount);
+    Root->SetNumberField(TEXT("utm_protection_conflict_count"), LastExecutionSummary.UTMProtectionConflictCount);
+    Root->SetNumberField(TEXT("utm_downwash_conflict_count"), LastExecutionSummary.UTMDownwashConflictCount);
+    Root->SetNumberField(TEXT("first_utm_conflict_time"), LastExecutionSummary.FirstUTMConflictTime);
+
     Root->SetNumberField(TEXT("alignment_correction_count"), LastExecutionSummary.AlignmentCorrectionCount);
     Root->SetNumberField(TEXT("alignment_hold_count"), LastExecutionSummary.AlignmentHoldCount);
     Root->SetNumberField(TEXT("alignment_conflict_hold_count"), LastExecutionSummary.AlignmentConflictHoldCount);
