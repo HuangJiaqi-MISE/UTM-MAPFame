@@ -27,15 +27,15 @@ It is intended for research and experimentation in the following areas:
 
 ```text
 UTM-MAPFame/
-©À©¤ Public/
-©¦  ©À©¤ Actors/        # Public Actor headers
-©¦  ©¸©¤ Planning/      # Public planners, data structures, and interfaces
-©À©¤ Private/
-©¦  ©À©¤ Actors/        # Actor implementations
-©¦  ©¸©¤ Planning/      # Planning algorithm implementations
-©À©¤ UTM.Build.cs      # Unreal module build configuration
-©À©¤ UTM.cpp           # Module entry point
-©¸©¤ UTMGameModeBase.* # Base GameMode
+â”œâ”€ Public/
+â”‚  â”œâ”€ Actors/        # Public Actor headers
+â”‚  â””â”€ Planning/      # Public planners, data structures, and interfaces
+â”œâ”€ Private/
+â”‚  â”œâ”€ Actors/        # Actor implementations
+â”‚  â””â”€ Planning/      # Planning algorithm implementations
+â”œâ”€ UTM.Build.cs      # Unreal module build configuration
+â”œâ”€ UTM.cpp           # Module entry point
+â””â”€ UTMGameModeBase.* # Base GameMode
 ```
 
 The main entry point is `APathPlanningDemoActor`, which coordinates mapping, planning, execution, visualization, and experiment statistics.
