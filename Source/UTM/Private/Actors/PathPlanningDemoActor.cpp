@@ -42,7 +42,9 @@ namespace
     {
         None,
         Vertex,
-        Edge
+        Edge,
+        ProtectionFootprint,
+        Downwash
     };
 
     struct FExecutionStepProposal
@@ -79,6 +81,10 @@ namespace
             return TEXT("Vertex");
         case EPredictedExecutionConflictType::Edge:
             return TEXT("Edge");
+        case EPredictedExecutionConflictType::ProtectionFootprint:
+            return TEXT("ProtectionFootprint");
+        case EPredictedExecutionConflictType::Downwash:
+            return TEXT("Downwash");
         default:
             return TEXT("None");
         }
@@ -519,10 +525,15 @@ void APathPlanningDemoActor::Tick(float DeltaTime)
 
     ExecutionAccumulator += DeltaTime;
 
-    while (ExecutionAccumulator >= CBSStepDuration)
+    while (bExecutionRunning && ExecutionAccumulator >= CBSStepDuration)
     {
         ExecutionAccumulator -= CBSStepDuration;
         AdvanceExecutionOneStep();
+    }
+
+    if (!bExecutionRunning)
+    {
+        return;
     }
 
     const float Alpha = (CBSStepDuration > KINDA_SMALL_NUMBER)
@@ -1286,6 +1297,31 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                         OutConflict.AgentB = ProposalB->MissionId;
                         OutConflict.Cell = ProposalA->ProposedCell;
                         return true;
+                    }
+
+                    if (PlannerType == EPlannerType::LaCAMUTM)
+                    {
+                        const FDroneMissionConfig* MissionConfigA = ExecutionMissionConfigsByMissionId.Find(ProposalA->MissionId);
+                        const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(ProposalB->MissionId);
+                        if (MissionConfigA && MissionConfigB)
+                        {
+                            const EStaticUTMConflictType UTMConflictType = GetStaticUTMConfigConflictType(
+                                ProposalA->ProposedCell,
+                                *MissionConfigA,
+                                ProposalB->ProposedCell,
+                                *MissionConfigB);
+
+                            if (UTMConflictType != EStaticUTMConflictType::None)
+                            {
+                                OutConflict.Type = (UTMConflictType == EStaticUTMConflictType::ProtectionFootprint)
+                                    ? EPredictedExecutionConflictType::ProtectionFootprint
+                                    : EPredictedExecutionConflictType::Downwash;
+                                OutConflict.AgentA = ProposalA->MissionId;
+                                OutConflict.AgentB = ProposalB->MissionId;
+                                OutConflict.Cell = ProposalA->ProposedCell;
+                                return true;
+                            }
+                        }
                     }
                 }
             }
@@ -2808,8 +2844,46 @@ bool APathPlanningDemoActor::TryExecutionReplan(
         return false;
     }
 
-    TArray<int32> CandidateMissionIds;
-    CandidateMissionIds.Reserve(ExecutionStates.Num());
+    TSet<int32> CandidateMissionIdSet;
+
+    auto AreCurrentStartsCoupled =
+        [&](int32 MissionIdA, int32 MissionIdB) -> bool
+        {
+            if (MissionIdA == MissionIdB)
+            {
+                return false;
+            }
+
+            const FExecutionAgentState* StateA = ExecutionStates.Find(MissionIdA);
+            const FExecutionAgentState* StateB = ExecutionStates.Find(MissionIdB);
+            if (!StateA || !StateB || StateA->bFinished || StateB->bFinished)
+            {
+                return false;
+            }
+
+            if (StateA->LastObservedCell == StateB->LastObservedCell)
+            {
+                return true;
+            }
+
+            if (PlannerType != EPlannerType::LaCAMUTM)
+            {
+                return false;
+            }
+
+            const FDroneMissionConfig* MissionConfigA = ExecutionMissionConfigsByMissionId.Find(MissionIdA);
+            const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(MissionIdB);
+            if (!MissionConfigA || !MissionConfigB)
+            {
+                return false;
+            }
+
+            return HasStaticUTMConfigConflict(
+                StateA->LastObservedCell,
+                *MissionConfigA,
+                StateB->LastObservedCell,
+                *MissionConfigB);
+        };
 
     for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
     {
@@ -2821,8 +2895,61 @@ bool APathPlanningDemoActor::TryExecutionReplan(
 
         if (bGlobalReplan || RequestedMissionIds.Contains(State.MissionId))
         {
-            CandidateMissionIds.Add(State.MissionId);
+            CandidateMissionIdSet.Add(State.MissionId);
         }
+    }
+
+    if (!bGlobalReplan)
+    {
+        const int32 InitialLocalCandidateCount = CandidateMissionIdSet.Num();
+        bool bExpandedLocalComponent = true;
+
+        while (bExpandedLocalComponent)
+        {
+            bExpandedLocalComponent = false;
+
+            for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
+            {
+                const FExecutionAgentState& State = KVP.Value;
+                if (State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
+                {
+                    continue;
+                }
+
+                bool bCoupledWithCandidate = false;
+                for (const int32 CandidateMissionId : CandidateMissionIdSet)
+                {
+                    if (AreCurrentStartsCoupled(CandidateMissionId, State.MissionId))
+                    {
+                        bCoupledWithCandidate = true;
+                        break;
+                    }
+                }
+
+                if (bCoupledWithCandidate)
+                {
+                    CandidateMissionIdSet.Add(State.MissionId);
+                    bExpandedLocalComponent = true;
+                }
+            }
+        }
+
+        if (CandidateMissionIdSet.Num() > InitialLocalCandidateCount)
+        {
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[AlignmentReplan] local conflict component expanded from %d to %d missions"),
+                InitialLocalCandidateCount,
+                CandidateMissionIdSet.Num());
+        }
+    }
+
+    TArray<int32> CandidateMissionIds;
+    CandidateMissionIds.Reserve(CandidateMissionIdSet.Num());
+    for (const int32 CandidateMissionId : CandidateMissionIdSet)
+    {
+        CandidateMissionIds.Add(CandidateMissionId);
     }
 
     CandidateMissionIds.Sort();
@@ -2853,7 +2980,7 @@ bool APathPlanningDemoActor::TryExecutionReplan(
         for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
         {
             const FExecutionAgentState& State = KVP.Value;
-            if (State.bFinished || RequestedMissionIds.Contains(State.MissionId))
+            if (State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
             {
                 continue;
             }
