@@ -369,6 +369,7 @@ namespace LaCAMUE
         Config Starts;
         Config Goals;
         std::vector<FAgentProtectionProfile> Profiles;
+        std::vector<bool> StationaryAnchors;
     };
 
     struct FBlockedInterval
@@ -656,6 +657,14 @@ namespace LaCAMUE
         }
 
     private:
+        bool IsStationaryAnchor(int32 AgentIndex) const
+        {
+            return Instance != nullptr
+                && AgentIndex >= 0
+                && AgentIndex < static_cast<int32>(Instance->StationaryAnchors.size())
+                && Instance->StationaryAnchors[AgentIndex];
+        }
+
         bool ResolveConflictsForAssignedAgent(
             int32 AgentIndex,
             const Config& QFrom,
@@ -692,6 +701,24 @@ namespace LaCAMUE
 
         bool FuncPIBT(int32 AgentIndex, const Config& QFrom, Config& QTo, int32 NextTimeStep)
         {
+            if (IsStationaryAnchor(AgentIndex))
+            {
+                FVertex* NextVertex = QFrom[AgentIndex];
+                if (NoFlyZoneTable != nullptr && NoFlyZoneTable->IsBlockedAtTime(NextVertex->Cell, NextTimeStep))
+                {
+                    return false;
+                }
+
+                if (OccupiedNext[NextVertex->Id] != NoAgent && OccupiedNext[NextVertex->Id] != AgentIndex)
+                {
+                    return false;
+                }
+
+                OccupiedNext[NextVertex->Id] = AgentIndex;
+                QTo[AgentIndex] = NextVertex;
+                return ResolveConflictsForAssignedAgent(AgentIndex, QFrom, QTo, NextTimeStep);
+            }
+
             std::vector<int32> NeighborAgents;
             NeighborAgents.reserve(QFrom[AgentIndex]->Neighbors.size());
             for (FVertex* Neighbor : QFrom[AgentIndex]->Neighbors)
@@ -794,6 +821,11 @@ namespace LaCAMUE
                 }
 
                 const int32 BlockingAgent = OccupiedNow[NextVertex->Id];
+                if (BlockingAgent != NoAgent && IsStationaryAnchor(BlockingAgent) && BlockingAgent != AgentIndex)
+                {
+                    continue;
+                }
+
                 if (BlockingAgent != NoAgent && QTo[BlockingAgent] == QFrom[AgentIndex])
                 {
                     continue;
@@ -999,6 +1031,7 @@ namespace LaCAMUE
             if (BlockingAgent != NoAgent
                 && BlockingAgent != AgentIndex
                 && QTo[BlockingAgent] == nullptr
+                && !IsStationaryAnchor(BlockingAgent)
                 && IsSwapRequired(AgentIndex, BlockingAgent, QFrom[AgentIndex], QFrom[BlockingAgent])
                 && IsSwapPossible(QFrom[BlockingAgent], QFrom[AgentIndex]))
             {
@@ -1012,6 +1045,7 @@ namespace LaCAMUE
                     const int32 CandidateAgent = OccupiedNow[Neighbor->Id];
                     if (CandidateAgent != NoAgent
                         && TargetVertex != QFrom[CandidateAgent]
+                        && !IsStationaryAnchor(CandidateAgent)
                         && IsSwapRequired(CandidateAgent, AgentIndex, QFrom[AgentIndex], TargetVertex)
                         && IsSwapPossible(TargetVertex, QFrom[AgentIndex]))
                     {
@@ -1410,7 +1444,17 @@ namespace LaCAMUE
         {
             for (uint32 DepthIndex = 0; DepthIndex < LowLevelNode->Depth; ++DepthIndex)
             {
-                OutConfig[LowLevelNode->AgentIndices[DepthIndex]] = LowLevelNode->AssignedVertices[DepthIndex];
+                const int32 AgentIndex = LowLevelNode->AgentIndices[DepthIndex];
+                FVertex* AssignedVertex = LowLevelNode->AssignedVertices[DepthIndex];
+                if (AgentIndex >= 0
+                    && AgentIndex < static_cast<int32>(Instance->StationaryAnchors.size())
+                    && Instance->StationaryAnchors[AgentIndex]
+                    && AssignedVertex != HighLevelNode->Q[AgentIndex])
+                {
+                    return false;
+                }
+
+                OutConfig[AgentIndex] = AssignedVertex;
             }
 
             return PIBT.SetNewConfig(HighLevelNode->Q, OutConfig, HighLevelNode->Order, NextTimeStep);
@@ -1551,6 +1595,7 @@ bool FLaCAMUTMPlanner::PlanMissions(
     TArray<int32> MissionIds;
     MissionIds.Reserve(OrderedMissions.Num());
     Instance.Profiles.reserve(OrderedMissions.Num());
+    Instance.StationaryAnchors.reserve(OrderedMissions.Num());
 
     const auto BuildProfileFromMission =
         [](const FDroneMissionConfig& Mission) -> LaCAMUE::FAgentProtectionProfile
@@ -1682,6 +1727,7 @@ bool FLaCAMUTMPlanner::PlanMissions(
         Instance.Starts.push_back(StartVertex);
         Instance.Goals.push_back(GoalVertex);
         Instance.Profiles.push_back(BuildProfileFromMission(Mission));
+        Instance.StationaryAnchors.push_back(Mission.bStationaryAnchor);
         MissionIds.Add(Mission.MissionId);
     }
 

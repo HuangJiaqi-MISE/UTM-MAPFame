@@ -216,6 +216,7 @@ struct FExecutionAgentState
     FIntVector GoalCell = FIntVector::ZeroValue;
     FVector GoalWorld = FVector::ZeroVector;
     int32 ConsecutiveConflictHoldCount = 0;
+    int32 ConsecutiveSafetyGateHoldCount = 0;
     FString LastAlignmentAction;
 };
 
@@ -663,6 +664,21 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "0"))
     int32 MaxExecutionReplanCount = 8;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "0"))
+    int32 LocalReplanSpatialExpansionRadiusCells = 2;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "0"))
+    int32 LocalReplanLookaheadSteps = 5;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "1"))
+    int32 LocalReplanMaxExpansionRounds = 2;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
+    bool bEnableFinalSafetyGate = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment", meta = (ClampMin = "1"))
+    int32 FinalSafetyGateMaxHoldSteps = 3;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution Debug")
     bool bDrawExecutionCells = true;

@@ -1054,6 +1054,7 @@ void APathPlanningDemoActor::InitializeExecutionStates()
         State.GoalCell = PlannedCells.Last();
         State.GoalWorld = GridMap.CellToWorld(PlannedCells.Last());
         State.ConsecutiveConflictHoldCount = 0;
+        State.ConsecutiveSafetyGateHoldCount = 0;
         State.LastAlignmentAction = TEXT("Initialize");
 
         if (const FDroneMissionConfig* MissionConfig = ExecutionMissionConfigsByMissionId.Find(MissionId))
@@ -1531,6 +1532,339 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         }
     }
 
+    bool bStopExecutionForSafetyGate = false;
+
+    if (bEnableFinalSafetyGate && StepProposals.Num() > 1)
+    {
+        auto FindProposalPairConflict = [&](const FExecutionStepProposal& ProposalA, const FExecutionStepProposal& ProposalB, FPredictedExecutionConflict& OutConflict) -> bool
+            {
+                if (ProposalA.ProposedCell == ProposalB.ProposedCell)
+                {
+                    OutConflict.Type = EPredictedExecutionConflictType::Vertex;
+                    OutConflict.AgentA = ProposalA.MissionId;
+                    OutConflict.AgentB = ProposalB.MissionId;
+                    OutConflict.Cell = ProposalA.ProposedCell;
+                    return true;
+                }
+
+                const bool bEdgeConflict =
+                    (ProposalA.ObservedCell == ProposalB.ProposedCell) &&
+                    (ProposalB.ObservedCell == ProposalA.ProposedCell) &&
+                    (ProposalA.ProposedCell != ProposalB.ProposedCell);
+
+                if (bEdgeConflict)
+                {
+                    OutConflict.Type = EPredictedExecutionConflictType::Edge;
+                    OutConflict.AgentA = ProposalA.MissionId;
+                    OutConflict.AgentB = ProposalB.MissionId;
+                    OutConflict.Cell = ProposalA.ProposedCell;
+                    return true;
+                }
+
+                if (PlannerType == EPlannerType::LaCAMUTM)
+                {
+                    const FDroneMissionConfig* MissionConfigA = ExecutionMissionConfigsByMissionId.Find(ProposalA.MissionId);
+                    const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(ProposalB.MissionId);
+                    if (MissionConfigA && MissionConfigB)
+                    {
+                        const EStaticUTMConflictType UTMConflictType = GetStaticUTMConfigConflictType(
+                            ProposalA.ProposedCell,
+                            *MissionConfigA,
+                            ProposalB.ProposedCell,
+                            *MissionConfigB);
+
+                        if (UTMConflictType != EStaticUTMConflictType::None)
+                        {
+                            OutConflict.Type = (UTMConflictType == EStaticUTMConflictType::ProtectionFootprint)
+                                ? EPredictedExecutionConflictType::ProtectionFootprint
+                                : EPredictedExecutionConflictType::Downwash;
+                            OutConflict.AgentA = ProposalA.MissionId;
+                            OutConflict.AgentB = ProposalB.MissionId;
+                            OutConflict.Cell = ProposalA.ProposedCell;
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            };
+
+        auto CollectProposalConflictEndpoints = [&](TSet<int32>& OutMissionIds, FPredictedExecutionConflict& OutFirstConflict) -> bool
+            {
+                bool bFoundConflict = false;
+                for (int32 I = 0; I < MissionIds.Num(); ++I)
+                {
+                    const FExecutionStepProposal* ProposalA = StepProposals.Find(MissionIds[I]);
+                    if (!ProposalA)
+                    {
+                        continue;
+                    }
+
+                    for (int32 J = I + 1; J < MissionIds.Num(); ++J)
+                    {
+                        const FExecutionStepProposal* ProposalB = StepProposals.Find(MissionIds[J]);
+                        if (!ProposalB)
+                        {
+                            continue;
+                        }
+
+                        FPredictedExecutionConflict Conflict;
+                        if (!FindProposalPairConflict(*ProposalA, *ProposalB, Conflict))
+                        {
+                            continue;
+                        }
+
+                        if (!bFoundConflict)
+                        {
+                            OutFirstConflict = Conflict;
+                            bFoundConflict = true;
+                        }
+
+                        OutMissionIds.Add(Conflict.AgentA);
+                        OutMissionIds.Add(Conflict.AgentB);
+                    }
+                }
+
+                return bFoundConflict;
+            };
+
+        auto ApplySafetyGateHold = [&](const TSet<int32>& HoldMissionIds)
+            {
+                for (const int32 MissionId : HoldMissionIds)
+                {
+                    FExecutionStepProposal* Proposal = StepProposals.Find(MissionId);
+                    if (!Proposal)
+                    {
+                        continue;
+                    }
+
+                    Proposal->bValid = true;
+                    Proposal->bHeldForPredictedConflict = false;
+                    Proposal->bHeldForReplan = false;
+                    Proposal->bRequiresReplan = true;
+                    Proposal->FinalAction = EDiscreteAlignmentAction::HoldForSafetyGate;
+                    Proposal->ProposedPlanIndex = Proposal->ReferencePlanIndex;
+                    Proposal->ProposedCell = Proposal->ObservedCell;
+                    Proposal->ResolutionReason = TEXT("final safety gate hold before replanning");
+                }
+            };
+
+        FPredictedExecutionConflict GateConflict;
+        TSet<int32> SafetyGateMissionIds;
+        if (CollectProposalConflictEndpoints(SafetyGateMissionIds, GateConflict))
+        {
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[FinalSafetyGate] t=%d unsafe proposed %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); forcing %d missions to hold"),
+                CurrentExecutionTimeStep,
+                LexToString(GateConflict.Type),
+                GateConflict.AgentA,
+                GateConflict.AgentB,
+                GateConflict.Cell.X,
+                GateConflict.Cell.Y,
+                GateConflict.Cell.Z,
+                SafetyGateMissionIds.Num());
+
+            bool bHoldConfigurationSafe = false;
+            FPredictedExecutionConflict HoldConflict;
+            for (int32 Pass = 0; Pass < MissionIds.Num(); ++Pass)
+            {
+                ApplySafetyGateHold(SafetyGateMissionIds);
+
+                TSet<int32> RemainingConflictMissionIds;
+                FPredictedExecutionConflict RemainingConflict;
+                if (!CollectProposalConflictEndpoints(RemainingConflictMissionIds, RemainingConflict))
+                {
+                    bHoldConfigurationSafe = true;
+                    break;
+                }
+
+                bool bExpandedHoldSet = false;
+                const int32 PreviousHoldCount = SafetyGateMissionIds.Num();
+                for (const int32 MissionId : RemainingConflictMissionIds)
+                {
+                    if (!SafetyGateMissionIds.Contains(MissionId))
+                    {
+                        SafetyGateMissionIds.Add(MissionId);
+                        bExpandedHoldSet = true;
+                    }
+                }
+
+                if (bExpandedHoldSet)
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[FinalSafetyGate] t=%d hold set expanded from %d to %d missions due to remaining %s conflict between Mission %d and Mission %d"),
+                        CurrentExecutionTimeStep,
+                        PreviousHoldCount,
+                        SafetyGateMissionIds.Num(),
+                        LexToString(RemainingConflict.Type),
+                        RemainingConflict.AgentA,
+                        RemainingConflict.AgentB);
+                    continue;
+                }
+
+                HoldConflict = RemainingConflict;
+                break;
+            }
+
+            if (bHoldConfigurationSafe)
+            {
+                ApplySafetyGateHold(SafetyGateMissionIds);
+                for (const int32 MissionId : SafetyGateMissionIds)
+                {
+                    RequestedReplanMissionIds.Add(MissionId);
+                }
+
+                bool bForceGlobalSafetyGateReplan = false;
+                const int32 SafetyGateHoldBudget = FMath::Max(1, FinalSafetyGateMaxHoldSteps);
+                for (const int32 MissionId : SafetyGateMissionIds)
+                {
+                    const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+                    if (State && State->ConsecutiveSafetyGateHoldCount + 1 >= SafetyGateHoldBudget)
+                    {
+                        bForceGlobalSafetyGateReplan = true;
+                        UE_LOG(
+                            LogTemp,
+                            Warning,
+                            TEXT("[FinalSafetyGate] t=%d Mission %d reached safety-gate hold limit %d; upgrade to global replan"),
+                            CurrentExecutionTimeStep,
+                            MissionId,
+                            SafetyGateHoldBudget);
+                        break;
+                    }
+                }
+
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[FinalSafetyGate] t=%d hold fallback is safe for %d missions; trigger %s execution replan"),
+                    CurrentExecutionTimeStep,
+                    SafetyGateMissionIds.Num(),
+                    bForceGlobalSafetyGateReplan ? TEXT("global") : TEXT("configured"));
+
+                bool bSafetyGateReplanSucceeded = false;
+                TSet<int32> SafetyGateSuccessfulReplanMissionIds;
+                if (ExecutionReplanMode != EExecutionReplanMode::Disabled)
+                {
+                    const bool bUseGlobalReplan = bForceGlobalSafetyGateReplan || (ExecutionReplanMode == EExecutionReplanMode::GlobalUnfinished);
+                    bSafetyGateReplanSucceeded = TryExecutionReplan(SafetyGateMissionIds, bUseGlobalReplan, SafetyGateSuccessfulReplanMissionIds);
+
+                    if (!bSafetyGateReplanSucceeded && !bForceGlobalSafetyGateReplan && ExecutionReplanMode == EExecutionReplanMode::LocalConflictSet)
+                    {
+                        UE_LOG(
+                            LogTemp,
+                            Warning,
+                            TEXT("[FinalSafetyGate] t=%d local safety-gate replan failed; upgrade to global replan"),
+                            CurrentExecutionTimeStep);
+                        bSafetyGateReplanSucceeded = TryExecutionReplan(SafetyGateMissionIds, true, SafetyGateSuccessfulReplanMissionIds);
+                    }
+                }
+                else
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[FinalSafetyGate] t=%d execution replan disabled; committing safe hold only"),
+                        CurrentExecutionTimeStep);
+                }
+
+                if (bSafetyGateReplanSucceeded)
+                {
+                    bReplanSucceeded = true;
+                    for (const int32 MissionId : SafetyGateSuccessfulReplanMissionIds)
+                    {
+                        SuccessfulReplanMissionIds.Add(MissionId);
+                    }
+
+                    for (const int32 MissionId : MissionIds)
+                    {
+                        FExecutionStepProposal* Proposal = StepProposals.Find(MissionId);
+                        FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+                        if (!Proposal || !State || State->PlannedCells.Num() <= 0)
+                        {
+                            continue;
+                        }
+
+                        if (!SafetyGateMissionIds.Contains(MissionId) && !SafetyGateSuccessfulReplanMissionIds.Contains(MissionId))
+                        {
+                            continue;
+                        }
+
+                        Proposal->bValid = true;
+                        Proposal->bHeldForReplan = true;
+                        Proposal->bHeldForPredictedConflict = false;
+                        Proposal->bRequiresReplan = false;
+                        Proposal->FinalAction = EDiscreteAlignmentAction::HoldForReplan;
+                        Proposal->ReferencePlanIndex = FMath::Clamp(State->ExecutedPlanIndex, 0, State->PlannedCells.Num() - 1);
+                        Proposal->ProposedPlanIndex = SafetyGateSuccessfulReplanMissionIds.Contains(MissionId)
+                            ? FMath::Min(Proposal->ReferencePlanIndex + 1, State->PlannedCells.Num() - 1)
+                            : Proposal->ReferencePlanIndex;
+                        Proposal->ProposedCell = Proposal->ObservedCell;
+                        Proposal->ResolutionReason = SafetyGateSuccessfulReplanMissionIds.Contains(MissionId)
+                            ? TEXT("hold while applying safety-gate replanned trajectory")
+                            : TEXT("hold to synchronize with safety-gate replanned agents");
+                    }
+                    TSet<int32> FinalConflictMissionIds;
+                    FPredictedExecutionConflict FinalConflict;
+                    if (CollectProposalConflictEndpoints(FinalConflictMissionIds, FinalConflict))
+                    {
+                        UE_LOG(
+                            LogTemp,
+                            Error,
+                            TEXT("[FinalSafetyGate] t=%d final proposal remains unsafe after safety-gate replan: %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); mark execution failed instead of committing unsafe state"),
+                            CurrentExecutionTimeStep,
+                            LexToString(FinalConflict.Type),
+                            FinalConflict.AgentA,
+                            FinalConflict.AgentB,
+                            FinalConflict.Cell.X,
+                            FinalConflict.Cell.Y,
+                            FinalConflict.Cell.Z);
+                        bStopExecutionForSafetyGate = true;
+                    }
+
+                }
+                else if (bForceGlobalSafetyGateReplan)
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Error,
+                        TEXT("[FinalSafetyGate] t=%d global replan failed after safety-gate hold limit; mark execution failed instead of committing unsafe state"),
+                        CurrentExecutionTimeStep);
+                    bStopExecutionForSafetyGate = true;
+                }
+            }
+            else
+            {
+                UE_LOG(
+                    LogTemp,
+                    Error,
+                    TEXT("[FinalSafetyGate] t=%d hold fallback remains unsafe: %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); dirty-start recovery required but unavailable, mark execution failed"),
+                    CurrentExecutionTimeStep,
+                    LexToString(HoldConflict.Type),
+                    HoldConflict.AgentA,
+                    HoldConflict.AgentB,
+                    HoldConflict.Cell.X,
+                    HoldConflict.Cell.Y,
+                    HoldConflict.Cell.Z);
+                bStopExecutionForSafetyGate = true;
+            }
+        }
+    }
+
+    if (bStopExecutionForSafetyGate)
+    {
+        bExecutionRunning = false;
+        BuildExecutionSummary();
+        if (bLogExecutionSummary)
+        {
+            LogExecutionSummary();
+        }
+        return;
+    }
+
     bool bAnyActive = false;
 
     for (const int32 MissionId : MissionIds)
@@ -1570,6 +1904,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         }
         else if (Proposal->FinalAction == EDiscreteAlignmentAction::HoldForAlignment ||
             Proposal->FinalAction == EDiscreteAlignmentAction::HoldForPredictedConflict ||
+            Proposal->FinalAction == EDiscreteAlignmentAction::HoldForSafetyGate ||
             Proposal->FinalAction == EDiscreteAlignmentAction::HoldForReplan)
         {
             State->AlignmentHoldCount++;
@@ -1585,6 +1920,15 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             State->ConsecutiveConflictHoldCount = 0;
         }
 
+        if (Proposal->FinalAction == EDiscreteAlignmentAction::HoldForSafetyGate)
+        {
+            State->ConsecutiveSafetyGateHoldCount++;
+        }
+        else if (Proposal->FinalAction != EDiscreteAlignmentAction::HoldForReplan)
+        {
+            State->ConsecutiveSafetyGateHoldCount = 0;
+        }
+
         if (bReplanRequestedForState)
         {
             State->AlignmentReplanRequestCount++;
@@ -1595,6 +1939,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             State->AlignmentSuccessfulReplanCount++;
             State->bAlignmentLost = false;
             State->ConsecutiveConflictHoldCount = 0;
+            State->ConsecutiveSafetyGateHoldCount = 0;
         }
         else if ((Proposal->bRequiresReplan || Proposal->bInitialAlignmentInvalid || RequestedReplanMissionIds.Contains(MissionId)) &&
             !bReplanSucceeded)
@@ -2844,10 +3189,58 @@ bool APathPlanningDemoActor::TryExecutionReplan(
         return false;
     }
 
-    TSet<int32> CandidateMissionIdSet;
+    auto IsActiveMission = [&](int32 MissionId) -> bool
+        {
+            const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+            return State != nullptr && !State->bFinished;
+        };
 
-    auto AreCurrentStartsCoupled =
-        [&](int32 MissionIdA, int32 MissionIdB) -> bool
+    int32 ActiveRequestedMissionCount = 0;
+    for (const int32 MissionId : RequestedMissionIds)
+    {
+        if (IsActiveMission(MissionId))
+        {
+            ActiveRequestedMissionCount++;
+        }
+    }
+
+    auto GetPredictedCellAtOffset = [&](const FExecutionAgentState& State, int32 Offset) -> FIntVector
+        {
+            if (Offset <= 0 || State.PlannedCells.Num() <= 0)
+            {
+                return State.LastObservedCell;
+            }
+
+            const int32 BaseIndex = FMath::Clamp(State.ExecutedPlanIndex, 0, State.PlannedCells.Num() - 1);
+            return GetCellAtTime(State.PlannedCells, BaseIndex + Offset);
+        };
+
+    auto GetCellDistance = [](const FIntVector& A, const FIntVector& B) -> int32
+        {
+            return FMath::Max3(
+                FMath::Abs(A.X - B.X),
+                FMath::Abs(A.Y - B.Y),
+                FMath::Abs(A.Z - B.Z));
+        };
+
+    auto HaveStaticUTMCoupling = [&](const FIntVector& CellA, int32 MissionIdA, const FIntVector& CellB, int32 MissionIdB) -> bool
+        {
+            if (PlannerType != EPlannerType::LaCAMUTM)
+            {
+                return false;
+            }
+
+            const FDroneMissionConfig* MissionConfigA = ExecutionMissionConfigsByMissionId.Find(MissionIdA);
+            const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(MissionIdB);
+            if (!MissionConfigA || !MissionConfigB)
+            {
+                return false;
+            }
+
+            return HasStaticUTMConfigConflict(CellA, *MissionConfigA, CellB, *MissionConfigB);
+        };
+
+    auto AreCurrentStartsCoupled = [&](int32 MissionIdA, int32 MissionIdB) -> bool
         {
             if (MissionIdA == MissionIdB)
             {
@@ -2861,241 +3254,782 @@ bool APathPlanningDemoActor::TryExecutionReplan(
                 return false;
             }
 
-            if (StateA->LastObservedCell == StateB->LastObservedCell)
-            {
-                return true;
-            }
-
-            if (PlannerType != EPlannerType::LaCAMUTM)
-            {
-                return false;
-            }
-
-            const FDroneMissionConfig* MissionConfigA = ExecutionMissionConfigsByMissionId.Find(MissionIdA);
-            const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(MissionIdB);
-            if (!MissionConfigA || !MissionConfigB)
-            {
-                return false;
-            }
-
-            return HasStaticUTMConfigConflict(
-                StateA->LastObservedCell,
-                *MissionConfigA,
-                StateB->LastObservedCell,
-                *MissionConfigB);
+            return StateA->LastObservedCell == StateB->LastObservedCell
+                || HaveStaticUTMCoupling(StateA->LastObservedCell, MissionIdA, StateB->LastObservedCell, MissionIdB);
         };
 
-    for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
-    {
-        const FExecutionAgentState& State = KVP.Value;
-        if (State.bFinished)
+    auto AreWithinSpatialExpansion = [&](int32 MissionIdA, int32 MissionIdB, int32 SpatialRadiusCells) -> bool
         {
-            continue;
-        }
+            if (SpatialRadiusCells <= 0 || MissionIdA == MissionIdB)
+            {
+                return false;
+            }
 
-        if (bGlobalReplan || RequestedMissionIds.Contains(State.MissionId))
+            const FExecutionAgentState* StateA = ExecutionStates.Find(MissionIdA);
+            const FExecutionAgentState* StateB = ExecutionStates.Find(MissionIdB);
+            if (!StateA || !StateB || StateA->bFinished || StateB->bFinished)
+            {
+                return false;
+            }
+
+            return GetCellDistance(StateA->LastObservedCell, StateB->LastObservedCell) <= SpatialRadiusCells;
+        };
+
+    auto HaveFutureWindowCoupling = [&](int32 MissionIdA, int32 MissionIdB, int32 LookaheadSteps) -> bool
         {
-            CandidateMissionIdSet.Add(State.MissionId);
-        }
-    }
+            if (LookaheadSteps <= 0 || MissionIdA == MissionIdB)
+            {
+                return false;
+            }
 
-    if (!bGlobalReplan)
-    {
-        const int32 InitialLocalCandidateCount = CandidateMissionIdSet.Num();
-        bool bExpandedLocalComponent = true;
+            const FExecutionAgentState* StateA = ExecutionStates.Find(MissionIdA);
+            const FExecutionAgentState* StateB = ExecutionStates.Find(MissionIdB);
+            if (!StateA || !StateB || StateA->bFinished || StateB->bFinished)
+            {
+                return false;
+            }
 
-        while (bExpandedLocalComponent)
+            for (int32 Offset = 0; Offset <= LookaheadSteps; ++Offset)
+            {
+                const FIntVector CellA = GetPredictedCellAtOffset(*StateA, Offset);
+                const FIntVector CellB = GetPredictedCellAtOffset(*StateB, Offset);
+
+                if (CellA == CellB || HaveStaticUTMCoupling(CellA, MissionIdA, CellB, MissionIdB))
+                {
+                    return true;
+                }
+
+                if (Offset > 0)
+                {
+                    const FIntVector PrevA = GetPredictedCellAtOffset(*StateA, Offset - 1);
+                    const FIntVector PrevB = GetPredictedCellAtOffset(*StateB, Offset - 1);
+                    if (PrevA == CellB && PrevB == CellA && CellA != CellB)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        };
+
+    auto BuildCandidateSet = [&](int32 SpatialRadiusCells, int32 LookaheadSteps) -> TSet<int32>
         {
-            bExpandedLocalComponent = false;
+            TSet<int32> CandidateMissionIdSet;
 
             for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
             {
                 const FExecutionAgentState& State = KVP.Value;
-                if (State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
+                if (State.bFinished)
                 {
                     continue;
                 }
 
-                bool bCoupledWithCandidate = false;
-                for (const int32 CandidateMissionId : CandidateMissionIdSet)
+                if (bGlobalReplan || RequestedMissionIds.Contains(State.MissionId))
                 {
-                    if (AreCurrentStartsCoupled(CandidateMissionId, State.MissionId))
+                    CandidateMissionIdSet.Add(State.MissionId);
+                }
+            }
+
+            if (bGlobalReplan)
+            {
+                return CandidateMissionIdSet;
+            }
+
+            bool bExpandedLocalComponent = true;
+            while (bExpandedLocalComponent)
+            {
+                bExpandedLocalComponent = false;
+
+                for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
+                {
+                    const FExecutionAgentState& State = KVP.Value;
+                    if (State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
                     {
-                        bCoupledWithCandidate = true;
-                        break;
+                        continue;
+                    }
+
+                    bool bCoupledWithCandidate = false;
+                    for (const int32 CandidateMissionId : CandidateMissionIdSet)
+                    {
+                        if (AreCurrentStartsCoupled(CandidateMissionId, State.MissionId)
+                            || AreWithinSpatialExpansion(CandidateMissionId, State.MissionId, SpatialRadiusCells)
+                            || HaveFutureWindowCoupling(CandidateMissionId, State.MissionId, LookaheadSteps))
+                        {
+                            bCoupledWithCandidate = true;
+                            break;
+                        }
+                    }
+
+                    if (bCoupledWithCandidate)
+                    {
+                        CandidateMissionIdSet.Add(State.MissionId);
+                        bExpandedLocalComponent = true;
+                    }
+                }
+            }
+
+            return CandidateMissionIdSet;
+        };
+
+    auto TryPlanCandidateSet = [&](TSet<int32> CandidateMissionIdSet, int32 AttemptIndex, int32 AttemptCount, int32 SpatialRadiusCells, int32 LookaheadSteps) -> bool
+        {
+            const int32 MaxPostCheckTargetedRetries = bGlobalReplan ? 0 : 1;
+            int32 PostCheckTargetedRetryCount = 0;
+            TSet<int32> ForcedAnchorMissionIdSet;
+
+            while (true)
+            {
+            TArray<int32> CandidateMissionIds;
+            CandidateMissionIds.Reserve(CandidateMissionIdSet.Num());
+            for (const int32 CandidateMissionId : CandidateMissionIdSet)
+            {
+                CandidateMissionIds.Add(CandidateMissionId);
+            }
+
+            CandidateMissionIds.Sort();
+
+            if (CandidateMissionIds.Num() <= 0)
+            {
+                return false;
+            }
+
+            const int32 AnchorLookaheadSteps = FMath::Max(0, LookaheadSteps);
+            const int32 AnchorSpatialRadiusCells = FMath::Max(0, SpatialRadiusCells);
+
+            auto GetMissionInfluenceRadiusCells = [](const FDroneMissionConfig& Mission) -> int32
+                {
+                    return FMath::Max3(
+                        FMath::Max(Mission.ProtectionXYRadiusCells, Mission.DownwashXYRadiusCells),
+                        FMath::Max(Mission.ProtectionZUpCells, Mission.ProtectionZDownCells),
+                        Mission.DownwashZBelowCells);
+                };
+
+            auto IsAnchorRelevantToCandidates = [&](const FExecutionAgentState& AnchorState, const FDroneMissionConfig& AnchorConfig) -> bool
+                {
+                    const FIntVector AnchorCell = AnchorState.LastObservedCell;
+                    const int32 AnchorInfluenceRadius = GetMissionInfluenceRadiusCells(AnchorConfig);
+
+                    for (const int32 CandidateMissionId : CandidateMissionIds)
+                    {
+                        const FExecutionAgentState* CandidateState = ExecutionStates.Find(CandidateMissionId);
+                        const FDroneMissionConfig* CandidateConfig = ExecutionMissionConfigsByMissionId.Find(CandidateMissionId);
+                        if (!CandidateState || !CandidateConfig)
+                        {
+                            continue;
+                        }
+
+                        const int32 EffectiveRadiusCells = AnchorSpatialRadiusCells
+                            + AnchorInfluenceRadius
+                            + GetMissionInfluenceRadiusCells(*CandidateConfig);
+
+                        auto IsCandidateCellRelevant = [&](const FIntVector& CandidateCell) -> bool
+                            {
+                                return CandidateCell == AnchorCell
+                                    || HaveStaticUTMCoupling(CandidateCell, CandidateMissionId, AnchorCell, AnchorState.MissionId)
+                                    || (EffectiveRadiusCells > 0 && GetCellDistance(CandidateCell, AnchorCell) <= EffectiveRadiusCells);
+                            };
+
+                        for (int32 Offset = 0; Offset <= AnchorLookaheadSteps; ++Offset)
+                        {
+                            if (IsCandidateCellRelevant(GetPredictedCellAtOffset(*CandidateState, Offset)))
+                            {
+                                return true;
+                            }
+                        }
+
+                        if (IsCandidateCellRelevant(CandidateState->GoalCell))
+                        {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                };
+
+            TArray<int32> AnchorMissionIds;
+            TSet<int32> AnchorMissionIdSet;
+            if (PlannerType == EPlannerType::LaCAMUTM)
+            {
+                AnchorMissionIds.Reserve(ExecutionStates.Num());
+                for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
+                {
+                    const FExecutionAgentState& State = KVP.Value;
+                    if (!State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
+                    {
+                        continue;
+                    }
+
+                    const FDroneMissionConfig* MissionConfig = ExecutionMissionConfigsByMissionId.Find(State.MissionId);
+                    const bool bForcedAnchor = ForcedAnchorMissionIdSet.Contains(State.MissionId);
+                    if (!MissionConfig || (!bForcedAnchor && !IsAnchorRelevantToCandidates(State, *MissionConfig)))
+                    {
+                        continue;
+                    }
+
+                    AnchorMissionIds.Add(State.MissionId);
+                    AnchorMissionIdSet.Add(State.MissionId);
+                }
+            }
+
+            AnchorMissionIds.Sort();
+
+            FGridMap3D ReplanGrid = GridMap;
+
+            auto MarkBlockedCell = [&](const FIntVector& Cell)
+                {
+                    if (!ReplanGrid.IsInside(Cell.X, Cell.Y, Cell.Z) || ReplanGrid.Occupancy.Num() <= 0)
+                    {
+                        return;
+                    }
+
+                    const int32 Index = ReplanGrid.ToIndex(Cell.X, Cell.Y, Cell.Z);
+                    if (ReplanGrid.Occupancy.IsValidIndex(Index))
+                    {
+                        ReplanGrid.Occupancy[Index] = 1;
+                    }
+                };
+
+            if (!bGlobalReplan)
+            {
+                for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
+                {
+                    const FExecutionAgentState& State = KVP.Value;
+                    if (State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
+                    {
+                        continue;
+                    }
+
+                    MarkBlockedCell(State.LastObservedCell);
+                }
+            }
+
+            int32 StaticAnchorBlockedCellCount = 0;
+            TSet<FIntVector> StaticAnchorBlockedCells;
+            auto MarkStaticAnchorFootprint = [&](const FExecutionAgentState& AnchorState, const FDroneMissionConfig& AnchorConfig)
+                {
+                    const FIntVector AnchorCell = AnchorState.LastObservedCell;
+                    const int32 AnchorInfluenceRadius = GetMissionInfluenceRadiusCells(AnchorConfig);
+
+                    for (const int32 CandidateMissionId : CandidateMissionIds)
+                    {
+                        const FDroneMissionConfig* CandidateConfig = ExecutionMissionConfigsByMissionId.Find(CandidateMissionId);
+                        if (!CandidateConfig)
+                        {
+                            continue;
+                        }
+
+                        const int32 SearchRadiusCells = FMath::Max(0, AnchorInfluenceRadius + GetMissionInfluenceRadiusCells(*CandidateConfig));
+                        for (int32 Z = AnchorCell.Z - SearchRadiusCells; Z <= AnchorCell.Z + SearchRadiusCells; ++Z)
+                        {
+                            for (int32 Y = AnchorCell.Y - SearchRadiusCells; Y <= AnchorCell.Y + SearchRadiusCells; ++Y)
+                            {
+                                for (int32 X = AnchorCell.X - SearchRadiusCells; X <= AnchorCell.X + SearchRadiusCells; ++X)
+                                {
+                                    const FIntVector CandidateCell(X, Y, Z);
+                                    if (!ReplanGrid.IsInside(CandidateCell.X, CandidateCell.Y, CandidateCell.Z))
+                                    {
+                                        continue;
+                                    }
+
+                                    if (!HasStaticUTMConfigConflict(CandidateCell, *CandidateConfig, AnchorCell, AnchorConfig))
+                                    {
+                                        continue;
+                                    }
+
+                                    if (!StaticAnchorBlockedCells.Contains(CandidateCell))
+                                    {
+                                        StaticAnchorBlockedCells.Add(CandidateCell);
+                                        StaticAnchorBlockedCellCount++;
+                                    }
+                                    MarkBlockedCell(CandidateCell);
+                                }
+                            }
+                        }
+                    }
+                };
+
+            for (const int32 AnchorMissionId : AnchorMissionIds)
+            {
+                const FExecutionAgentState* AnchorState = ExecutionStates.Find(AnchorMissionId);
+                const FDroneMissionConfig* AnchorConfig = ExecutionMissionConfigsByMissionId.Find(AnchorMissionId);
+                if (!AnchorState || !AnchorConfig)
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[AlignmentReplan] missing static-anchor state or mission config for Mission %d"),
+                        AnchorMissionId);
+                    return false;
+                }
+
+                MarkStaticAnchorFootprint(*AnchorState, *AnchorConfig);
+            }
+
+            TArray<FDroneMissionConfig> ReplanMissions;
+            ReplanMissions.Reserve(CandidateMissionIds.Num());
+
+            for (const int32 MissionId : CandidateMissionIds)
+            {
+                const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+                const FDroneMissionConfig* MissionConfig = ExecutionMissionConfigsByMissionId.Find(MissionId);
+                if (!State || !MissionConfig)
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[AlignmentReplan] missing state or mission config for Mission %d"),
+                        MissionId);
+                    return false;
+                }
+
+                FDroneMissionConfig ReplanMission = *MissionConfig;
+                ReplanMission.StartWorld = GridMap.CellToWorld(State->LastObservedCell);
+                ReplanMission.bStationaryAnchor = false;
+                ReplanMissions.Add(ReplanMission);
+            }
+
+            TMap<int32, TArray<FVector>> ReplannedWorldPaths;
+            const bool bSuccess = PlanMultiAgentMissionsOnGrid(ReplanGrid, ReplanMissions, ReplannedWorldPaths);
+            if (!bSuccess)
+            {
+                if (bGlobalReplan)
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[AlignmentReplan] global replan failed for %d movable missions (Anchors=%d StaticBlocked=%d)"),
+                        CandidateMissionIds.Num(),
+                        AnchorMissionIds.Num(),
+                        StaticAnchorBlockedCellCount);
+                }
+                else
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[AlignmentReplan] local replan attempt %d/%d failed for %d movable missions (Anchors=%d StaticBlocked=%d K=%d W=%d)"),
+                        AttemptIndex + 1,
+                        AttemptCount,
+                        CandidateMissionIds.Num(),
+                        AnchorMissionIds.Num(),
+                        StaticAnchorBlockedCellCount,
+                        SpatialRadiusCells,
+                        LookaheadSteps);
+                }
+                return false;
+            }
+
+            TMap<int32, TArray<FIntVector>> ReplannedCellPathsByMission;
+            ReplannedCellPathsByMission.Reserve(ReplanMissions.Num());
+
+            for (const FDroneMissionConfig& Mission : ReplanMissions)
+            {
+                FExecutionAgentState* State = ExecutionStates.Find(Mission.MissionId);
+                const bool bStationaryAnchor = AnchorMissionIdSet.Contains(Mission.MissionId);
+                const TArray<FVector>* ReplannedWorldPath = ReplannedWorldPaths.Find(Mission.MissionId);
+                if (!State || (!bStationaryAnchor && (!ReplannedWorldPath || ReplannedWorldPath->Num() <= 0)))
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[AlignmentReplan] invalid replanned path for Mission %d"),
+                        Mission.MissionId);
+                    return false;
+                }
+
+                TArray<FIntVector> ReplannedCellPath;
+                if (bStationaryAnchor)
+                {
+                    ReplannedCellPath.Add(State->LastObservedCell);
+                }
+                else
+                {
+                    ReplannedCellPath = BuildCellPathFromWorldPath(*ReplannedWorldPath);
+                    if (ReplannedCellPath.Num() <= 0)
+                    {
+                        return false;
+                    }
+
+                    if (ReplannedCellPath[0] != State->LastObservedCell)
+                    {
+                        ReplannedCellPath.Insert(State->LastObservedCell, 0);
                     }
                 }
 
-                if (bCoupledWithCandidate)
+                ReplannedCellPathsByMission.Add(Mission.MissionId, MoveTemp(ReplannedCellPath));
+            }
+
+            auto ClampPostCheckCell = [&](const FIntVector& Cell) -> FIntVector
                 {
-                    CandidateMissionIdSet.Add(State.MissionId);
-                    bExpandedLocalComponent = true;
+                    return FIntVector(
+                        FMath::Clamp(Cell.X, 0, FMath::Max(0, GridMap.GridDim.X - 1)),
+                        FMath::Clamp(Cell.Y, 0, FMath::Max(0, GridMap.GridDim.Y - 1)),
+                        FMath::Clamp(Cell.Z, 0, FMath::Max(0, GridMap.GridDim.Z - 1)));
+                };
+
+            auto GetPostCheckCell = [&](const FExecutionAgentState& State, int32 Offset) -> FIntVector
+                {
+                    if (const TArray<FIntVector>* ReplannedCellPath = ReplannedCellPathsByMission.Find(State.MissionId))
+                    {
+                        return ClampPostCheckCell(GetCellAtTime(*ReplannedCellPath, Offset));
+                    }
+
+                    if (Offset <= 0 || State.PlannedCells.Num() <= 0)
+                    {
+                        return State.LastObservedCell;
+                    }
+
+                    const int32 BaseIndex = FMath::Clamp(State.ExecutedPlanIndex, 0, State.PlannedCells.Num() - 1);
+                    return ClampPostCheckCell(GetCellAtTime(State.PlannedCells, BaseIndex + Offset));
+                };
+
+            auto FindPostReplanConflict = [&](FPredictedExecutionConflict& OutConflict, int32& OutOffset) -> bool
+                {
+                    TArray<int32> ValidationMissionIds;
+                    ExecutionStates.GetKeys(ValidationMissionIds);
+                    ValidationMissionIds.Sort();
+
+                    const int32 PostCheckLookaheadSteps = FMath::Max(0, LookaheadSteps);
+                    for (int32 Offset = 0; Offset <= PostCheckLookaheadSteps; ++Offset)
+                    {
+                        for (int32 I = 0; I < ValidationMissionIds.Num(); ++I)
+                        {
+                            const FExecutionAgentState* StateA = ExecutionStates.Find(ValidationMissionIds[I]);
+                            if (!StateA || StateA->PlannedCells.Num() <= 0)
+                            {
+                                continue;
+                            }
+
+                            for (int32 J = I + 1; J < ValidationMissionIds.Num(); ++J)
+                            {
+                                const FExecutionAgentState* StateB = ExecutionStates.Find(ValidationMissionIds[J]);
+                                if (!StateB || StateB->PlannedCells.Num() <= 0)
+                                {
+                                    continue;
+                                }
+
+                                if (!CandidateMissionIdSet.Contains(StateA->MissionId)
+                                    && !CandidateMissionIdSet.Contains(StateB->MissionId))
+                                {
+                                    continue;
+                                }
+
+                                const FIntVector CellA = GetPostCheckCell(*StateA, Offset);
+                                const FIntVector CellB = GetPostCheckCell(*StateB, Offset);
+
+                                if (CellA == CellB)
+                                {
+                                    OutConflict.Type = EPredictedExecutionConflictType::Vertex;
+                                    OutConflict.AgentA = StateA->MissionId;
+                                    OutConflict.AgentB = StateB->MissionId;
+                                    OutConflict.Cell = CellA;
+                                    OutOffset = Offset;
+                                    return true;
+                                }
+
+                                if (Offset > 0)
+                                {
+                                    const FIntVector PrevA = GetPostCheckCell(*StateA, Offset - 1);
+                                    const FIntVector PrevB = GetPostCheckCell(*StateB, Offset - 1);
+                                    const bool bEdgeConflict =
+                                        (PrevA == CellB) &&
+                                        (PrevB == CellA) &&
+                                        (CellA != CellB);
+
+                                    if (bEdgeConflict)
+                                    {
+                                        OutConflict.Type = EPredictedExecutionConflictType::Edge;
+                                        OutConflict.AgentA = StateA->MissionId;
+                                        OutConflict.AgentB = StateB->MissionId;
+                                        OutConflict.Cell = CellA;
+                                        OutOffset = Offset;
+                                        return true;
+                                    }
+                                }
+
+                                if (PlannerType == EPlannerType::LaCAMUTM)
+                                {
+                                    const FDroneMissionConfig* MissionConfigA = ExecutionMissionConfigsByMissionId.Find(StateA->MissionId);
+                                    const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(StateB->MissionId);
+                                    if (MissionConfigA && MissionConfigB)
+                                    {
+                                        const EStaticUTMConflictType UTMConflictType = GetStaticUTMConfigConflictType(
+                                            CellA,
+                                            *MissionConfigA,
+                                            CellB,
+                                            *MissionConfigB);
+
+                                        if (UTMConflictType != EStaticUTMConflictType::None)
+                                        {
+                                            OutConflict.Type = (UTMConflictType == EStaticUTMConflictType::ProtectionFootprint)
+                                                ? EPredictedExecutionConflictType::ProtectionFootprint
+                                                : EPredictedExecutionConflictType::Downwash;
+                                            OutConflict.AgentA = StateA->MissionId;
+                                            OutConflict.AgentB = StateB->MissionId;
+                                            OutConflict.Cell = CellA;
+                                            OutOffset = Offset;
+                                            return true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return false;
+                };
+
+            FPredictedExecutionConflict PostCheckConflict;
+            int32 PostCheckOffset = 0;
+            if (FindPostReplanConflict(PostCheckConflict, PostCheckOffset))
+            {
+                if (bGlobalReplan)
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[AlignmentReplan] global replan post-check failed: predicted %s conflict between Mission %d and Mission %d at +%d Cell=(%d,%d,%d) (Movable=%d Anchors=%d StaticBlocked=%d)"),
+                        LexToString(PostCheckConflict.Type),
+                        PostCheckConflict.AgentA,
+                        PostCheckConflict.AgentB,
+                        PostCheckOffset,
+                        PostCheckConflict.Cell.X,
+                        PostCheckConflict.Cell.Y,
+                        PostCheckConflict.Cell.Z,
+                        CandidateMissionIds.Num(),
+                        AnchorMissionIds.Num(),
+                        StaticAnchorBlockedCellCount);
                 }
+                else
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[AlignmentReplan] local replan attempt %d/%d post-check failed: predicted %s conflict between Mission %d and Mission %d at +%d Cell=(%d,%d,%d) (Movable=%d Anchors=%d StaticBlocked=%d K=%d W=%d)"),
+                        AttemptIndex + 1,
+                        AttemptCount,
+                        LexToString(PostCheckConflict.Type),
+                        PostCheckConflict.AgentA,
+                        PostCheckConflict.AgentB,
+                        PostCheckOffset,
+                        PostCheckConflict.Cell.X,
+                        PostCheckConflict.Cell.Y,
+                        PostCheckConflict.Cell.Z,
+                        CandidateMissionIds.Num(),
+                        AnchorMissionIds.Num(),
+                        StaticAnchorBlockedCellCount,
+                        SpatialRadiusCells,
+                        LookaheadSteps);
+                }
+                const int32 PreviousMovableCount = CandidateMissionIds.Num();
+                const int32 PreviousForcedAnchorCount = ForcedAnchorMissionIdSet.Num();
+                bool bTargetedRetryExpanded = false;
+
+                auto AddPostCheckRetryMission = [&](int32 MissionId)
+                    {
+                        if (IsActiveMission(MissionId))
+                        {
+                            if (!CandidateMissionIdSet.Contains(MissionId))
+                            {
+                                CandidateMissionIdSet.Add(MissionId);
+                                bTargetedRetryExpanded = true;
+                            }
+                            return;
+                        }
+
+                        const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+                        if (PlannerType == EPlannerType::LaCAMUTM
+                            && State
+                            && State->bFinished
+                            && !ForcedAnchorMissionIdSet.Contains(MissionId))
+                        {
+                            ForcedAnchorMissionIdSet.Add(MissionId);
+                            bTargetedRetryExpanded = true;
+                        }
+                    };
+
+                if (PostCheckTargetedRetryCount < MaxPostCheckTargetedRetries)
+                {
+                    AddPostCheckRetryMission(PostCheckConflict.AgentA);
+                    AddPostCheckRetryMission(PostCheckConflict.AgentB);
+
+                    bool bExpandedTargetedComponent = true;
+                    while (bTargetedRetryExpanded && bExpandedTargetedComponent)
+                    {
+                        bExpandedTargetedComponent = false;
+                        for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
+                        {
+                            const FExecutionAgentState& State = KVP.Value;
+                            if (State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
+                            {
+                                continue;
+                            }
+
+                            bool bCoupledWithCandidate = false;
+                            for (const int32 CandidateMissionId : CandidateMissionIdSet)
+                            {
+                                if (AreCurrentStartsCoupled(CandidateMissionId, State.MissionId)
+                                    || AreWithinSpatialExpansion(CandidateMissionId, State.MissionId, SpatialRadiusCells)
+                                    || HaveFutureWindowCoupling(CandidateMissionId, State.MissionId, LookaheadSteps))
+                                {
+                                    bCoupledWithCandidate = true;
+                                    break;
+                                }
+                            }
+
+                            if (bCoupledWithCandidate)
+                            {
+                                CandidateMissionIdSet.Add(State.MissionId);
+                                bExpandedTargetedComponent = true;
+                            }
+                        }
+                    }
+
+                    if (bTargetedRetryExpanded)
+                    {
+                        PostCheckTargetedRetryCount++;
+                        UE_LOG(
+                            LogTemp,
+                            Warning,
+                            TEXT("[AlignmentReplan] local post-check targeted retry %d/%d after %s conflict between Mission %d and Mission %d: movable %d->%d forced anchors %d->%d (K=%d W=%d)"),
+                            PostCheckTargetedRetryCount,
+                            MaxPostCheckTargetedRetries,
+                            LexToString(PostCheckConflict.Type),
+                            PostCheckConflict.AgentA,
+                            PostCheckConflict.AgentB,
+                            PreviousMovableCount,
+                            CandidateMissionIdSet.Num(),
+                            PreviousForcedAnchorCount,
+                            ForcedAnchorMissionIdSet.Num(),
+                            SpatialRadiusCells,
+                            LookaheadSteps);
+                        continue;
+                    }
+                }
+
+                return false;
             }
-        }
 
-        if (CandidateMissionIdSet.Num() > InitialLocalCandidateCount)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentReplan] local conflict component expanded from %d to %d missions"),
-                InitialLocalCandidateCount,
-                CandidateMissionIdSet.Num());
-        }
-    }
-
-    TArray<int32> CandidateMissionIds;
-    CandidateMissionIds.Reserve(CandidateMissionIdSet.Num());
-    for (const int32 CandidateMissionId : CandidateMissionIdSet)
-    {
-        CandidateMissionIds.Add(CandidateMissionId);
-    }
-
-    CandidateMissionIds.Sort();
-
-    if (CandidateMissionIds.Num() <= 0)
-    {
-        return false;
-    }
-
-    FGridMap3D ReplanGrid = GridMap;
-
-    auto MarkBlockedCell = [&](const FIntVector& Cell)
-        {
-            if (!ReplanGrid.IsInside(Cell.X, Cell.Y, Cell.Z) || ReplanGrid.Occupancy.Num() <= 0)
+            for (const int32 MissionId : CandidateMissionIds)
             {
-                return;
+                FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+                const FDroneMissionConfig* MissionConfig = ExecutionMissionConfigsByMissionId.Find(MissionId);
+                const TArray<FIntVector>* ReplannedCellPath = ReplannedCellPathsByMission.Find(MissionId);
+                if (!State || !MissionConfig || !ReplannedCellPath || ReplannedCellPath->Num() <= 0)
+                {
+                    return false;
+                }
+
+                TArray<FIntVector> TimelineCells = State->ActualCells;
+                if (TimelineCells.Num() <= 0 || TimelineCells.Last() != State->LastObservedCell)
+                {
+                    TimelineCells.Add(State->LastObservedCell);
+                }
+
+                // Reserve the current execution step for the replan hold itself.
+                TimelineCells.Add(State->LastObservedCell);
+
+                for (int32 Index = 1; Index < ReplannedCellPath->Num(); ++Index)
+                {
+                    TimelineCells.Add((*ReplannedCellPath)[Index]);
+                }
+
+                TArray<FVector> TimelineWorld;
+                TimelineWorld.Reserve(TimelineCells.Num());
+                for (const FIntVector& Cell : TimelineCells)
+                {
+                    TimelineWorld.Add(GridMap.CellToWorld(Cell));
+                }
+
+                State->PlannedCells = TimelineCells;
+                State->ExecutedPlanIndex = FMath::Max(0, State->ActualCells.Num() - 1);
+                State->GoalCell = ReplannedCellPath->Last();
+                State->GoalWorld = MissionConfig->GoalWorld;
+                State->ConsecutiveConflictHoldCount = 0;
+                State->bAlignmentLost = false;
+
+                PlannedCellPathsByMission.Add(MissionId, TimelineCells);
+                LastPlannedPathsByMission.Add(MissionId, TimelineWorld);
+                OutReplannedMissionIds.Add(MissionId);
             }
 
-            const int32 Index = ReplanGrid.ToIndex(Cell.X, Cell.Y, Cell.Z);
-            if (ReplanGrid.Occupancy.IsValidIndex(Index))
+            TotalExecutionReplanCount++;
+
+            if (bGlobalReplan)
             {
-                ReplanGrid.Occupancy[Index] = 1;
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[AlignmentReplan] global replan succeeded for %d movable missions at t=%d (Total=%d, Anchors=%d StaticBlocked=%d)"),
+                    OutReplannedMissionIds.Num(),
+                    CurrentExecutionTimeStep,
+                    TotalExecutionReplanCount,
+                    AnchorMissionIds.Num(),
+                    StaticAnchorBlockedCellCount);
+            }
+            else
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[AlignmentReplan] local replan succeeded for %d movable missions at t=%d (Total=%d, Attempt=%d/%d, Anchors=%d StaticBlocked=%d K=%d W=%d)"),
+                    OutReplannedMissionIds.Num(),
+                    CurrentExecutionTimeStep,
+                    TotalExecutionReplanCount,
+                    AttemptIndex + 1,
+                    AttemptCount,
+                    AnchorMissionIds.Num(),
+                    StaticAnchorBlockedCellCount,
+                    SpatialRadiusCells,
+                    LookaheadSteps);
+            }
+
+            return OutReplannedMissionIds.Num() > 0;
             }
         };
 
-    if (!bGlobalReplan)
+    const int32 AttemptCount = bGlobalReplan
+        ? 1
+        : FMath::Max(1, LocalReplanMaxExpansionRounds);
+    const int32 BaseSpatialRadiusCells = FMath::Max(0, LocalReplanSpatialExpansionRadiusCells);
+    const int32 BaseLookaheadSteps = FMath::Max(0, LocalReplanLookaheadSteps);
+
+    for (int32 AttemptIndex = 0; AttemptIndex < AttemptCount; ++AttemptIndex)
     {
-        for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
-        {
-            const FExecutionAgentState& State = KVP.Value;
-            if (State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
-            {
-                continue;
-            }
+        const int32 SpatialRadiusCells = bGlobalReplan
+            ? BaseSpatialRadiusCells
+            : BaseSpatialRadiusCells * (AttemptIndex + 1);
+        const int32 LookaheadSteps = bGlobalReplan
+            ? BaseLookaheadSteps
+            : BaseLookaheadSteps * (AttemptIndex + 1);
 
-            MarkBlockedCell(State.LastObservedCell);
-        }
-    }
+        TSet<int32> CandidateMissionIdSet = BuildCandidateSet(SpatialRadiusCells, LookaheadSteps);
 
-    TArray<FDroneMissionConfig> ReplanMissions;
-    ReplanMissions.Reserve(CandidateMissionIds.Num());
-
-    for (const int32 MissionId : CandidateMissionIds)
-    {
-        const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-        const FDroneMissionConfig* MissionConfig = ExecutionMissionConfigsByMissionId.Find(MissionId);
-        if (!State || !MissionConfig)
+        if (!bGlobalReplan && CandidateMissionIdSet.Num() > ActiveRequestedMissionCount)
         {
             UE_LOG(
                 LogTemp,
                 Warning,
-                TEXT("[AlignmentReplan] missing state or mission config for Mission %d"),
-                MissionId);
-            return false;
+                TEXT("[AlignmentReplan] local conflict component attempt %d/%d expanded from %d to %d missions (K=%d W=%d)"),
+                AttemptIndex + 1,
+                AttemptCount,
+                ActiveRequestedMissionCount,
+                CandidateMissionIdSet.Num(),
+                SpatialRadiusCells,
+                LookaheadSteps);
         }
 
-        FDroneMissionConfig ReplanMission = *MissionConfig;
-        ReplanMission.StartWorld = GridMap.CellToWorld(State->LastObservedCell);
-        ReplanMissions.Add(ReplanMission);
+        if (TryPlanCandidateSet(CandidateMissionIdSet, AttemptIndex, AttemptCount, SpatialRadiusCells, LookaheadSteps))
+        {
+            return true;
+        }
+
+        OutReplannedMissionIds.Reset();
     }
 
-    TMap<int32, TArray<FVector>> ReplannedWorldPaths;
-    const bool bSuccess = PlanMultiAgentMissionsOnGrid(ReplanGrid, ReplanMissions, ReplannedWorldPaths);
-    if (!bSuccess)
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[AlignmentReplan] %s replan failed for %d missions"),
-            bGlobalReplan ? TEXT("global") : TEXT("local"),
-            ReplanMissions.Num());
-        return false;
-    }
-
-    for (const FDroneMissionConfig& Mission : ReplanMissions)
-    {
-        FExecutionAgentState* State = ExecutionStates.Find(Mission.MissionId);
-        const TArray<FVector>* ReplannedWorldPath = ReplannedWorldPaths.Find(Mission.MissionId);
-        if (!State || !ReplannedWorldPath || ReplannedWorldPath->Num() <= 0)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentReplan] invalid replanned path for Mission %d"),
-                Mission.MissionId);
-            return false;
-        }
-
-        TArray<FIntVector> ReplannedCellPath = BuildCellPathFromWorldPath(*ReplannedWorldPath);
-        if (ReplannedCellPath.Num() <= 0)
-        {
-            return false;
-        }
-
-        if (ReplannedCellPath[0] != State->LastObservedCell)
-        {
-            ReplannedCellPath.Insert(State->LastObservedCell, 0);
-        }
-
-        TArray<FIntVector> TimelineCells = State->ActualCells;
-        if (TimelineCells.Num() <= 0 || TimelineCells.Last() != State->LastObservedCell)
-        {
-            TimelineCells.Add(State->LastObservedCell);
-        }
-
-        // Reserve the current execution step for the replan hold itself.
-        TimelineCells.Add(State->LastObservedCell);
-
-        for (int32 Index = 1; Index < ReplannedCellPath.Num(); ++Index)
-        {
-            TimelineCells.Add(ReplannedCellPath[Index]);
-        }
-
-        TArray<FVector> TimelineWorld;
-        TimelineWorld.Reserve(TimelineCells.Num());
-        for (const FIntVector& Cell : TimelineCells)
-        {
-            TimelineWorld.Add(GridMap.CellToWorld(Cell));
-        }
-
-        State->PlannedCells = TimelineCells;
-        State->ExecutedPlanIndex = FMath::Max(0, State->ActualCells.Num() - 1);
-        State->GoalCell = ReplannedCellPath.Last();
-        State->GoalWorld = Mission.GoalWorld;
-        State->ConsecutiveConflictHoldCount = 0;
-        State->bAlignmentLost = false;
-
-        PlannedCellPathsByMission.Add(Mission.MissionId, TimelineCells);
-        LastPlannedPathsByMission.Add(Mission.MissionId, TimelineWorld);
-        OutReplannedMissionIds.Add(Mission.MissionId);
-    }
-
-    TotalExecutionReplanCount++;
-
-    UE_LOG(
-        LogTemp,
-        Warning,
-        TEXT("[AlignmentReplan] %s replan succeeded for %d missions at t=%d (Total=%d)"),
-        bGlobalReplan ? TEXT("global") : TEXT("local"),
-        OutReplannedMissionIds.Num(),
-        CurrentExecutionTimeStep,
-        TotalExecutionReplanCount);
-
-    return OutReplannedMissionIds.Num() > 0;
+    return false;
 }
-
 bool APathPlanningDemoActor::IsMultiAgentPlannerType() const
 {
     return PlannerType == EPlannerType::CBS

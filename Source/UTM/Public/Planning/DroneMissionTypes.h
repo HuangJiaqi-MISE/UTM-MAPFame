@@ -38,6 +38,8 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UTM Safety", meta = (ClampMin = "0"))
     int32 DownwashZBelowCells = 0;
 
+    // Internal execution-replan hint: this mission should remain fixed at StartWorld.
+    bool bStationaryAnchor = false;
     /*
     
     Àý×Ó£º Î»ÖÃ£º(x, y, z)

@@ -141,6 +141,8 @@ const TCHAR* FDiscreteAlignmentManager::LexToString(EDiscreteAlignmentAction Act
         return TEXT("HoldForAlignment");
     case EDiscreteAlignmentAction::HoldForPredictedConflict:
         return TEXT("HoldForPredictedConflict");
+    case EDiscreteAlignmentAction::HoldForSafetyGate:
+        return TEXT("HoldForSafetyGate");
     case EDiscreteAlignmentAction::HoldForReplan:
         return TEXT("HoldForReplan");
     case EDiscreteAlignmentAction::GoalHold:
