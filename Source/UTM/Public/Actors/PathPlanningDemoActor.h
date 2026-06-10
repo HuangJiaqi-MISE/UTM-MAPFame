@@ -119,6 +119,30 @@ struct FPlanningTimingStats
 };
 
 USTRUCT(BlueprintType)
+struct FExecutionReplanTimingStats
+{
+    GENERATED_BODY()
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Replan Timing")
+    int32 LocalAttemptCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Replan Timing")
+    double LocalTotalTimeMs = 0.0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Replan Timing")
+    double LocalMaxTimeMs = 0.0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Replan Timing")
+    int32 GlobalAttemptCount = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Replan Timing")
+    double GlobalTotalTimeMs = 0.0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution Replan Timing")
+    double GlobalMaxTimeMs = 0.0;
+};
+
+USTRUCT(BlueprintType)
 struct FNoFlyZonePathViolation
 {
     GENERATED_BODY()
@@ -535,6 +559,7 @@ private:
     bool bExecutionRunning = false;
     int32 CurrentExecutionTimeStep = 0;
     int32 TotalExecutionReplanCount = 0;
+    FExecutionReplanTimingStats ExecutionReplanTimingStats;
     float ExecutionAccumulator = 0.f;
 
 public:

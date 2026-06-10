@@ -21,6 +21,7 @@
 #include "Engine/StaticMeshActor.h"
 #include "Dom/JsonObject.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/ScopeExit.h"
 
 // 障碍物建筑构建
 #include "Components/StaticMeshComponent.h"
@@ -1004,6 +1005,7 @@ void APathPlanningDemoActor::ResetExecutionCache()
     ExecutionAccumulator = 0.f;
     CurrentExecutionTimeStep = 0;
     TotalExecutionReplanCount = 0;
+    ExecutionReplanTimingStats = FExecutionReplanTimingStats();
     bExecutionRunning = false;
 
     LastExecutionSummary = FExecutionSummary();
@@ -1028,6 +1030,7 @@ void APathPlanningDemoActor::InitializeExecutionStates()
     ExecutionAccumulator = 0.f;
     CurrentExecutionTimeStep = 0;
     TotalExecutionReplanCount = 0;
+    ExecutionReplanTimingStats = FExecutionReplanTimingStats();
     bExecutionRunning = false;
 
     for (const TPair<int32, TArray<FIntVector>>& KVP : PlannedCellPathsByMission)
@@ -2483,6 +2486,13 @@ FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
     const FString MapTypeName = GetCityLayoutTypeName();
     const bool bNoFlyValidationClear =
         !bValidatePathsAgainstNoFlyZones || LastNoFlyZonePathValidation.TotalViolationCount <= 0;
+    const int32 ExecutionReplanAttemptCount =
+        ExecutionReplanTimingStats.LocalAttemptCount + ExecutionReplanTimingStats.GlobalAttemptCount;
+    const double ExecutionReplanTotalTimeMs =
+        ExecutionReplanTimingStats.LocalTotalTimeMs + ExecutionReplanTimingStats.GlobalTotalTimeMs;
+    const double ExecutionReplanMaxTimeMs = FMath::Max(
+        ExecutionReplanTimingStats.LocalMaxTimeMs,
+        ExecutionReplanTimingStats.GlobalMaxTimeMs);
 
     TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
     Root->SetStringField(TEXT("run_id"), RunId);
@@ -2527,7 +2537,7 @@ FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
     Root->SetNumberField(TEXT("planning_input_preparation_time_ms"), LastPlanningStats.InputPreparationTimeMs);
     Root->SetNumberField(TEXT("planning_solve_time_ms"), LastPlanningStats.SolveTimeMs);
     Root->SetNumberField(TEXT("planning_post_process_time_ms"), LastPlanningStats.PostProcessTimeMs);
-    Root->SetNumberField(TEXT("planning_total_time_ms"), LastPlanningStats.TotalTimeMs);
+    Root->SetNumberField(TEXT("initial_planning_wall_time_ms"), LastPlanningStats.TotalTimeMs);
 
     Root->SetNumberField(TEXT("no_fly_enabled_zone_count"), GetEnabledNoFlyZoneCount());
     Root->SetNumberField(TEXT("no_fly_checked_mission_count"), LastNoFlyZonePathValidation.CheckedMissionCount);
@@ -2558,6 +2568,15 @@ FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
     Root->SetNumberField(TEXT("alignment_replan_request_count"), LastExecutionSummary.AlignmentReplanRequestCount);
     Root->SetNumberField(TEXT("alignment_successful_replan_count"), LastExecutionSummary.AlignmentSuccessfulReplanCount);
     Root->SetNumberField(TEXT("applied_execution_replans"), TotalExecutionReplanCount);
+    Root->SetNumberField(TEXT("execution_replan_attempt_count"), ExecutionReplanAttemptCount);
+    Root->SetNumberField(TEXT("execution_replan_total_time_ms"), ExecutionReplanTotalTimeMs);
+    Root->SetNumberField(TEXT("execution_replan_max_time_ms"), ExecutionReplanMaxTimeMs);
+    Root->SetNumberField(TEXT("execution_replan_local_attempt_count"), ExecutionReplanTimingStats.LocalAttemptCount);
+    Root->SetNumberField(TEXT("execution_replan_local_total_time_ms"), ExecutionReplanTimingStats.LocalTotalTimeMs);
+    Root->SetNumberField(TEXT("execution_replan_local_max_time_ms"), ExecutionReplanTimingStats.LocalMaxTimeMs);
+    Root->SetNumberField(TEXT("execution_replan_global_attempt_count"), ExecutionReplanTimingStats.GlobalAttemptCount);
+    Root->SetNumberField(TEXT("execution_replan_global_total_time_ms"), ExecutionReplanTimingStats.GlobalTotalTimeMs);
+    Root->SetNumberField(TEXT("execution_replan_global_max_time_ms"), ExecutionReplanTimingStats.GlobalMaxTimeMs);
 
     FString JsonString;
     const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
@@ -3374,6 +3393,24 @@ bool APathPlanningDemoActor::TryExecutionReplan(
 
     auto TryPlanCandidateSet = [&](TSet<int32> CandidateMissionIdSet, int32 AttemptIndex, int32 AttemptCount, int32 SpatialRadiusCells, int32 LookaheadSteps) -> bool
         {
+            const double AttemptStartSeconds = FPlatformTime::Seconds();
+            ON_SCOPE_EXIT
+            {
+                const double AttemptTimeMs = (FPlatformTime::Seconds() - AttemptStartSeconds) * 1000.0;
+                if (bGlobalReplan)
+                {
+                    ExecutionReplanTimingStats.GlobalAttemptCount++;
+                    ExecutionReplanTimingStats.GlobalTotalTimeMs += AttemptTimeMs;
+                    ExecutionReplanTimingStats.GlobalMaxTimeMs = FMath::Max(ExecutionReplanTimingStats.GlobalMaxTimeMs, AttemptTimeMs);
+                }
+                else
+                {
+                    ExecutionReplanTimingStats.LocalAttemptCount++;
+                    ExecutionReplanTimingStats.LocalTotalTimeMs += AttemptTimeMs;
+                    ExecutionReplanTimingStats.LocalMaxTimeMs = FMath::Max(ExecutionReplanTimingStats.LocalMaxTimeMs, AttemptTimeMs);
+                }
+            };
+
             const int32 MaxPostCheckTargetedRetries = bGlobalReplan ? 0 : 1;
             int32 PostCheckTargetedRetryCount = 0;
             TSet<int32> ForcedAnchorMissionIdSet;
