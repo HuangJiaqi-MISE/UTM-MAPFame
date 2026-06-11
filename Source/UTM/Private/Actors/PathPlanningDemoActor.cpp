@@ -1950,20 +1950,23 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             State->bAlignmentLost = true;
         }
 
-        if (Proposal->bDelayRequested && bLogExecutionDelay)
+        if (Proposal->bDelayRequested)
         {
             State->TotalDelaySteps++;
 
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[ExecutionDelay] t=%d Mission=%d stay at Cell=(%d,%d,%d)"),
-                CurrentExecutionTimeStep,
-                State->MissionId,
-                Proposal->ObservedCell.X,
-                Proposal->ObservedCell.Y,
-                Proposal->ObservedCell.Z
-            );
+            if (bLogExecutionDelay)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[ExecutionDelay] t=%d Mission=%d stay at Cell=(%d,%d,%d)"),
+                    CurrentExecutionTimeStep,
+                    State->MissionId,
+                    Proposal->ObservedCell.X,
+                    Proposal->ObservedCell.Y,
+                    Proposal->ObservedCell.Z
+                );
+            }
         }
 
         if (bLogAlignmentEvents && Proposal->FinalAction != EDiscreteAlignmentAction::FollowPlan)
