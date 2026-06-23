@@ -58,6 +58,15 @@ python visualize_policy.py configs\crossing.yaml --model-dir models\crossing --o
 
 The visualization renders one XY grid per Z layer. Gray cells are static obstacles, red translucent areas are active no-fly zones, circles are drones, and stars are mission goals.
 
+For multi-scenario and staged larger-scale training, use the scripts in `curriculum/`:
+
+```powershell
+python curriculum\generate_scenarios.py --agents 8 --count 100 --out-dir configs\generated\train_8
+python curriculum\pretrain_bc_multi.py --scenario-dir configs\generated\train_8 --init-model-dir models\crossing_attention_stable --model-dir models\curriculum_8_bc --updates 20000
+python curriculum\train_mappo_multi.py --scenario-dir configs\generated\train_8 --init-model-dir models\curriculum_8_bc --model-dir models\curriculum_8 --timesteps 1000000
+python curriculum\evaluate_scenarios.py --scenario-dir configs\generated\train_8 --model-dir models\curriculum_8
+```
+
 The main class is `utm_mappo.env.UTMMAPFEnv`. It implements the PettingZoo `ParallelEnv` interface and can be wrapped by SuperSuit for MAPPO training.
 
 The training entry point is `train_mappo.py`. It uses a discrete MAPPO implementation with:
