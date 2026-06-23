@@ -95,7 +95,7 @@ def prioritized_shortest_path_actions(
 
 def _dynamic_priority_key(
     env: UTMMAPFEnv, agent: str, active_count: int
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int, int]:
     state = env._state_by_agent[agent]
     mission_id = state.mission.mission_id
     active_count = max(1, active_count)
@@ -111,6 +111,7 @@ def _dynamic_priority_key(
 
     return (
         -_wait_streak(state.path),
+        -_oscillation_streak(state.path),
         round_robin_rank,
         -distance,
         mission_id,
@@ -129,13 +130,37 @@ def _wait_streak(path: list[Cell]) -> int:
     return streak
 
 
+def _oscillation_streak(path: list[Cell]) -> int:
+    if len(path) < 4:
+        return 0
+
+    streak = 0
+    cursor = len(path) - 1
+    while cursor >= 3:
+        if path[cursor] != path[cursor - 2]:
+            break
+        if path[cursor - 1] != path[cursor - 3]:
+            break
+        if path[cursor] == path[cursor - 1]:
+            break
+        streak += 1
+        cursor -= 2
+    return streak
+
+
+def _recent_visit_count(path: list[Cell], candidate: Cell, window: int = 8) -> int:
+    if not path:
+        return 0
+    return sum(1 for cell in path[-window:] if cell == candidate)
+
+
 def ranked_shortest_path_actions(env: UTMMAPFEnv, agent: str) -> list[int]:
     state = env._state_by_agent[agent]
     if state.cell == state.mission.goal:
         return [int(UTMAction.WAIT)]
 
     action_mask = env.action_mask(agent)
-    scored_actions: list[tuple[int, int, int, int, int]] = []
+    scored_actions: list[tuple[int, int, int, int, int, int]] = []
     action_order = {int(action): index for index, action in enumerate(MOVING_ACTIONS)}
 
     for action in MOVING_ACTIONS:
@@ -156,11 +181,14 @@ def ranked_shortest_path_actions(env: UTMMAPFEnv, agent: str) -> list[int]:
         oscillation_cost = (
             1 if candidate == state.previous_cell and candidate != state.cell else 0
         )
+        recent_visit_cost = _recent_visit_count(state.path, candidate)
+        combined_cost = remaining + recent_visit_cost * 3 + oscillation_cost * 5
         scored_actions.append(
             (
+                combined_cost,
+                recent_visit_cost,
                 remaining,
                 oscillation_cost,
-                0,
                 action_order[action_int],
                 action_int,
             )
