@@ -24,15 +24,30 @@ python curriculum/generate_scenarios.py --agents 32 --count 100 --grid 32 32 5 -
 
 ## Behavior Clone One Stage
 
-Use behavior cloning first to teach the actor the PIBT-style dynamic-priority expert on the new scenario distribution.
+Use offline behavior cloning first to teach the actor the PIBT-style dynamic-priority expert on the new scenario distribution.
+
+First collect expert rollouts. By default this keeps only scenarios solved by the expert, so the actor does not learn long failed/stuck traces.
 
 ```bash
-python curriculum/pretrain_bc_multi.py \
+python curriculum/collect_expert_dataset.py \
+  --scenario-dir configs/generated/train_8 \
+  --dataset-dir datasets/train_8_expert
+```
+
+Then train the actor from shuffled minibatches.
+
+```bash
+python curriculum/train_bc_dataset.py \
+  --dataset-dir datasets/train_8_expert \
   --scenario-dir configs/generated/train_8 \
   --init-model-dir models/crossing_attention_stable \
   --model-dir models/curriculum_8_bc \
-  --updates 20000
+  --epochs 80 \
+  --batch-size 512 \
+  --learning-rate 1e-4
 ```
+
+The older online script `curriculum/pretrain_bc_multi.py` is still available for quick experiments, but the offline dataset path is the preferred default because samples are replayed and shuffled instead of collected from one correlated online rollout stream.
 
 ## Train One Stage
 
@@ -57,7 +72,8 @@ python curriculum/train_mappo_multi.py \
 Then continue to the next scale:
 
 ```bash
-python curriculum/pretrain_bc_multi.py --scenario-dir configs/generated/train_16 --init-model-dir models/curriculum_8 --model-dir models/curriculum_16_bc --updates 30000
+python curriculum/collect_expert_dataset.py --scenario-dir configs/generated/train_16 --dataset-dir datasets/train_16_expert
+python curriculum/train_bc_dataset.py --dataset-dir datasets/train_16_expert --scenario-dir configs/generated/train_16 --init-model-dir models/curriculum_8 --model-dir models/curriculum_16_bc --epochs 80 --batch-size 1024 --learning-rate 1e-4
 python curriculum/train_mappo_multi.py --scenario-dir configs/generated/train_16 --init-model-dir models/curriculum_16_bc --model-dir models/curriculum_16 --timesteps 1500000 --learning-rate 5e-5 --bc-anchor-coef 0.03 --entropy-coef 0.001 --freeze-actor-encoder --rollout-steps 1024 --batch-size 1024
 ```
 

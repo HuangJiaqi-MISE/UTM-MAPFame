@@ -1,0 +1,310 @@
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from tqdm import tqdm
+
+from common import load_env, scenario_paths
+
+from utm_mappo import UTMAction, UTMMAPFEnv  # noqa: E402
+from utm_mappo.expert import prioritized_shortest_path_actions  # noqa: E402
+
+
+METRIC_KEYS = (
+    "moves",
+    "waits",
+    "oscillations",
+    "invalid",
+    "no_fly",
+    "unsafe",
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Collect offline behavior-cloning data from the UTM expert."
+    )
+    parser.add_argument("--scenario-dir", type=Path, required=True)
+    parser.add_argument("--dataset-dir", type=Path, required=True)
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--include-failures",
+        action="store_true",
+        help=(
+            "Keep trajectories even when the expert does not solve every mission. "
+            "By default, failed expert rollouts are skipped."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing dataset directory.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    paths = scenario_paths(args.scenario_dir)
+    if args.limit > 0:
+        paths = paths[: args.limit]
+
+    prepare_dataset_dir(args.dataset_dir, overwrite=args.overwrite)
+
+    expected_signature: tuple[tuple[str, ...], tuple[int, ...], int] | None = None
+    rows: list[dict[str, Any]] = []
+    shards: list[dict[str, Any]] = []
+    stored_index = 0
+    total_samples = 0
+
+    progress = tqdm(paths, desc="collect expert")
+    for scenario_index, path in enumerate(progress):
+        env = load_env(path)
+        expected_signature = validate_signature(env, expected_signature, path)
+
+        arrays, metrics = collect_expert_rollout(env)
+        metrics["scenario"] = str(path)
+        metrics["samples"] = int(arrays["actions"].shape[0])
+        rows.append(metrics)
+
+        keep = bool(metrics["all_reached"]) or args.include_failures
+        if keep and metrics["samples"] > 0:
+            shard_name = f"shard_{stored_index:06d}_{path.stem}.npz"
+            np.savez_compressed(args.dataset_dir / shard_name, **arrays)
+            shards.append(
+                {
+                    "file": shard_name,
+                    "scenario": str(path),
+                    "scenario_index": scenario_index,
+                    "samples": int(metrics["samples"]),
+                    "all_reached": bool(metrics["all_reached"]),
+                    "reached_count": int(metrics["reached_count"]),
+                    "time_steps": int(metrics["time_steps"]),
+                    "unsafe": int(metrics["unsafe"]),
+                    "oscillations": int(metrics["oscillations"]),
+                }
+            )
+            stored_index += 1
+            total_samples += int(metrics["samples"])
+
+        progress.set_postfix(
+            kept=stored_index,
+            reached=f"{metrics['reached_count']}/{metrics['agents']}",
+            unsafe=metrics["unsafe"],
+        )
+        print(
+            f"{path.name}: reached={metrics['reached_count']}/{metrics['agents']} "
+            f"time={metrics['time_steps']} unsafe={metrics['unsafe']} "
+            f"osc={metrics['oscillations']} "
+            f"{'kept' if keep else 'skipped'}"
+        )
+
+    if not shards:
+        raise RuntimeError(
+            "no expert trajectories were stored; use --include-failures to keep "
+            "failed rollouts, or generate easier scenarios."
+        )
+
+    metadata = build_metadata(
+        args=args,
+        rows=rows,
+        shards=shards,
+        total_samples=total_samples,
+        expected_signature=expected_signature,
+    )
+    with (args.dataset_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2)
+
+    print_summary(rows, shards, total_samples)
+    print(f"wrote expert dataset to {args.dataset_dir}")
+
+
+def prepare_dataset_dir(path: Path, overwrite: bool) -> None:
+    if path.exists() and any(path.iterdir()):
+        if not overwrite:
+            raise FileExistsError(
+                f"{path} is not empty; choose a new --dataset-dir or pass --overwrite"
+            )
+        for child in path.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def validate_signature(
+    env: UTMMAPFEnv,
+    expected: tuple[tuple[str, ...], tuple[int, ...], int] | None,
+    path: Path,
+) -> tuple[tuple[str, ...], tuple[int, ...], int]:
+    agents = tuple(env.possible_agents)
+    obs_shape = env.observation_space(agents[0]).shape
+    action_dim = int(env.action_space(agents[0]).n)
+    signature = (agents, obs_shape, action_dim)
+    if expected is not None and signature != expected:
+        raise ValueError(
+            "offline BC dataset requires identical mission ids and observation "
+            f"shape per stage; {path} has {signature}, expected {expected}"
+        )
+    return signature
+
+
+def collect_expert_rollout(env: UTMMAPFEnv) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    observations, _ = env.reset()
+    agent_to_index = {
+        agent: index for index, agent in enumerate(env.possible_agents)
+    }
+    observation_rows: list[np.ndarray] = []
+    mask_rows: list[np.ndarray] = []
+    action_rows: list[int] = []
+    time_rows: list[int] = []
+    agent_rows: list[int] = []
+    totals = {key: 0 for key in METRIC_KEYS}
+
+    while observations:
+        agents = sorted(observations)
+        masks = {agent: env.action_mask(agent).copy() for agent in agents}
+        expert_actions = prioritized_shortest_path_actions(env, agents)
+        actions: dict[str, int] = {}
+
+        for agent in agents:
+            action = int(expert_actions.get(agent, int(UTMAction.WAIT)))
+            if action >= masks[agent].shape[0] or not masks[agent][action]:
+                action = int(UTMAction.WAIT)
+            actions[agent] = action
+
+            observation_rows.append(
+                np.asarray(observations[agent], dtype=np.float32).copy()
+            )
+            mask_rows.append(masks[agent].astype(np.bool_, copy=True))
+            action_rows.append(action)
+            time_rows.append(env.time_step)
+            agent_rows.append(agent_to_index[agent])
+
+        before = {
+            agent: env.render()["agents"][agent]["cell"] for agent in agents
+        }
+        observations, _, _, _, infos = env.step(actions)
+
+        for agent, info in infos.items():
+            if info["cell"] == before[agent]:
+                totals["waits"] += 1
+            else:
+                totals["moves"] += 1
+            if info["oscillated"]:
+                totals["oscillations"] += 1
+            if info["invalid_action"]:
+                totals["invalid"] += 1
+            if info["no_fly_hold"]:
+                totals["no_fly"] += 1
+            if info["unsafe_hold"]:
+                totals["unsafe"] += 1
+
+    render_state = env.render()
+    reached = [
+        bool(agent_state["reached_goal"])
+        for agent_state in render_state["agents"].values()
+    ]
+    metrics: dict[str, Any] = {
+        "time_steps": int(render_state["time_step"]),
+        "agents": len(reached),
+        "all_reached": all(reached),
+        "reached_count": int(np.sum(reached)),
+    }
+    metrics.update(totals)
+
+    if observation_rows:
+        observations_array = np.stack(observation_rows).astype(np.float32)
+        masks_array = np.stack(mask_rows).astype(np.bool_)
+    else:
+        agent = env.possible_agents[0]
+        observations_array = np.zeros(
+            (0, *env.observation_space(agent).shape), dtype=np.float32
+        )
+        masks_array = np.zeros(
+            (0, int(env.action_space(agent).n)), dtype=np.bool_
+        )
+
+    arrays = {
+        "observations": observations_array,
+        "action_masks": masks_array,
+        "actions": np.asarray(action_rows, dtype=np.int64),
+        "time_steps": np.asarray(time_rows, dtype=np.int32),
+        "agent_indices": np.asarray(agent_rows, dtype=np.int32),
+    }
+    return arrays, metrics
+
+
+def build_metadata(
+    args: argparse.Namespace,
+    rows: list[dict[str, Any]],
+    shards: list[dict[str, Any]],
+    total_samples: int,
+    expected_signature: tuple[tuple[str, ...], tuple[int, ...], int] | None,
+) -> dict[str, Any]:
+    agents: tuple[str, ...] = ()
+    obs_shape: tuple[int, ...] = ()
+    action_dim = 0
+    if expected_signature is not None:
+        agents, obs_shape, action_dim = expected_signature
+
+    success_flags = np.asarray(
+        [bool(row["all_reached"]) for row in rows], dtype=np.float32
+    )
+    return {
+        "version": 1,
+        "source": "utm_mappo.expert.prioritized_shortest_path_actions",
+        "scenario_dir": str(args.scenario_dir),
+        "scenario_dir_resolved": str(args.scenario_dir.resolve()),
+        "success_only": not bool(args.include_failures),
+        "scenario_count": len(rows),
+        "stored_scenario_count": len(shards),
+        "skipped_scenario_count": len(rows) - len(shards),
+        "samples": int(total_samples),
+        "agents": list(agents),
+        "n_agents": len(agents),
+        "obs_shape": list(obs_shape),
+        "action_dim": int(action_dim),
+        "expert_success_rate": float(success_flags.mean()) if rows else 0.0,
+        "expert_mean_reached": mean(rows, "reached_count"),
+        "expert_mean_time_steps": mean(rows, "time_steps"),
+        "expert_mean_unsafe": mean(rows, "unsafe"),
+        "expert_mean_oscillations": mean(rows, "oscillations"),
+        "shards": shards,
+    }
+
+
+def print_summary(
+    rows: list[dict[str, Any]], shards: list[dict[str, Any]], total_samples: int
+) -> None:
+    print("summary:")
+    print(f"  scenarios={len(rows)}")
+    print(f"  stored_scenarios={len(shards)}")
+    print(f"  samples={total_samples}")
+    print(f"  expert_success_rate={mean_bool(rows, 'all_reached'):.3f}")
+    print(f"  expert_mean_reached={mean(rows, 'reached_count'):.2f}")
+    print(f"  expert_mean_time_steps={mean(rows, 'time_steps'):.2f}")
+    print(f"  expert_mean_unsafe={mean(rows, 'unsafe'):.2f}")
+    print(f"  expert_mean_oscillations={mean(rows, 'oscillations'):.2f}")
+
+
+def mean(rows: list[dict[str, Any]], key: str) -> float:
+    if not rows:
+        return 0.0
+    return float(np.mean([float(row[key]) for row in rows]))
+
+
+def mean_bool(rows: list[dict[str, Any]], key: str) -> float:
+    if not rows:
+        return 0.0
+    return float(np.mean([bool(row[key]) for row in rows]))
+
+
+if __name__ == "__main__":
+    main()
