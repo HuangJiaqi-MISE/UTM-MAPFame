@@ -57,8 +57,8 @@ def parse_args() -> argparse.Namespace:
         "--include-failures",
         action="store_true",
         help=(
-            "Keep trajectories even when the expert does not solve every mission. "
-            "By default, failed expert rollouts are skipped."
+            "Keep trajectories even when the teacher does not produce a clean "
+            "success. By default, failed or unsafe rollouts are skipped."
         ),
     )
     parser.add_argument(
@@ -98,9 +98,10 @@ def main() -> None:
             arrays, metrics = collect_pibt_rollout(env)
         metrics["scenario"] = str(path)
         metrics["samples"] = int(arrays["actions"].shape[0])
+        metrics["clean"] = is_clean_success(metrics)
         rows.append(metrics)
 
-        keep = bool(metrics["all_reached"]) or args.include_failures
+        keep = bool(metrics["clean"]) or args.include_failures
         if keep and metrics["samples"] > 0:
             shard_name = f"shard_{stored_index:06d}_{path.stem}.npz"
             np.savez_compressed(args.dataset_dir / shard_name, **arrays)
@@ -111,6 +112,7 @@ def main() -> None:
                     "scenario_index": scenario_index,
                     "samples": int(metrics["samples"]),
                     "all_reached": bool(metrics["all_reached"]),
+                    "clean": bool(metrics["clean"]),
                     "reached_count": int(metrics["reached_count"]),
                     "time_steps": int(metrics["time_steps"]),
                     "unsafe": int(metrics["unsafe"]),
@@ -131,13 +133,14 @@ def main() -> None:
             f"time={metrics['time_steps']} unsafe={metrics['unsafe']} "
             f"osc={metrics['oscillations']} "
             f"teacher={args.teacher} "
+            f"{'clean' if metrics['clean'] else 'not-clean'} "
             f"{'kept' if keep else 'skipped'}"
         )
 
     if not shards:
         raise RuntimeError(
             "no expert trajectories were stored; use --include-failures to keep "
-            "failed rollouts, or generate easier scenarios."
+            "failed/unsafe rollouts for debugging, or generate easier scenarios."
         )
 
     metadata = build_metadata(
@@ -427,6 +430,9 @@ def build_metadata(
     success_flags = np.asarray(
         [bool(row["all_reached"]) for row in rows], dtype=np.float32
     )
+    clean_flags = np.asarray(
+        [bool(row.get("clean", False)) for row in rows], dtype=np.float32
+    )
     return {
         "version": 1,
         "source": (
@@ -439,6 +445,7 @@ def build_metadata(
         "scenario_dir": str(args.scenario_dir),
         "scenario_dir_resolved": str(args.scenario_dir.resolve()),
         "success_only": not bool(args.include_failures),
+        "clean_success_only": not bool(args.include_failures),
         "scenario_count": len(rows),
         "stored_scenario_count": len(shards),
         "skipped_scenario_count": len(rows) - len(shards),
@@ -448,12 +455,22 @@ def build_metadata(
         "obs_shape": list(obs_shape),
         "action_dim": int(action_dim),
         "expert_success_rate": float(success_flags.mean()) if rows else 0.0,
+        "expert_clean_success_rate": float(clean_flags.mean()) if rows else 0.0,
         "expert_mean_reached": mean(rows, "reached_count"),
         "expert_mean_time_steps": mean(rows, "time_steps"),
         "expert_mean_unsafe": mean(rows, "unsafe"),
         "expert_mean_oscillations": mean(rows, "oscillations"),
         "shards": shards,
     }
+
+
+def is_clean_success(metrics: dict[str, Any]) -> bool:
+    return (
+        bool(metrics["all_reached"])
+        and int(metrics["unsafe"]) == 0
+        and int(metrics["invalid"]) == 0
+        and int(metrics["no_fly"]) == 0
+    )
 
 
 def print_summary(
@@ -464,6 +481,7 @@ def print_summary(
     print(f"  stored_scenarios={len(shards)}")
     print(f"  samples={total_samples}")
     print(f"  expert_success_rate={mean_bool(rows, 'all_reached'):.3f}")
+    print(f"  expert_clean_success_rate={mean_bool(rows, 'clean'):.3f}")
     print(f"  expert_mean_reached={mean(rows, 'reached_count'):.2f}")
     print(f"  expert_mean_time_steps={mean(rows, 'time_steps'):.2f}")
     print(f"  expert_mean_unsafe={mean(rows, 'unsafe'):.2f}")

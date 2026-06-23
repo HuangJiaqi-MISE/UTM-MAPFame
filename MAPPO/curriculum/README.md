@@ -26,7 +26,7 @@ python curriculum/generate_scenarios.py --agents 32 --count 100 --grid 32 32 5 -
 
 Use offline behavior cloning first to teach the actor from expert demonstrations on the new scenario distribution.
 
-First collect expert rollouts. The default teacher is a centralized space-time reservation planner for offline demonstration generation. By default this keeps only scenarios solved by the teacher, so the actor does not learn long failed/stuck traces.
+First collect expert rollouts. The default teacher is a centralized space-time reservation planner for offline demonstration generation. By default this keeps only clean successes: every agent reaches its goal with zero unsafe, invalid, or no-fly holds. Failed or unsafe traces are skipped so the actor does not learn stuck behavior.
 
 ```bash
 python curriculum/collect_expert_dataset.py \
