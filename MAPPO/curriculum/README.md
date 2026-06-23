@@ -24,9 +24,9 @@ python curriculum/generate_scenarios.py --agents 32 --count 100 --grid 32 32 5 -
 
 ## Behavior Clone One Stage
 
-Use offline behavior cloning first to teach the actor the PIBT-style dynamic-priority expert on the new scenario distribution.
+Use offline behavior cloning first to teach the actor from expert demonstrations on the new scenario distribution.
 
-First collect expert rollouts. By default this keeps only scenarios solved by the expert, so the actor does not learn long failed/stuck traces.
+First collect expert rollouts. The default teacher is a centralized space-time reservation planner for offline demonstration generation. By default this keeps only scenarios solved by the teacher, so the actor does not learn long failed/stuck traces.
 
 ```bash
 python curriculum/collect_expert_dataset.py \
@@ -48,6 +48,8 @@ python curriculum/train_bc_dataset.py \
 ```
 
 The older online script `curriculum/pretrain_bc_multi.py` is still available for quick experiments, but the offline dataset path is the preferred default because samples are replayed and shuffled instead of collected from one correlated online rollout stream.
+
+To reproduce the older PIBT-style single-step teacher during collection, pass `--teacher pibt`. The default `--teacher space-time` is stronger for dataset generation, but it is still a prioritized planner rather than a complete CBS/LaCAM solver; scenarios it cannot solve are skipped.
 
 ## Train One Stage
 

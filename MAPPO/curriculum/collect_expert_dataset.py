@@ -13,6 +13,11 @@ from common import load_env, scenario_paths
 
 from utm_mappo import UTMAction, UTMMAPFEnv  # noqa: E402
 from utm_mappo.expert import prioritized_shortest_path_actions  # noqa: E402
+from utm_mappo.space_time_expert import (  # noqa: E402
+    action_from_transition,
+    planned_cell,
+    prioritized_space_time_plan,
+)
 
 
 METRIC_KEYS = (
@@ -32,6 +37,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenario-dir", type=Path, required=True)
     parser.add_argument("--dataset-dir", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--teacher",
+        choices=("space-time", "pibt"),
+        default="space-time",
+        help=(
+            "Teacher used to generate demonstrations. space-time is an offline "
+            "prioritized reservation planner; pibt is the older online heuristic."
+        ),
+    )
+    parser.add_argument(
+        "--planner-retries",
+        type=int,
+        default=64,
+        help="Priority-order attempts for the offline space-time teacher.",
+    )
+    parser.add_argument("--seed", type=int, default=1)
     parser.add_argument(
         "--include-failures",
         action="store_true",
@@ -67,7 +88,14 @@ def main() -> None:
         env = load_env(path)
         expected_signature = validate_signature(env, expected_signature, path)
 
-        arrays, metrics = collect_expert_rollout(env)
+        if args.teacher == "space-time":
+            arrays, metrics = collect_space_time_rollout(
+                env,
+                planner_retries=args.planner_retries,
+                seed=args.seed + scenario_index,
+            )
+        else:
+            arrays, metrics = collect_pibt_rollout(env)
         metrics["scenario"] = str(path)
         metrics["samples"] = int(arrays["actions"].shape[0])
         rows.append(metrics)
@@ -87,6 +115,7 @@ def main() -> None:
                     "time_steps": int(metrics["time_steps"]),
                     "unsafe": int(metrics["unsafe"]),
                     "oscillations": int(metrics["oscillations"]),
+                    "teacher": args.teacher,
                 }
             )
             stored_index += 1
@@ -101,6 +130,7 @@ def main() -> None:
             f"{path.name}: reached={metrics['reached_count']}/{metrics['agents']} "
             f"time={metrics['time_steps']} unsafe={metrics['unsafe']} "
             f"osc={metrics['oscillations']} "
+            f"teacher={args.teacher} "
             f"{'kept' if keep else 'skipped'}"
         )
 
@@ -155,7 +185,77 @@ def validate_signature(
     return signature
 
 
-def collect_expert_rollout(env: UTMMAPFEnv) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+def collect_space_time_rollout(
+    env: UTMMAPFEnv,
+    planner_retries: int,
+    seed: int,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    env.reset()
+    plan = prioritized_space_time_plan(
+        env,
+        max_retries=planner_retries,
+        seed=seed,
+    )
+    if plan is None:
+        metrics = empty_metrics(env)
+        metrics["planner_failed"] = True
+        return empty_arrays(env), metrics
+    return collect_planned_rollout(env, plan)
+
+
+def collect_planned_rollout(
+    env: UTMMAPFEnv,
+    plan: dict[str, list[tuple[int, int, int]]],
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    observations, _ = env.reset()
+    agent_to_index = {
+        agent: index for index, agent in enumerate(env.possible_agents)
+    }
+    observation_rows: list[np.ndarray] = []
+    mask_rows: list[np.ndarray] = []
+    action_rows: list[int] = []
+    time_rows: list[int] = []
+    agent_rows: list[int] = []
+    totals = {key: 0 for key in METRIC_KEYS}
+
+    while observations:
+        agents = sorted(observations)
+        masks = {agent: env.action_mask(agent).copy() for agent in agents}
+        actions: dict[str, int] = {}
+
+        for agent in agents:
+            state = env._state_by_agent[agent]
+            next_cell = planned_cell(plan[agent], env.time_step + 1)
+            action = action_from_transition(state.cell, next_cell)
+            if action >= masks[agent].shape[0] or not masks[agent][action]:
+                action = int(UTMAction.WAIT)
+            actions[agent] = action
+            append_sample(
+                observations=observations,
+                masks=masks,
+                agent=agent,
+                action=action,
+                env=env,
+                agent_to_index=agent_to_index,
+                observation_rows=observation_rows,
+                mask_rows=mask_rows,
+                action_rows=action_rows,
+                time_rows=time_rows,
+                agent_rows=agent_rows,
+            )
+
+        before = {
+            agent: env.render()["agents"][agent]["cell"] for agent in agents
+        }
+        observations, _, _, _, infos = env.step(actions)
+        update_totals(totals, before, infos)
+
+    metrics = final_metrics(env, totals)
+    metrics["planner_failed"] = False
+    return build_arrays(env, observation_rows, mask_rows, action_rows, time_rows, agent_rows), metrics
+
+
+def collect_pibt_rollout(env: UTMMAPFEnv) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     observations, _ = env.reset()
     agent_to_index = {
         agent: index for index, agent in enumerate(env.possible_agents)
@@ -178,34 +278,74 @@ def collect_expert_rollout(env: UTMMAPFEnv) -> tuple[dict[str, np.ndarray], dict
             if action >= masks[agent].shape[0] or not masks[agent][action]:
                 action = int(UTMAction.WAIT)
             actions[agent] = action
-
-            observation_rows.append(
-                np.asarray(observations[agent], dtype=np.float32).copy()
+            append_sample(
+                observations=observations,
+                masks=masks,
+                agent=agent,
+                action=action,
+                env=env,
+                agent_to_index=agent_to_index,
+                observation_rows=observation_rows,
+                mask_rows=mask_rows,
+                action_rows=action_rows,
+                time_rows=time_rows,
+                agent_rows=agent_rows,
             )
-            mask_rows.append(masks[agent].astype(np.bool_, copy=True))
-            action_rows.append(action)
-            time_rows.append(env.time_step)
-            agent_rows.append(agent_to_index[agent])
 
         before = {
             agent: env.render()["agents"][agent]["cell"] for agent in agents
         }
         observations, _, _, _, infos = env.step(actions)
+        update_totals(totals, before, infos)
 
-        for agent, info in infos.items():
-            if info["cell"] == before[agent]:
-                totals["waits"] += 1
-            else:
-                totals["moves"] += 1
-            if info["oscillated"]:
-                totals["oscillations"] += 1
-            if info["invalid_action"]:
-                totals["invalid"] += 1
-            if info["no_fly_hold"]:
-                totals["no_fly"] += 1
-            if info["unsafe_hold"]:
-                totals["unsafe"] += 1
+    metrics = final_metrics(env, totals)
+    metrics["planner_failed"] = False
+    return build_arrays(env, observation_rows, mask_rows, action_rows, time_rows, agent_rows), metrics
 
+
+def append_sample(
+    observations: dict[str, np.ndarray],
+    masks: dict[str, np.ndarray],
+    agent: str,
+    action: int,
+    env: UTMMAPFEnv,
+    agent_to_index: dict[str, int],
+    observation_rows: list[np.ndarray],
+    mask_rows: list[np.ndarray],
+    action_rows: list[int],
+    time_rows: list[int],
+    agent_rows: list[int],
+) -> None:
+    observation_rows.append(
+        np.asarray(observations[agent], dtype=np.float32).copy()
+    )
+    mask_rows.append(masks[agent].astype(np.bool_, copy=True))
+    action_rows.append(action)
+    time_rows.append(env.time_step)
+    agent_rows.append(agent_to_index[agent])
+
+
+def update_totals(
+    totals: dict[str, int],
+    before: dict[str, tuple[int, int, int]],
+    infos: dict[str, dict[str, Any]],
+) -> None:
+    for agent, info in infos.items():
+        if info["cell"] == before[agent]:
+            totals["waits"] += 1
+        else:
+            totals["moves"] += 1
+        if info["oscillated"]:
+            totals["oscillations"] += 1
+        if info["invalid_action"]:
+            totals["invalid"] += 1
+        if info["no_fly_hold"]:
+            totals["no_fly"] += 1
+        if info["unsafe_hold"]:
+            totals["unsafe"] += 1
+
+
+def final_metrics(env: UTMMAPFEnv, totals: dict[str, int]) -> dict[str, Any]:
     render_state = env.render()
     reached = [
         bool(agent_state["reached_goal"])
@@ -218,7 +358,37 @@ def collect_expert_rollout(env: UTMMAPFEnv) -> tuple[dict[str, np.ndarray], dict
         "reached_count": int(np.sum(reached)),
     }
     metrics.update(totals)
+    return metrics
 
+
+def empty_metrics(env: UTMMAPFEnv) -> dict[str, Any]:
+    render_state = env.render()
+    reached = [
+        bool(agent_state["reached_goal"])
+        for agent_state in render_state["agents"].values()
+    ]
+    metrics: dict[str, Any] = {
+        "time_steps": int(render_state["time_step"]),
+        "agents": len(reached),
+        "all_reached": all(reached),
+        "reached_count": int(np.sum(reached)),
+    }
+    metrics.update({key: 0 for key in METRIC_KEYS})
+    return metrics
+
+
+def empty_arrays(env: UTMMAPFEnv) -> dict[str, np.ndarray]:
+    return build_arrays(env, [], [], [], [], [])
+
+
+def build_arrays(
+    env: UTMMAPFEnv,
+    observation_rows: list[np.ndarray],
+    mask_rows: list[np.ndarray],
+    action_rows: list[int],
+    time_rows: list[int],
+    agent_rows: list[int],
+) -> dict[str, np.ndarray]:
     if observation_rows:
         observations_array = np.stack(observation_rows).astype(np.float32)
         masks_array = np.stack(mask_rows).astype(np.bool_)
@@ -238,7 +408,7 @@ def collect_expert_rollout(env: UTMMAPFEnv) -> tuple[dict[str, np.ndarray], dict
         "time_steps": np.asarray(time_rows, dtype=np.int32),
         "agent_indices": np.asarray(agent_rows, dtype=np.int32),
     }
-    return arrays, metrics
+    return arrays
 
 
 def build_metadata(
@@ -259,7 +429,13 @@ def build_metadata(
     )
     return {
         "version": 1,
-        "source": "utm_mappo.expert.prioritized_shortest_path_actions",
+        "source": (
+            "utm_mappo.space_time_expert.prioritized_space_time_plan"
+            if args.teacher == "space-time"
+            else "utm_mappo.expert.prioritized_shortest_path_actions"
+        ),
+        "teacher": args.teacher,
+        "planner_retries": int(args.planner_retries),
         "scenario_dir": str(args.scenario_dir),
         "scenario_dir_resolved": str(args.scenario_dir.resolve()),
         "success_only": not bool(args.include_failures),
