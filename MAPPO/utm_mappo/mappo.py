@@ -38,6 +38,7 @@ class DiscreteMAPPO:
         update_epochs: int = 4,
         features_dim: int = 256,
         hidden_dim: int = 256,
+        freeze_actor_encoder: bool = False,
         device: torch.device | None = None,
     ):
         self.env = env
@@ -53,6 +54,7 @@ class DiscreteMAPPO:
         self.update_epochs = update_epochs
         self.features_dim = features_dim
         self.hidden_dim = hidden_dim
+        self.freeze_actor_encoder = freeze_actor_encoder
         self.device = device or default_device()
         self.agent_order = list(env.possible_agents)
         self.n_agents = len(self.agent_order)
@@ -70,7 +72,17 @@ class DiscreteMAPPO:
             features_dim=features_dim,
             hidden_dim=hidden_dim,
         ).to(self.device)
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+        if freeze_actor_encoder:
+            for parameter in self.model.actor_encoder.parameters():
+                parameter.requires_grad_(False)
+        self.optimizer = torch.optim.Adam(
+            [
+                parameter
+                for parameter in self.model.parameters()
+                if parameter.requires_grad
+            ],
+            lr=learning_rate,
+        )
         self.buffer = MAPPORolloutBuffer(
             buffer_size=rollout_steps,
             n_agents=self.n_agents,
@@ -295,6 +307,7 @@ class DiscreteMAPPO:
                 "features_dim": self.features_dim,
                 "hidden_dim": self.hidden_dim,
                 "critic_type": "attention_pooling",
+                "encoder_type": "separate_actor_critic",
             },
             model_dir / "model.pt",
         )
@@ -327,10 +340,13 @@ class DiscreteMAPPO:
         self, checkpoint_state: dict[str, torch.Tensor]
     ) -> None:
         current_state = self.model.state_dict()
+        checkpoint_state = self._expand_legacy_encoder_keys(checkpoint_state)
         compatible_state = {}
         skipped_keys = []
 
         for key, value in checkpoint_state.items():
+            if key.startswith("encoder."):
+                continue
             if key in current_state and current_state[key].shape == value.shape:
                 compatible_state[key] = value
             else:
@@ -344,6 +360,20 @@ class DiscreteMAPPO:
                 "loaded compatible checkpoint tensors; skipped "
                 f"{len(skipped_keys)} incompatible tensors"
             )
+
+    @staticmethod
+    def _expand_legacy_encoder_keys(
+        checkpoint_state: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        expanded = dict(checkpoint_state)
+        legacy_prefix = "encoder."
+        for key, value in checkpoint_state.items():
+            if not key.startswith(legacy_prefix):
+                continue
+            suffix = key[len(legacy_prefix) :]
+            expanded.setdefault(f"actor_encoder.{suffix}", value)
+            expanded.setdefault(f"critic_encoder.{suffix}", value)
+        return expanded
 
     def _dense_observations(self, observations: dict[str, np.ndarray]) -> np.ndarray:
         obs_dim = int(self.env.observation_space(self.agent_order[0]).shape[0])

@@ -122,7 +122,12 @@ class ActorCritic(nn.Module):
         del state_dim
         self.obs_dim = int(observation_space.shape[0])
         self.n_agents = n_agents
-        self.encoder = ObservationEncoder(
+        self.actor_encoder = ObservationEncoder(
+            observation_space,
+            features_dim=features_dim,
+            hidden_dim=hidden_dim,
+        )
+        self.critic_encoder = ObservationEncoder(
             observation_space,
             features_dim=features_dim,
             hidden_dim=hidden_dim,
@@ -141,7 +146,9 @@ class ActorCritic(nn.Module):
     def action_distribution(
         self, observations: torch.Tensor, action_masks: torch.Tensor | None = None
     ) -> torch.distributions.Categorical:
-        return self.actor(self.encoder(observations), action_masks=action_masks)
+        return self.actor(
+            self.actor_encoder(observations), action_masks=action_masks
+        )
 
     def value(
         self, states: torch.Tensor, active_masks: torch.Tensor | None = None
@@ -166,6 +173,8 @@ class ActorCritic(nn.Module):
         active_masks: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size, n_agents, obs_dim = observations.shape
-        features = self.encoder(observations.reshape(batch_size * n_agents, obs_dim))
+        features = self.critic_encoder(
+            observations.reshape(batch_size * n_agents, obs_dim)
+        )
         features = features.reshape(batch_size, n_agents, -1)
         return self.critic(features, active_masks=active_masks)

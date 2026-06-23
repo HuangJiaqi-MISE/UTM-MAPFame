@@ -25,6 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--entropy-coef", type=float, default=0.005)
     parser.add_argument("--bc-anchor-coef", type=float, default=0.05)
+    parser.add_argument(
+        "--freeze-actor-encoder",
+        action="store_true",
+        help="Keep the BC-trained actor encoder fixed during MAPPO fine-tuning.",
+    )
     parser.add_argument("--eval-interval", type=int, default=10)
     parser.add_argument("--goal-reward", type=float, default=25.0)
     parser.add_argument("--progress-reward-scale", type=float, default=1.0)
@@ -55,6 +60,7 @@ def main() -> None:
         update_epochs=args.epochs,
         entropy_coef=args.entropy_coef,
         bc_anchor_coef=args.bc_anchor_coef,
+        freeze_actor_encoder=args.freeze_actor_encoder,
     )
     if args.init_model_dir is not None:
         model.load_weights(args.init_model_dir)
