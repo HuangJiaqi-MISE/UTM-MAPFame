@@ -49,7 +49,7 @@ python curriculum/train_bc_dataset.py \
 
 The older online script `curriculum/pretrain_bc_multi.py` is still available for quick experiments, but the offline dataset path is the preferred default because samples are replayed and shuffled instead of collected from one correlated online rollout stream.
 
-To reproduce the older PIBT-style single-step teacher during collection, pass `--teacher pibt`. The default `--teacher space-time` is stronger for dataset generation, but it is still a prioritized planner rather than a complete CBS/LaCAM solver; scenarios it cannot solve are skipped.
+To reproduce the older PIBT-style single-step teacher during collection, pass `--teacher pibt`. The default `--teacher space-time` is stronger for dataset generation, but it is still a prioritized planner rather than a complete centralized solver; scenarios it cannot solve are skipped.
 
 ## Train One Stage
 
