@@ -32,12 +32,13 @@ To run the MAPPO training skeleton, install the training extra:
 ```powershell
 pip install -e ".[dev,train]"
 python -m pytest
-python pretrain_bc.py configs\crossing.yaml --model-dir models\crossing_bc
-python train_mappo.py configs\crossing.yaml --init-model-dir models\crossing_bc --model-dir models\crossing --timesteps 500000 --bc-anchor-coef 0.05
+python pretrain_bc.py configs\crossing.yaml --model-dir models\crossing_bc_priority
+python train_mappo.py configs\crossing.yaml --init-model-dir models\crossing_bc_priority --model-dir models\crossing_attention --timesteps 500000 --learning-rate 1e-4 --bc-anchor-coef 0.02 --entropy-coef 0.003 --eval-interval 0 --rollout-steps 1024 --batch-size 1024
 ```
 
 Behavior cloning is optional, but it is the recommended first step. It teaches the decentralized actor a priority-aware shortest-path prior before MAPPO has to learn multi-agent coordination. The expert chooses one-step actions in mission-id order and avoids conflicts with already committed higher-priority proposals. Pure MAPPO from scratch can look poor at low timesteps.
 The training script also keeps a small optional BC anchor during MAPPO updates. This prevents the learned policy from collapsing into an all-WAIT deterministic policy while still letting PPO learn conflict avoidance.
+The centralized critic uses shared per-agent encodings with multi-head attention and masked/pooling aggregation instead of a flat concatenated MLP. This keeps the critic architecture independent of a specific concatenated state width and is the first step toward larger variable-agent training. Older BC checkpoints that contain the previous MLP critic can still initialize the compatible encoder and actor weights; incompatible critic tensors are skipped.
 
 When tuning poor rollouts, run the deterministic diagnostic script before looking at the GIF:
 
@@ -62,7 +63,7 @@ The main class is `utm_mappo.env.UTMMAPFEnv`. It implements the PettingZoo `Para
 The training entry point is `train_mappo.py`. It uses a discrete MAPPO implementation with:
 
 - shared decentralized actor over per-agent observations
-- centralized critic over the concatenated all-agent state
+- centralized attention/pooling critic over shared per-agent observation encodings
 - categorical action distribution for the 7 UTM actions
 - team reward for cooperative emergency behavior
 - active-agent masks so finished agents remain in the global state but do not contribute actor loss

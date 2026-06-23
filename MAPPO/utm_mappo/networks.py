@@ -48,19 +48,63 @@ class DecentralizedActor(nn.Module):
         return torch.distributions.Categorical(logits=logits)
 
 
-class CentralizedCritic(nn.Module):
-    def __init__(self, state_dim: int, hidden_dim: int = 256):
+class AttentionPoolingCritic(nn.Module):
+    def __init__(
+        self,
+        features_dim: int,
+        hidden_dim: int = 256,
+        num_heads: int = 4,
+    ):
         super().__init__()
+        self.input_projection = nn.Linear(features_dim, hidden_dim)
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            batch_first=True,
+        )
+        self.norm = nn.LayerNorm(hidden_dim)
         self.value = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, states: torch.Tensor) -> torch.Tensor:
-        return self.value(states).squeeze(-1)
+    def forward(
+        self,
+        agent_features: torch.Tensor,
+        active_masks: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        tokens = self.input_projection(agent_features)
+        key_padding_mask = None
+
+        if active_masks is not None:
+            active = active_masks.bool()
+            if active.ndim != 2:
+                raise ValueError("active_masks must have shape [batch, n_agents]")
+            empty_rows = ~active.any(dim=1)
+            if empty_rows.any():
+                active = active.clone()
+                active[empty_rows, 0] = True
+            key_padding_mask = ~active
+
+        attended, _ = self.attention(
+            tokens,
+            tokens,
+            tokens,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )
+        tokens = self.norm(tokens + attended)
+
+        if active_masks is None:
+            pooled = tokens.mean(dim=1)
+        else:
+            mask = (~key_padding_mask).to(tokens.dtype).unsqueeze(-1)
+            pooled = (tokens * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
+
+        return self.value(pooled).squeeze(-1)
 
 
 class ActorCritic(nn.Module):
@@ -68,11 +112,16 @@ class ActorCritic(nn.Module):
         self,
         observation_space: spaces.Box,
         action_space: spaces.Discrete,
-        state_dim: int,
+        state_dim: int | None = None,
+        n_agents: int = 1,
         features_dim: int = 256,
         hidden_dim: int = 256,
+        critic_num_heads: int = 4,
     ):
         super().__init__()
+        del state_dim
+        self.obs_dim = int(observation_space.shape[0])
+        self.n_agents = n_agents
         self.encoder = ObservationEncoder(
             observation_space,
             features_dim=features_dim,
@@ -83,12 +132,40 @@ class ActorCritic(nn.Module):
             action_dim=int(action_space.n),
             hidden_dim=hidden_dim,
         )
-        self.critic = CentralizedCritic(state_dim=state_dim, hidden_dim=hidden_dim)
+        self.critic = AttentionPoolingCritic(
+            features_dim=features_dim,
+            hidden_dim=hidden_dim,
+            num_heads=critic_num_heads,
+        )
 
     def action_distribution(
         self, observations: torch.Tensor, action_masks: torch.Tensor | None = None
     ) -> torch.distributions.Categorical:
         return self.actor(self.encoder(observations), action_masks=action_masks)
 
-    def value(self, states: torch.Tensor) -> torch.Tensor:
-        return self.critic(states)
+    def value(
+        self, states: torch.Tensor, active_masks: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if states.ndim == 2:
+            expected_dim = self.obs_dim * self.n_agents
+            if states.shape[-1] != expected_dim:
+                raise ValueError(
+                    f"flat critic state has dim {states.shape[-1]}, expected {expected_dim}"
+                )
+            observations = states.reshape(states.shape[0], self.n_agents, self.obs_dim)
+        elif states.ndim == 3:
+            observations = states
+        else:
+            raise ValueError("critic state must have shape [batch, state_dim] or [batch, n_agents, obs_dim]")
+
+        return self.value_from_observations(observations, active_masks=active_masks)
+
+    def value_from_observations(
+        self,
+        observations: torch.Tensor,
+        active_masks: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        batch_size, n_agents, obs_dim = observations.shape
+        features = self.encoder(observations.reshape(batch_size * n_agents, obs_dim))
+        features = features.reshape(batch_size, n_agents, -1)
+        return self.critic(features, active_masks=active_masks)

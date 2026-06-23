@@ -12,11 +12,13 @@ class RolloutBatch:
     observations: torch.Tensor
     action_masks: torch.Tensor
     states: torch.Tensor
+    critic_states: torch.Tensor
     actions: torch.Tensor
     expert_actions: torch.Tensor
     old_log_probs: torch.Tensor
     advantages: torch.Tensor
     returns: torch.Tensor
+    critic_returns: torch.Tensor
 
 
 class MAPPORolloutBuffer:
@@ -130,6 +132,7 @@ class MAPPORolloutBuffer:
 
         for start in range(0, len(valid_indices), batch_size):
             indices = valid_indices[start : start + batch_size]
+            critic_indices = np.unique(indices // self.n_agents)
             yield RolloutBatch(
                 observations=torch.as_tensor(
                     observations[indices], dtype=torch.float32, device=self.device
@@ -139,6 +142,9 @@ class MAPPORolloutBuffer:
                 ),
                 states=torch.as_tensor(
                     states[indices], dtype=torch.float32, device=self.device
+                ),
+                critic_states=torch.as_tensor(
+                    self.states[critic_indices], dtype=torch.float32, device=self.device
                 ),
                 actions=torch.as_tensor(
                     actions[indices], dtype=torch.long, device=self.device
@@ -154,5 +160,8 @@ class MAPPORolloutBuffer:
                 ),
                 returns=torch.as_tensor(
                     returns[indices], dtype=torch.float32, device=self.device
+                ),
+                critic_returns=torch.as_tensor(
+                    self.returns[critic_indices], dtype=torch.float32, device=self.device
                 ),
             )

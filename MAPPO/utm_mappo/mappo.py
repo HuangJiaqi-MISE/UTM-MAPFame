@@ -66,6 +66,7 @@ class DiscreteMAPPO:
             observation_space=observation_space,
             action_space=action_space,
             state_dim=self.state_dim,
+            n_agents=self.n_agents,
             features_dim=features_dim,
             hidden_dim=hidden_dim,
         ).to(self.device)
@@ -235,8 +236,8 @@ class DiscreteMAPPO:
                     ratio * advantages, clipped_ratio * advantages
                 ).mean()
 
-                values = self.model.value(batch.states)
-                critic_loss = F.mse_loss(values, batch.returns)
+                values = self.model.value(batch.critic_states)
+                critic_loss = F.mse_loss(values, batch.critic_returns)
                 bc_anchor_loss = (
                     F.cross_entropy(dist.logits, batch.expert_actions)
                     if self.bc_anchor_coef > 0.0
@@ -290,15 +291,17 @@ class DiscreteMAPPO:
                 "model_state_dict": self.model.state_dict(),
                 "agent_order": self.agent_order,
                 "state_dim": self.state_dim,
+                "n_agents": self.n_agents,
                 "features_dim": self.features_dim,
                 "hidden_dim": self.hidden_dim,
+                "critic_type": "attention_pooling",
             },
             model_dir / "model.pt",
         )
 
     def load_weights(self, model_dir: str | Path) -> None:
         checkpoint = torch.load(Path(model_dir) / "model.pt", map_location=self.device)
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self._load_compatible_state_dict(checkpoint["model_state_dict"])
 
     @classmethod
     def load(
@@ -316,9 +319,31 @@ class DiscreteMAPPO:
             hidden_dim=int(checkpoint.get("hidden_dim", 256)),
             device=target_device,
         )
-        model.model.load_state_dict(checkpoint["model_state_dict"])
+        model._load_compatible_state_dict(checkpoint["model_state_dict"])
         model.model.eval()
         return model
+
+    def _load_compatible_state_dict(
+        self, checkpoint_state: dict[str, torch.Tensor]
+    ) -> None:
+        current_state = self.model.state_dict()
+        compatible_state = {}
+        skipped_keys = []
+
+        for key, value in checkpoint_state.items():
+            if key in current_state and current_state[key].shape == value.shape:
+                compatible_state[key] = value
+            else:
+                skipped_keys.append(key)
+
+        current_state.update(compatible_state)
+        self.model.load_state_dict(current_state)
+
+        if skipped_keys:
+            print(
+                "loaded compatible checkpoint tensors; skipped "
+                f"{len(skipped_keys)} incompatible tensors"
+            )
 
     def _dense_observations(self, observations: dict[str, np.ndarray]) -> np.ndarray:
         obs_dim = int(self.env.observation_space(self.agent_order[0]).shape[0])
