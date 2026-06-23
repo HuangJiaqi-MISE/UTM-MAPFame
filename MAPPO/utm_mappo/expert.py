@@ -28,9 +28,10 @@ def prioritized_shortest_path_actions(
     if agents is None:
         agents = tuple(env.agents)
 
+    active_set = set(agents)
     active_agents = sorted(
         agents,
-        key=lambda name: env._state_by_agent[name].mission.mission_id,
+        key=lambda name: _dynamic_priority_key(env, name, len(active_set)),
     )
     proposals = {
         agent: state.cell
@@ -38,25 +39,94 @@ def prioritized_shortest_path_actions(
         if state.reached_goal
     }
     actions: dict[str, int] = {}
+    current_occupants = {
+        state.cell: agent for agent, state in env._state_by_agent.items()
+    }
+    planning_stack: set[str] = set()
 
-    for agent in active_agents:
+    def plan_agent(agent: str) -> bool:
+        if agent in actions:
+            return True
+        if agent in planning_stack:
+            return False
+
         state = env._state_by_agent[agent]
-        chosen_action = int(UTMAction.WAIT)
-        chosen_cell = state.cell
+        planning_stack.add(agent)
 
         for action in ranked_shortest_path_actions(env, agent):
             candidate = add_cell(state.cell, ACTION_DELTAS[action])
+            blocker = current_occupants.get(candidate)
+            if blocker == agent:
+                blocker = None
+            if blocker is not None and blocker not in active_set:
+                continue
+
             if _conflicts_with_committed(env, agent, candidate, proposals):
                 continue
 
-            chosen_action = action
-            chosen_cell = candidate
-            break
+            action_snapshot = dict(actions)
+            proposal_snapshot = dict(proposals)
+            actions[agent] = action
+            proposals[agent] = candidate
 
-        actions[agent] = chosen_action
-        proposals[agent] = chosen_cell
+            if blocker is not None and blocker not in actions:
+                if blocker in planning_stack or not plan_agent(blocker):
+                    actions.clear()
+                    actions.update(action_snapshot)
+                    proposals.clear()
+                    proposals.update(proposal_snapshot)
+                    continue
+
+            planning_stack.remove(agent)
+            return True
+
+        planning_stack.remove(agent)
+        return False
+
+    for agent in active_agents:
+        if plan_agent(agent):
+            continue
+        state = env._state_by_agent[agent]
+        actions[agent] = int(UTMAction.WAIT)
+        proposals[agent] = state.cell
 
     return actions
+
+
+def _dynamic_priority_key(
+    env: UTMMAPFEnv, agent: str, active_count: int
+) -> tuple[int, int, int, int]:
+    state = env._state_by_agent[agent]
+    mission_id = state.mission.mission_id
+    active_count = max(1, active_count)
+    round_robin_rank = (mission_id - 1 - env.time_step) % active_count
+    distance = _shortest_path_length(
+        env,
+        start=state.cell,
+        goal=state.mission.goal,
+        start_time=env.time_step,
+    )
+    if distance is None:
+        distance = 10_000
+
+    return (
+        -_wait_streak(state.path),
+        round_robin_rank,
+        -distance,
+        mission_id,
+    )
+
+
+def _wait_streak(path: list[Cell]) -> int:
+    if len(path) < 2:
+        return 0
+
+    streak = 0
+    cursor = len(path) - 1
+    while cursor > 0 and path[cursor] == path[cursor - 1]:
+        streak += 1
+        cursor -= 1
+    return streak
 
 
 def ranked_shortest_path_actions(env: UTMMAPFEnv, agent: str) -> list[int]:

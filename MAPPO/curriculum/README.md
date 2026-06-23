@@ -24,7 +24,7 @@ python curriculum/generate_scenarios.py --agents 32 --count 100 --grid 32 32 5 -
 
 ## Behavior Clone One Stage
 
-Use behavior cloning first to teach the actor the priority-aware expert on the new scenario distribution.
+Use behavior cloning first to teach the actor the PIBT-style dynamic-priority expert on the new scenario distribution.
 
 ```bash
 python curriculum/pretrain_bc_multi.py \
