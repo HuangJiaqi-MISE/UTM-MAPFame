@@ -106,7 +106,13 @@ def ranked_shortest_path_actions(env: UTMMAPFEnv, agent: str) -> list[int]:
 def _shortest_path_length(
     env: UTMMAPFEnv, start: Cell, goal: Cell, start_time: int
 ) -> int | None:
+    cache = _distance_cache(env)
+    cache_key = (start, goal, start_time)
+    if cache_key in cache:
+        return cache[cache_key]
+
     if start == goal:
+        cache[cache_key] = 0
         return 0
 
     horizon = env.scenario.max_time_steps
@@ -116,6 +122,7 @@ def _shortest_path_length(
     while queue:
         cell, time_step, distance = queue.popleft()
         if cell == goal:
+            cache[cache_key] = distance
             return distance
 
         if time_step >= horizon:
@@ -135,7 +142,16 @@ def _shortest_path_length(
             visited.add(visit_key)
             queue.append((candidate, next_time, distance + 1))
 
+    cache[cache_key] = None
     return None
+
+
+def _distance_cache(env: UTMMAPFEnv) -> dict[tuple[Cell, Cell, int], int | None]:
+    cache = getattr(env, "_expert_distance_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(env, "_expert_distance_cache", cache)
+    return cache
 
 
 def _conflicts_with_committed(

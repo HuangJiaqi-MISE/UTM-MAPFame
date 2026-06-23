@@ -127,9 +127,12 @@ class DiscreteMAPPO:
         while not self.buffer.full:
             dense_observations = self._dense_observations(observations)
             dense_action_masks = self._dense_action_masks(observations)
-            dense_expert_actions = self._dense_expert_actions(
-                observations, dense_action_masks
-            )
+            if self.bc_anchor_coef > 0.0:
+                dense_expert_actions = self._dense_expert_actions(
+                    observations, dense_action_masks
+                )
+            else:
+                dense_expert_actions = np.zeros(self.n_agents, dtype=np.int64)
             state = dense_observations.reshape(-1)
             active_mask = np.asarray(
                 [1.0 if agent in observations else 0.0 for agent in self.agent_order],
