@@ -6,8 +6,9 @@ from pathlib import Path
 
 import numpy as np
 
-from common import load_env, rollout_metrics, scenario_paths
+from common import load_env, rollout_metrics, rollout_metrics_with_policy, scenario_paths
 
+from utm_mappo.expert import prioritized_shortest_path_actions  # noqa: E402
 from utm_mappo.mappo import DiscreteMAPPO  # noqa: E402
 
 
@@ -16,10 +17,15 @@ def parse_args() -> argparse.Namespace:
         description="Evaluate a trained MAPPO model across many scenarios."
     )
     parser.add_argument("--scenario-dir", type=Path, required=True)
-    parser.add_argument("--model-dir", type=Path, required=True)
+    parser.add_argument("--model-dir", type=Path, default=None)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--csv", type=Path, default=None)
     parser.add_argument("--stochastic", action="store_true")
+    parser.add_argument(
+        "--expert-only",
+        action="store_true",
+        help="Evaluate the priority-aware expert instead of a model checkpoint.",
+    )
     return parser.parse_args()
 
 
@@ -31,20 +37,31 @@ def main() -> None:
 
     rows = []
     model_cache: dict[tuple[int, tuple[int, ...]], DiscreteMAPPO] = {}
+    if not args.expert_only and args.model_dir is None:
+        raise ValueError("--model-dir is required unless --expert-only is set")
+
     for path in paths:
         env = load_env(path)
-        signature = (
-            len(env.possible_agents),
-            env.observation_space(env.possible_agents[0]).shape,
-        )
-        model = model_cache.get(signature)
-        if model is None:
-            model = DiscreteMAPPO.load(env, args.model_dir)
-            model_cache[signature] = model
+        if args.expert_only:
+            row = rollout_metrics_with_policy(
+                env,
+                lambda observations, active_env=env: prioritized_shortest_path_actions(
+                    active_env, sorted(observations)
+                ),
+            )
         else:
-            model.env = env
+            signature = (
+                len(env.possible_agents),
+                env.observation_space(env.possible_agents[0]).shape,
+            )
+            model = model_cache.get(signature)
+            if model is None:
+                model = DiscreteMAPPO.load(env, args.model_dir)
+                model_cache[signature] = model
+            else:
+                model.env = env
+            row = rollout_metrics(env, model, stochastic=args.stochastic)
 
-        row = rollout_metrics(env, model, stochastic=args.stochastic)
         row["scenario"] = str(path)
         rows.append(row)
         print(

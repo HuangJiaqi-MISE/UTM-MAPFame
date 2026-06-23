@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -12,6 +12,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from utm_mappo import UTMMAPFEnv, UTMScenario  # noqa: E402
 from utm_mappo.mappo import DiscreteMAPPO  # noqa: E402
+
+PolicyFn = Callable[[dict[str, np.ndarray]], dict[str, int]]
 
 
 def scenario_paths(path: Path) -> list[Path]:
@@ -53,6 +55,18 @@ def rollout_metrics(
     model: DiscreteMAPPO,
     stochastic: bool = False,
 ) -> dict[str, Any]:
+    return rollout_metrics_with_policy(
+        env,
+        lambda observations: model.predict(
+            observations, deterministic=not stochastic
+        ),
+    )
+
+
+def rollout_metrics_with_policy(
+    env: UTMMAPFEnv,
+    policy: PolicyFn,
+) -> dict[str, Any]:
     observations, _ = env.reset()
     totals = {
         "moves": 0,
@@ -67,7 +81,7 @@ def rollout_metrics(
         before = {
             agent: env.render()["agents"][agent]["cell"] for agent in observations
         }
-        actions = model.predict(observations, deterministic=not stochastic)
+        actions = policy(observations)
         observations, _, _, _, infos = env.step(actions)
 
         for agent, info in infos.items():

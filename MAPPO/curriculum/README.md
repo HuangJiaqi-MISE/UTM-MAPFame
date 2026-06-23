@@ -63,6 +63,14 @@ python curriculum/train_mappo_multi.py --scenario-dir configs/generated/train_16
 
 ## Evaluate
 
+Check the expert first. If the expert fails badly, more BC updates will only imitate a weak teacher.
+
+```bash
+python curriculum/evaluate_scenarios.py \
+  --scenario-dir configs/generated/train_8 \
+  --expert-only
+```
+
 ```bash
 python curriculum/evaluate_scenarios.py \
   --scenario-dir configs/generated/train_8 \
