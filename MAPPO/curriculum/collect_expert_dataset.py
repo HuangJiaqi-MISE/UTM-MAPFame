@@ -12,6 +12,7 @@ from tqdm import tqdm
 from common import load_env, scenario_paths
 
 from utm_mappo import UTMAction, UTMMAPFEnv  # noqa: E402
+from utm_mappo.cbs_expert import cbs_plan  # noqa: E402
 from utm_mappo.expert import prioritized_shortest_path_actions  # noqa: E402
 from utm_mappo.space_time_expert import (  # noqa: E402
     action_from_transition,
@@ -39,12 +40,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument(
         "--teacher",
-        choices=("space-time", "pibt"),
-        default="space-time",
+        choices=("cbs", "space-time", "pibt"),
+        default="cbs",
         help=(
-            "Teacher used to generate demonstrations. space-time is an offline "
-            "prioritized reservation planner; pibt is the older online heuristic."
+            "Teacher used to generate demonstrations. cbs is the strongest "
+            "offline default; space-time is prioritized reservation planning; "
+            "pibt is the older online heuristic."
         ),
+    )
+    parser.add_argument(
+        "--cbs-max-nodes",
+        type=int,
+        default=50_000,
+        help="Maximum CBS high-level nodes. Use 0 for no explicit node limit.",
     )
     parser.add_argument(
         "--planner-retries",
@@ -88,7 +96,12 @@ def main() -> None:
         env = load_env(path)
         expected_signature = validate_signature(env, expected_signature, path)
 
-        if args.teacher == "space-time":
+        if args.teacher == "cbs":
+            arrays, metrics = collect_cbs_rollout(
+                env,
+                max_high_level_nodes=args.cbs_max_nodes,
+            )
+        elif args.teacher == "space-time":
             arrays, metrics = collect_space_time_rollout(
                 env,
                 planner_retries=args.planner_retries,
@@ -98,9 +111,10 @@ def main() -> None:
             arrays, metrics = collect_pibt_rollout(env)
         metrics["scenario"] = str(path)
         metrics["samples"] = int(arrays["actions"].shape[0])
+        metrics["clean"] = is_clean_success(metrics)
         rows.append(metrics)
 
-        keep = bool(metrics["all_reached"]) or args.include_failures
+        keep = bool(metrics["clean"]) or args.include_failures
         if keep and metrics["samples"] > 0:
             shard_name = f"shard_{stored_index:06d}_{path.stem}.npz"
             np.savez_compressed(args.dataset_dir / shard_name, **arrays)
@@ -111,6 +125,7 @@ def main() -> None:
                     "scenario_index": scenario_index,
                     "samples": int(metrics["samples"]),
                     "all_reached": bool(metrics["all_reached"]),
+                    "clean": bool(metrics["clean"]),
                     "reached_count": int(metrics["reached_count"]),
                     "time_steps": int(metrics["time_steps"]),
                     "unsafe": int(metrics["unsafe"]),
@@ -131,6 +146,7 @@ def main() -> None:
             f"time={metrics['time_steps']} unsafe={metrics['unsafe']} "
             f"osc={metrics['oscillations']} "
             f"teacher={args.teacher} "
+            f"{'clean' if metrics['clean'] else 'not-clean'} "
             f"{'kept' if keep else 'skipped'}"
         )
 
@@ -201,6 +217,28 @@ def collect_space_time_rollout(
         metrics["planner_failed"] = True
         return empty_arrays(env), metrics
     return collect_planned_rollout(env, plan)
+
+
+def collect_cbs_rollout(
+    env: UTMMAPFEnv,
+    max_high_level_nodes: int,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    env.reset()
+    result = cbs_plan(env, max_high_level_nodes=max_high_level_nodes)
+    if result.plan is None:
+        metrics = empty_metrics(env)
+        metrics["planner_failed"] = True
+        metrics["planner_reason"] = result.reason
+        metrics["cbs_expanded_nodes"] = result.expanded_nodes
+        metrics["cbs_generated_nodes"] = result.generated_nodes
+        return empty_arrays(env), metrics
+
+    arrays, metrics = collect_planned_rollout(env, result.plan)
+    metrics["planner_failed"] = False
+    metrics["planner_reason"] = None
+    metrics["cbs_expanded_nodes"] = result.expanded_nodes
+    metrics["cbs_generated_nodes"] = result.generated_nodes
+    return arrays, metrics
 
 
 def collect_planned_rollout(
@@ -427,18 +465,19 @@ def build_metadata(
     success_flags = np.asarray(
         [bool(row["all_reached"]) for row in rows], dtype=np.float32
     )
+    clean_flags = np.asarray(
+        [bool(row.get("clean", False)) for row in rows], dtype=np.float32
+    )
     return {
         "version": 1,
-        "source": (
-            "utm_mappo.space_time_expert.prioritized_space_time_plan"
-            if args.teacher == "space-time"
-            else "utm_mappo.expert.prioritized_shortest_path_actions"
-        ),
+        "source": teacher_source(args.teacher),
         "teacher": args.teacher,
+        "cbs_max_nodes": int(args.cbs_max_nodes),
         "planner_retries": int(args.planner_retries),
         "scenario_dir": str(args.scenario_dir),
         "scenario_dir_resolved": str(args.scenario_dir.resolve()),
         "success_only": not bool(args.include_failures),
+        "clean_success_only": not bool(args.include_failures),
         "scenario_count": len(rows),
         "stored_scenario_count": len(shards),
         "skipped_scenario_count": len(rows) - len(shards),
@@ -448,12 +487,30 @@ def build_metadata(
         "obs_shape": list(obs_shape),
         "action_dim": int(action_dim),
         "expert_success_rate": float(success_flags.mean()) if rows else 0.0,
+        "expert_clean_success_rate": float(clean_flags.mean()) if rows else 0.0,
         "expert_mean_reached": mean(rows, "reached_count"),
         "expert_mean_time_steps": mean(rows, "time_steps"),
         "expert_mean_unsafe": mean(rows, "unsafe"),
         "expert_mean_oscillations": mean(rows, "oscillations"),
         "shards": shards,
     }
+
+
+def teacher_source(teacher: str) -> str:
+    if teacher == "cbs":
+        return "utm_mappo.cbs_expert.cbs_plan"
+    if teacher == "space-time":
+        return "utm_mappo.space_time_expert.prioritized_space_time_plan"
+    return "utm_mappo.expert.prioritized_shortest_path_actions"
+
+
+def is_clean_success(metrics: dict[str, Any]) -> bool:
+    return (
+        bool(metrics["all_reached"])
+        and int(metrics["unsafe"]) == 0
+        and int(metrics["invalid"]) == 0
+        and int(metrics["no_fly"]) == 0
+    )
 
 
 def print_summary(
@@ -464,6 +521,7 @@ def print_summary(
     print(f"  stored_scenarios={len(shards)}")
     print(f"  samples={total_samples}")
     print(f"  expert_success_rate={mean_bool(rows, 'all_reached'):.3f}")
+    print(f"  expert_clean_success_rate={mean_bool(rows, 'clean'):.3f}")
     print(f"  expert_mean_reached={mean(rows, 'reached_count'):.2f}")
     print(f"  expert_mean_time_steps={mean(rows, 'time_steps'):.2f}")
     print(f"  expert_mean_unsafe={mean(rows, 'unsafe'):.2f}")
