@@ -1,0 +1,54 @@
+grid:
+  dimensions: [12, 12, 4]
+  blocked_cells:
+    - [6, 3, 0]
+    - [6, 4, 0]
+    - [6, 5, 0]
+    - [6, 6, 0]
+    - [6, 7, 0]
+    - [6, 8, 0]
+    - [6, 3, 1]
+    - [6, 4, 1]
+    - [6, 5, 1]
+    - [6, 7, 1]
+    - [6, 8, 1]
+    - [6, 3, 2]
+    - [6, 4, 2]
+    - [6, 5, 2]
+    - [6, 6, 2]
+    - [6, 7, 2]
+    - [6, 8, 2]
+missions:
+  - mission_id: 1
+    start: [1, 6, 1]
+    goal: [10, 6, 1]
+    protection_xy_radius: 0
+    downwash_xy_radius: 1
+    downwash_z_below: 1
+  - mission_id: 2
+    start: [10, 6, 1]
+    goal: [1, 6, 1]
+    protection_xy_radius: 0
+    downwash_xy_radius: 1
+    downwash_z_below: 1
+  - mission_id: 3
+    start: [6, 1, 1]
+    goal: [6, 10, 1]
+    protection_xy_radius: 0
+    downwash_xy_radius: 1
+    downwash_z_below: 1
+  - mission_id: 4
+    start: [6, 10, 1]
+    goal: [6, 1, 1]
+    protection_xy_radius: 0
+    downwash_xy_radius: 1
+    downwash_z_below: 1
+no_fly_zones:
+  - zone_id: 1
+    enabled: true
+    min_cell: [5, 5, 1]
+    max_cell: [7, 7, 1]
+    start_time_step: 8
+    end_time_step: 12
+max_time_steps: 80
+observation_radius: 2
