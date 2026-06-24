@@ -84,9 +84,9 @@ class _SearchBudget:
 
 def cbs_plan(
     env: UTMMAPFEnv,
-    max_high_level_nodes: int = 50_000,
-    max_low_level_expansions: int = 500_000,
-    max_seconds: float = 30.0,
+    max_high_level_nodes: int = 0,
+    max_low_level_expansions: int = 0,
+    max_seconds: float = 0.0,
 ) -> CBSResult:
     """Generate complete offline demonstrations with Conflict-Based Search.
 

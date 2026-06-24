@@ -51,19 +51,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cbs-max-nodes",
         type=int,
-        default=50_000,
+        default=0,
         help="Maximum CBS high-level nodes. Use 0 for no explicit node limit.",
     )
     parser.add_argument(
         "--cbs-max-low-level-expansions",
         type=int,
-        default=500_000,
+        default=0,
         help="Maximum total low-level A* expansions per CBS solve. Use 0 for no limit.",
     )
     parser.add_argument(
         "--cbs-max-seconds",
         type=float,
-        default=30.0,
+        default=0.0,
         help="Wall-clock seconds allowed per CBS solve. Use 0 for no time limit.",
     )
     parser.add_argument(

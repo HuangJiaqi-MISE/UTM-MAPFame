@@ -82,16 +82,13 @@ python curriculum/collect_expert_dataset.py \
   --overwrite
 ```
 
-Collect CBS clean trajectories with a per-scene budget:
+Collect CBS clean trajectories. By default, CBS runs without a time, node, or low-level expansion budget, so difficult scenarios may take a long time:
 
 ```bash
 python curriculum/collect_expert_dataset.py \
   --scenario-dir configs/generated/teacher_compare_8_train_50 \
   --dataset-dir datasets/teacher_compare_8_cbs_clean \
   --teacher cbs \
-  --cbs-max-seconds 20 \
-  --cbs-max-nodes 20000 \
-  --cbs-max-low-level-expansions 300000 \
   --overwrite
 ```
 
@@ -142,7 +139,7 @@ python curriculum/evaluate_scenarios.py \
   --csv runs/teacher_compare_8_cbs_bc_test.csv
 ```
 
-Compare both teacher datasets first. If CBS stores far more clean scenarios or produces shorter/safer trajectories, then its BC model has a meaningful chance to outperform PIBT. If CBS stores too few scenarios under the time budget, increase `--cbs-max-seconds` or simplify the candidate generator before training.
+Compare both teacher datasets first. If CBS stores far more clean scenarios or produces shorter/safer trajectories, then its BC model has a meaningful chance to outperform PIBT. If CBS is too slow on difficult scenarios, you can re-run with explicit safety limits such as `--cbs-max-seconds 60`, `--cbs-max-nodes 50000`, or `--cbs-max-low-level-expansions 1000000`.
 
 ## Add DAgger Recovery Data
 
