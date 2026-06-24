@@ -10,6 +10,11 @@ from common import load_env, rollout_metrics, rollout_metrics_with_policy, scena
 
 from utm_mappo.expert import prioritized_shortest_path_actions  # noqa: E402
 from utm_mappo.mappo import DiscreteMAPPO  # noqa: E402
+from utm_mappo.space_time_expert import (  # noqa: E402
+    action_from_transition,
+    planned_cell,
+    prioritized_space_time_plan,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,7 +29,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--expert-only",
         action="store_true",
-        help="Evaluate the priority-aware expert instead of a model checkpoint.",
+        help="Evaluate a teacher instead of a model checkpoint.",
+    )
+    parser.add_argument(
+        "--teacher",
+        choices=("space-time", "pibt"),
+        default="space-time",
+        help=(
+            "Teacher for --expert-only. space-time plans once per scenario; "
+            "pibt is the older online one-step heuristic."
+        ),
+    )
+    parser.add_argument(
+        "--planner-retries",
+        type=int,
+        default=64,
+        help="Priority-order attempts for the space-time teacher.",
     )
     return parser.parse_args()
 
@@ -43,12 +63,7 @@ def main() -> None:
     for path in paths:
         env = load_env(path)
         if args.expert_only:
-            row = rollout_metrics_with_policy(
-                env,
-                lambda observations, active_env=env: prioritized_shortest_path_actions(
-                    active_env, sorted(observations)
-                ),
-            )
+            row = evaluate_teacher(env, args.teacher, args.planner_retries)
         else:
             signature = (
                 len(env.possible_agents),
@@ -68,6 +83,7 @@ def main() -> None:
             f"{path.name}: reached={row['reached_count']}/{row['agents']} "
             f"time={row['time_steps']} unsafe={row['unsafe']} "
             f"osc={row['oscillations']}"
+            f"{' planner_failed' if row.get('planner_failed') else ''}"
         )
 
     print_summary(rows)
@@ -92,6 +108,69 @@ def print_summary(rows: list[dict[str, object]]) -> None:
     print(f"  mean_invalid={mean(rows, 'invalid'):.2f}")
     print(f"  mean_no_fly={mean(rows, 'no_fly'):.2f}")
     print(f"  mean_oscillations={mean(rows, 'oscillations'):.2f}")
+
+
+def evaluate_teacher(
+    env,
+    teacher: str,
+    planner_retries: int,
+) -> dict[str, object]:
+    if teacher == "pibt":
+        return rollout_metrics_with_policy(
+            env,
+            lambda observations, active_env=env: prioritized_shortest_path_actions(
+                active_env, sorted(observations)
+            ),
+        )
+
+    env.reset()
+    plan = prioritized_space_time_plan(
+        env,
+        max_retries=planner_retries,
+        seed=1,
+    )
+    if plan is None:
+        return failed_teacher_row(env)
+
+    return rollout_metrics_with_policy(
+        env,
+        lambda observations, active_env=env, active_plan=plan: planned_actions(
+            active_env,
+            active_plan,
+            observations,
+        ),
+    )
+
+
+def planned_actions(env, plan, observations: dict[str, np.ndarray]) -> dict[str, int]:
+    actions = {}
+    for agent in observations:
+        state = env._state_by_agent[agent]
+        next_cell = planned_cell(plan[agent], env.time_step + 1)
+        actions[agent] = action_from_transition(state.cell, next_cell)
+    return actions
+
+
+def failed_teacher_row(env) -> dict[str, object]:
+    env.reset()
+    render_state = env.render()
+    reached = [
+        bool(agent_state["reached_goal"])
+        for agent_state in render_state["agents"].values()
+    ]
+    return {
+        "time_steps": int(render_state["time_step"]),
+        "agents": len(reached),
+        "all_reached": all(reached),
+        "reached_count": int(np.sum(reached)),
+        "moves": 0,
+        "waits": 0,
+        "oscillations": 0,
+        "invalid": 0,
+        "no_fly": 0,
+        "unsafe": 0,
+        "planner_failed": True,
+    }
 
 
 def mean(rows: list[dict[str, object]], key: str) -> float:
