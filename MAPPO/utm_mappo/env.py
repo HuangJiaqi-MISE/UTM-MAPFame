@@ -83,7 +83,10 @@ class UTMMAPFEnv(ParallelEnv):
         self.time_step = 0
         self.np_random = np.random.default_rng()
 
-        self._state_dim = 3 + 3 + 1 + 1 + 1 + len(UTMAction)
+        self._priority_history_dim = 4
+        self._state_dim = (
+            3 + 3 + 1 + 1 + 1 + self._priority_history_dim + len(UTMAction)
+        )
         self._local_channels = 5
         self._local_side = scenario.observation_radius * 2 + 1
         self._obs_dim = self._state_dim + (
@@ -445,6 +448,7 @@ class UTMMAPFEnv(ParallelEnv):
         action_one_hot = np.zeros(len(UTMAction), dtype=np.float32)
         action_one_hot[int(state.last_action)] = 1.0
 
+        priority_history = self._priority_history_features(agent)
         state_vector = np.concatenate(
             [
                 (cell / np.maximum(dims - 1, 1.0)) * 2.0 - 1.0,
@@ -458,6 +462,7 @@ class UTMMAPFEnv(ParallelEnv):
                     ],
                     dtype=np.float32,
                 ),
+                priority_history,
                 action_one_hot,
             ],
             dtype=np.float32,
@@ -465,6 +470,64 @@ class UTMMAPFEnv(ParallelEnv):
 
         local = self._local_observation(agent)
         return np.concatenate([state_vector, local.flatten()], dtype=np.float32)
+
+    def _priority_history_features(self, agent: str) -> np.ndarray:
+        state = self._state_by_agent[agent]
+        mission_ids = [mission.mission_id for mission in self.scenario.missions]
+        min_mission_id = min(mission_ids)
+        max_mission_id = max(mission_ids)
+        mission_span = max(1, max_mission_id - min_mission_id)
+        mission_id_norm = (state.mission.mission_id - min_mission_id) / mission_span
+
+        active_count = max(1, len(self.agents))
+        active_denominator = max(1, active_count - 1)
+        round_robin_rank = (
+            state.mission.mission_id - 1 - self.time_step
+        ) % active_count
+        round_robin_rank_norm = round_robin_rank / active_denominator
+
+        wait_streak_norm = min(self._wait_streak(state.path), 10) / 10.0
+        oscillation_streak_norm = min(self._oscillation_streak(state.path), 5) / 5.0
+
+        return np.asarray(
+            [
+                mission_id_norm,
+                round_robin_rank_norm,
+                wait_streak_norm,
+                oscillation_streak_norm,
+            ],
+            dtype=np.float32,
+        )
+
+    @staticmethod
+    def _wait_streak(path: list[Cell]) -> int:
+        if len(path) < 2:
+            return 0
+
+        streak = 0
+        cursor = len(path) - 1
+        while cursor > 0 and path[cursor] == path[cursor - 1]:
+            streak += 1
+            cursor -= 1
+        return streak
+
+    @staticmethod
+    def _oscillation_streak(path: list[Cell]) -> int:
+        if len(path) < 4:
+            return 0
+
+        streak = 0
+        cursor = len(path) - 1
+        while cursor >= 3:
+            if path[cursor] != path[cursor - 2]:
+                break
+            if path[cursor - 1] != path[cursor - 3]:
+                break
+            if path[cursor] == path[cursor - 1]:
+                break
+            streak += 1
+            cursor -= 2
+        return streak
 
     def _local_observation(self, agent: str) -> np.ndarray:
         radius = self.scenario.observation_radius

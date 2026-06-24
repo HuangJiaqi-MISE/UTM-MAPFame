@@ -28,6 +28,8 @@ Use offline behavior cloning first to teach the actor from expert demonstrations
 
 First collect expert rollouts. The default teacher is a centralized space-time reservation planner for offline demonstration generation. By default this keeps only clean successes: every agent reaches its goal with zero unsafe, invalid, or no-fly holds. Failed or unsafe traces are skipped so the actor does not learn stuck behavior.
 
+Datasets are tied to the current observation shape. Regenerate them after changing observation features.
+
 ```bash
 python curriculum/collect_expert_dataset.py \
   --scenario-dir configs/generated/train_8 \

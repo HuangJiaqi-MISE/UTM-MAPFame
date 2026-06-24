@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from utm_mappo import UTMMAPFEnv, UTMAction
 from utm_mappo.config import GridConfig, MissionConfig, UTMScenario
+from utm_mappo.scenarios import crossing_scenario
 
 
 def test_env_reaches_goal_with_direct_actions() -> None:
@@ -83,3 +84,11 @@ def test_action_mask_rejects_static_invalid_moves() -> None:
     assert mask[UTMAction.WAIT]
     assert not mask[UTMAction.POS_X]
     assert not mask[UTMAction.NEG_X]
+
+
+def test_crossing_observation_includes_priority_history_features() -> None:
+    env = UTMMAPFEnv(crossing_scenario())
+    observations, _ = env.reset()
+
+    assert env.observation_space("agent_1").shape == (645,)
+    assert observations["agent_1"].shape == (645,)
