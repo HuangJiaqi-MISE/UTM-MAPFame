@@ -5,42 +5,42 @@ from .config import GridConfig, MissionConfig, TemporalNoFlyZoneConfig, UTMScena
 
 def crossing_scenario() -> UTMScenario:
     blocked = []
-    for z in range(3):
-        for y in range(3, 9):
-            blocked.append((6, y, z))
-    blocked.remove((6, 6, 1))
+    for z in range(5):
+        for y in range(2, 8):
+            blocked.append((5, y, z))
+    blocked.remove((5, 5, 2))
 
     return UTMScenario(
-        grid=GridConfig(dimensions=(12, 12, 4), blocked_cells=tuple(blocked)),
+        grid=GridConfig(dimensions=(10, 10, 5), blocked_cells=tuple(blocked)),
         missions=(
             MissionConfig(
                 mission_id=1,
-                start=(1, 6, 1),
-                goal=(10, 6, 1),
+                start=(1, 5, 2),
+                goal=(8, 5, 2),
                 protection_class=0,
                 downwash_xy_radius=1,
                 downwash_z_below=1,
             ),
             MissionConfig(
                 mission_id=2,
-                start=(10, 6, 1),
-                goal=(1, 6, 1),
+                start=(8, 5, 2),
+                goal=(1, 5, 2),
                 protection_class=0,
                 downwash_xy_radius=1,
                 downwash_z_below=1,
             ),
             MissionConfig(
                 mission_id=3,
-                start=(6, 1, 1),
-                goal=(6, 10, 1),
+                start=(5, 1, 2),
+                goal=(5, 8, 2),
                 protection_class=0,
                 downwash_xy_radius=1,
                 downwash_z_below=1,
             ),
             MissionConfig(
                 mission_id=4,
-                start=(6, 10, 1),
-                goal=(6, 1, 1),
+                start=(5, 8, 2),
+                goal=(5, 1, 2),
                 protection_class=0,
                 downwash_xy_radius=1,
                 downwash_z_below=1,
@@ -49,8 +49,8 @@ def crossing_scenario() -> UTMScenario:
         no_fly_zones=(
             TemporalNoFlyZoneConfig(
                 zone_id=1,
-                min_cell=(5, 5, 1),
-                max_cell=(7, 7, 1),
+                min_cell=(4, 4, 2),
+                max_cell=(6, 6, 2),
                 start_time_step=8,
                 end_time_step=12,
             ),

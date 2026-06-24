@@ -1,53 +1,65 @@
 grid:
-  dimensions: [12, 12, 4]
+  dimensions: [10, 10, 5]
   blocked_cells:
-    - [6, 3, 0]
-    - [6, 4, 0]
-    - [6, 5, 0]
-    - [6, 6, 0]
-    - [6, 7, 0]
-    - [6, 8, 0]
-    - [6, 3, 1]
-    - [6, 4, 1]
-    - [6, 5, 1]
-    - [6, 7, 1]
-    - [6, 8, 1]
-    - [6, 3, 2]
-    - [6, 4, 2]
-    - [6, 5, 2]
-    - [6, 6, 2]
-    - [6, 7, 2]
-    - [6, 8, 2]
+    - [5, 2, 0]
+    - [5, 3, 0]
+    - [5, 4, 0]
+    - [5, 5, 0]
+    - [5, 6, 0]
+    - [5, 7, 0]
+    - [5, 2, 1]
+    - [5, 3, 1]
+    - [5, 4, 1]
+    - [5, 5, 1]
+    - [5, 6, 1]
+    - [5, 7, 1]
+    - [5, 2, 2]
+    - [5, 3, 2]
+    - [5, 4, 2]
+    - [5, 6, 2]
+    - [5, 7, 2]
+    - [5, 2, 3]
+    - [5, 3, 3]
+    - [5, 4, 3]
+    - [5, 5, 3]
+    - [5, 6, 3]
+    - [5, 7, 3]
+    - [5, 2, 4]
+    - [5, 3, 4]
+    - [5, 4, 4]
+    - [5, 5, 4]
+    - [5, 6, 4]
+    - [5, 7, 4]
 missions:
   - mission_id: 1
-    start: [1, 6, 1]
-    goal: [10, 6, 1]
+    start: [1, 5, 2]
+    goal: [8, 5, 2]
     protection_class: 0
     downwash_xy_radius: 1
     downwash_z_below: 1
   - mission_id: 2
-    start: [10, 6, 1]
-    goal: [1, 6, 1]
+    start: [8, 5, 2]
+    goal: [1, 5, 2]
     protection_class: 0
     downwash_xy_radius: 1
     downwash_z_below: 1
   - mission_id: 3
-    start: [6, 1, 1]
-    goal: [6, 10, 1]
+    start: [5, 1, 2]
+    goal: [5, 8, 2]
     protection_class: 0
     downwash_xy_radius: 1
     downwash_z_below: 1
   - mission_id: 4
-    start: [6, 10, 1]
-    goal: [6, 1, 1]
+    start: [5, 8, 2]
+    goal: [5, 1, 2]
     protection_class: 0
     downwash_xy_radius: 1
     downwash_z_below: 1
 no_fly_zones:
   - zone_id: 1
     enabled: true
-    min_cell: [5, 5, 1]
-    max_cell: [7, 7, 1]
+    min_cell: [4, 4, 2]
+    max_cell: [6, 6, 2]
     start_time_step: 8
     end_time_step: 12
 max_time_steps: 80

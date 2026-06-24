@@ -26,13 +26,13 @@ def _protection_class(value: Any) -> int:
 
 @dataclass(frozen=True)
 class GridConfig:
-    dimensions: Cell = (20, 20, 6)
+    dimensions: Cell = (10, 10, 5)
     blocked_cells: tuple[Cell, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GridConfig":
         return cls(
-            dimensions=_cell(data.get("dimensions", (20, 20, 6)), "grid.dimensions"),
+            dimensions=_cell(data.get("dimensions", (10, 10, 5)), "grid.dimensions"),
             blocked_cells=tuple(
                 _cell(cell, "grid.blocked_cells[]")
                 for cell in data.get("blocked_cells", [])

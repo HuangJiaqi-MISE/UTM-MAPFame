@@ -84,13 +84,13 @@ Scenarios can be loaded from a Python dictionary or YAML file:
 
 ```yaml
 grid:
-  dimensions: [12, 12, 4]
+  dimensions: [10, 10, 5]
   blocked_cells:
     - [5, 5, 0]
 missions:
   - mission_id: 1
-    start: [1, 1, 1]
-    goal: [10, 10, 1]
+    start: [1, 1, 2]
+    goal: [8, 8, 2]
     # Protection class is not a standalone MAPPO conflict type. Class 0 means
     # point footprint; classes 1, 2, and 3 expand the affected body volume.
     protection_class: 0
