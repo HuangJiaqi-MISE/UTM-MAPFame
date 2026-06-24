@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
         help="flows creates opposing boundary traffic; random samples arbitrary pairs.",
     )
     parser.add_argument("--no-fly-zones", type=int, default=1)
-    parser.add_argument("--protection-class", type=int, choices=(1, 2, 3), default=1)
+    parser.add_argument("--protection-class", type=int, choices=(0, 1, 2, 3), default=0)
     parser.add_argument("--downwash-xy-radius", type=int, default=1)
     parser.add_argument("--downwash-z-below", type=int, default=1)
     parser.add_argument("--prefix", type=str, default="scenario")

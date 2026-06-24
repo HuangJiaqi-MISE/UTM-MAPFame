@@ -14,7 +14,7 @@ def test_env_reaches_goal_with_direct_actions() -> None:
                 mission_id=1,
                 start=(0, 1, 0),
                 goal=(2, 1, 0),
-                protection_class=1,
+                protection_class=0,
             ),
         ),
         max_time_steps=8,
@@ -40,13 +40,13 @@ def test_vertex_conflict_yields_higher_mission_id() -> None:
                 mission_id=1,
                 start=(0, 1, 0),
                 goal=(4, 1, 0),
-                protection_class=1,
+                protection_class=0,
             ),
             MissionConfig(
                 mission_id=2,
                 start=(2, 1, 0),
                 goal=(4, 2, 0),
-                protection_class=1,
+                protection_class=0,
             ),
         ),
         max_time_steps=8,
@@ -93,15 +93,24 @@ def test_overlapping_protection_boxes_are_not_standalone_conflicts() -> None:
 
 
 def test_protection_class_sets_fixed_body_volume() -> None:
-    mission = MissionConfig(
+    point_mission = MissionConfig(
         mission_id=1,
+        start=(5, 5, 5),
+        goal=(6, 5, 5),
+        protection_class=0,
+    )
+    mission = MissionConfig(
+        mission_id=2,
         start=(5, 5, 5),
         goal=(6, 5, 5),
         protection_class=2,
     )
 
+    point_box = protection_box(point_mission.start, point_mission)
     box = protection_box(mission.start, mission)
 
+    assert point_box.min_cell == (5, 5, 5)
+    assert point_box.max_cell == (5, 5, 5)
     assert box.min_cell == (3, 3, 3)
     assert box.max_cell == (7, 7, 7)
 
@@ -114,7 +123,7 @@ def test_action_mask_rejects_static_invalid_moves() -> None:
                 mission_id=1,
                 start=(0, 1, 0),
                 goal=(2, 1, 0),
-                protection_class=1,
+                protection_class=0,
             ),
         ),
         max_time_steps=8,

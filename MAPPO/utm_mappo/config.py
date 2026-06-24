@@ -7,7 +7,7 @@ from typing import Any
 import yaml
 
 Cell = tuple[int, int, int]
-PROTECTION_CLASS_SIZES = {1: 1, 2: 2, 3: 3}
+PROTECTION_CLASS_SIZES = {0: 0, 1: 1, 2: 2, 3: 3}
 
 
 def _cell(value: Any, name: str) -> Cell:
@@ -45,7 +45,7 @@ class MissionConfig:
     mission_id: int
     start: Cell
     goal: Cell
-    protection_class: int = 1
+    protection_class: int = 0
     downwash_xy_radius: int = 0
     downwash_z_below: int = 0
 
@@ -75,7 +75,7 @@ class MissionConfig:
             mission_id=int(data["mission_id"]),
             start=_cell(data["start"], "mission.start"),
             goal=_cell(data["goal"], "mission.goal"),
-            protection_class=_protection_class(data.get("protection_class", 1)),
+            protection_class=_protection_class(data.get("protection_class", 0)),
             downwash_xy_radius=max(0, int(data.get("downwash_xy_radius", 0))),
             downwash_z_below=max(0, int(data.get("downwash_z_below", 0))),
         )

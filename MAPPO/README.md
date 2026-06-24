@@ -91,9 +91,9 @@ missions:
   - mission_id: 1
     start: [1, 1, 1]
     goal: [10, 10, 1]
-    # Protection class is not a standalone MAPPO conflict type. It sets the
-    # fixed affected body volume for downwash checks: 1, 2, or 3 cells.
-    protection_class: 1
+    # Protection class is not a standalone MAPPO conflict type. Class 0 means
+    # point footprint; classes 1, 2, and 3 expand the affected body volume.
+    protection_class: 0
     downwash_xy_radius: 1
     downwash_z_below: 1
 no_fly_zones:
