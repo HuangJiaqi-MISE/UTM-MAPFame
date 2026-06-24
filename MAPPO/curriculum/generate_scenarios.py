@@ -29,15 +29,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grid", type=int, nargs=3, default=(10, 10, 5))
     parser.add_argument("--max-time-steps", type=int, default=160)
     parser.add_argument("--observation-radius", type=int, default=2)
-    parser.add_argument("--obstacle-rate", type=float, default=0.04)
+    parser.add_argument("--obstacle-rate", type=float, default=0.0)
+    parser.add_argument("--obstacle-count", type=int, default=0)
+    parser.add_argument("--obstacle-size-min", type=int, nargs=3, default=(1, 1, 1))
+    parser.add_argument("--obstacle-size-max", type=int, nargs=3, default=(1, 1, 1))
     parser.add_argument("--spawn-band", type=int, default=2)
+    parser.add_argument("--disjoint-start-goal", action="store_true")
+    parser.add_argument("--min-goal-distance", type=int, default=1)
+    parser.add_argument(
+        "--max-goal-distance",
+        type=int,
+        default=0,
+        help="Maximum Manhattan start-goal distance. Use 0 for no upper bound.",
+    )
     parser.add_argument(
         "--pattern",
         choices=("flows", "random", "mixed"),
         default="mixed",
         help="flows creates opposing boundary traffic; random samples arbitrary pairs.",
     )
-    parser.add_argument("--no-fly-zones", type=int, default=1)
+    parser.add_argument("--no-fly-zones", type=int, default=0)
+    parser.add_argument("--no-fly-size-min", type=int, nargs=3, default=(1, 1, 1))
+    parser.add_argument("--no-fly-size-max", type=int, nargs=3, default=(1, 1, 1))
     parser.add_argument("--protection-class", type=int, choices=(0, 1, 2, 3), default=0)
     parser.add_argument("--downwash-xy-radius", type=int, default=1)
     parser.add_argument("--downwash-z-below", type=int, default=1)
@@ -79,7 +92,14 @@ def main() -> None:
 
 def try_make_scenario(args: argparse.Namespace, rng: random.Random) -> UTMScenario | None:
     dimensions = tuple(args.grid)
-    blocked = make_blocked_cells(dimensions, args.obstacle_rate, rng)
+    blocked = make_blocked_cells(
+        dimensions=dimensions,
+        obstacle_rate=args.obstacle_rate,
+        obstacle_count=args.obstacle_count,
+        obstacle_size_min=tuple(args.obstacle_size_min),
+        obstacle_size_max=tuple(args.obstacle_size_max),
+        rng=rng,
+    )
     missions = []
     used_starts: set[Cell] = set()
     used_goals: set[Cell] = set()
@@ -93,6 +113,9 @@ def try_make_scenario(args: argparse.Namespace, rng: random.Random) -> UTMScenar
             mission_index=mission_id - 1,
             pattern=args.pattern,
             spawn_band=args.spawn_band,
+            disjoint_start_goal=args.disjoint_start_goal,
+            min_goal_distance=args.min_goal_distance,
+            max_goal_distance=args.max_goal_distance,
             rng=rng,
         )
         if pair is None:
@@ -121,7 +144,12 @@ def try_make_scenario(args: argparse.Namespace, rng: random.Random) -> UTMScenar
         },
         "missions": missions,
         "no_fly_zones": make_no_fly_zones(
-            dimensions, args.no_fly_zones, args.max_time_steps, rng
+            dimensions=dimensions,
+            count=args.no_fly_zones,
+            max_time_steps=args.max_time_steps,
+            size_min=tuple(args.no_fly_size_min),
+            size_max=tuple(args.no_fly_size_max),
+            rng=rng,
         ),
         "max_time_steps": args.max_time_steps,
         "observation_radius": args.observation_radius,
@@ -136,7 +164,12 @@ def try_make_scenario(args: argparse.Namespace, rng: random.Random) -> UTMScenar
 
 
 def make_blocked_cells(
-    dimensions: Cell, obstacle_rate: float, rng: random.Random
+    dimensions: Cell,
+    obstacle_rate: float,
+    obstacle_count: int,
+    obstacle_size_min: Cell,
+    obstacle_size_max: Cell,
+    rng: random.Random,
 ) -> set[Cell]:
     obstacle_rate = min(max(obstacle_rate, 0.0), 0.4)
     blocked: set[Cell] = set()
@@ -145,6 +178,14 @@ def make_blocked_cells(
             for z in range(dimensions[2]):
                 if rng.random() < obstacle_rate:
                     blocked.add((x, y, z))
+    for _ in range(max(0, obstacle_count)):
+        min_cell, max_cell = sample_box(
+            dimensions=dimensions,
+            size_min=obstacle_size_min,
+            size_max=obstacle_size_max,
+            rng=rng,
+        )
+        blocked.update(cells_in_box(min_cell, max_cell))
     return blocked
 
 
@@ -156,6 +197,9 @@ def choose_mission_pair(
     mission_index: int,
     pattern: str,
     spawn_band: int,
+    disjoint_start_goal: bool,
+    min_goal_distance: int,
+    max_goal_distance: int,
     rng: random.Random,
 ) -> tuple[Cell, Cell] | None:
     active_pattern = pattern
@@ -174,6 +218,13 @@ def choose_mission_pair(
         if start in blocked or goal in blocked:
             continue
         if start in used_starts or goal in used_goals:
+            continue
+        if disjoint_start_goal and (start in used_goals or goal in used_starts):
+            continue
+        distance = manhattan_distance(start, goal)
+        if distance < max(1, min_goal_distance):
+            continue
+        if max_goal_distance > 0 and distance > max_goal_distance:
             continue
         return start, goal
     return None
@@ -223,28 +274,86 @@ def make_no_fly_zones(
     dimensions: Cell,
     count: int,
     max_time_steps: int,
+    size_min: Cell,
+    size_max: Cell,
     rng: random.Random,
 ) -> list[dict[str, object]]:
     zones = []
     for zone_id in range(1, count + 1):
-        width = max(1, dimensions[0] // 8)
-        height = max(1, dimensions[1] // 8)
-        x0 = rng.randrange(0, max(1, dimensions[0] - width))
-        y0 = rng.randrange(0, max(1, dimensions[1] - height))
-        z = rng.randrange(dimensions[2])
+        min_cell, max_cell = sample_box(
+            dimensions=dimensions,
+            size_min=size_min,
+            size_max=size_max,
+            rng=rng,
+        )
         start = rng.randrange(max(1, max_time_steps // 5), max(2, max_time_steps // 2))
         duration = rng.randrange(3, max(4, max_time_steps // 8))
         zones.append(
             {
                 "zone_id": zone_id,
                 "enabled": True,
-                "min_cell": [x0, y0, z],
-                "max_cell": [min(dimensions[0] - 1, x0 + width), min(dimensions[1] - 1, y0 + height), z],
+                "min_cell": list(min_cell),
+                "max_cell": list(max_cell),
                 "start_time_step": start,
                 "end_time_step": min(max_time_steps - 1, start + duration),
             }
         )
     return zones
+
+
+def sample_box(
+    dimensions: Cell,
+    size_min: Cell,
+    size_max: Cell,
+    rng: random.Random,
+) -> tuple[Cell, Cell]:
+    min_size, max_size = normalize_size_range(size_min, size_max, dimensions)
+    size = tuple(
+        rng.randint(min_size[index], max_size[index])
+        for index in range(3)
+    )
+    min_cell = tuple(
+        rng.randrange(0, dimensions[index] - size[index] + 1)
+        for index in range(3)
+    )
+    max_cell = tuple(
+        min_cell[index] + size[index] - 1
+        for index in range(3)
+    )
+    return min_cell, max_cell
+
+
+def normalize_size_range(
+    size_min: Cell,
+    size_max: Cell,
+    dimensions: Cell,
+) -> tuple[Cell, Cell]:
+    min_size = tuple(
+        max(1, min(int(size_min[index]), dimensions[index]))
+        for index in range(3)
+    )
+    max_size = tuple(
+        max(min_size[index], min(int(size_max[index]), dimensions[index]))
+        for index in range(3)
+    )
+    return min_size, max_size
+
+
+def cells_in_box(min_cell: Cell, max_cell: Cell) -> set[Cell]:
+    return {
+        (x, y, z)
+        for x in range(min_cell[0], max_cell[0] + 1)
+        for y in range(min_cell[1], max_cell[1] + 1)
+        for z in range(min_cell[2], max_cell[2] + 1)
+    }
+
+
+def manhattan_distance(left: Cell, right: Cell) -> int:
+    return (
+        abs(left[0] - right[0])
+        + abs(left[1] - right[1])
+        + abs(left[2] - right[2])
+    )
 
 
 def static_reachable(

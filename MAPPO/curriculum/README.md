@@ -11,6 +11,12 @@ python curriculum/generate_scenarios.py \
   --agents 8 \
   --count 100 \
   --grid 10 10 5 \
+  --disjoint-start-goal \
+  --min-goal-distance 2 \
+  --max-goal-distance 8 \
+  --obstacle-rate 0.0 \
+  --obstacle-count 0 \
+  --no-fly-zones 0 \
   --out-dir configs/generated/train_8 \
   --seed 8
 ```
@@ -22,6 +28,16 @@ agent count only after the smaller stage is stable:
 python curriculum/generate_scenarios.py --agents 16 --count 100 --grid 10 10 5 --max-time-steps 220 --out-dir configs/generated/train_16 --seed 16
 python curriculum/generate_scenarios.py --agents 32 --count 100 --grid 10 10 5 --max-time-steps 320 --out-dir configs/generated/train_32 --seed 32
 ```
+
+Useful scenario controls:
+
+- `--disjoint-start-goal`: require all starts and goals to be globally unique.
+- `--min-goal-distance N` and `--max-goal-distance N`: constrain each mission's Manhattan start-goal distance.
+- `--obstacle-rate R`: sample independent single-cell obstacles. Defaults to 0.
+- `--obstacle-count N`: sample N cuboid obstacle blocks.
+- `--obstacle-size-min X Y Z` and `--obstacle-size-max X Y Z`: cuboid obstacle size range.
+- `--no-fly-zones N`: sample N temporal no-fly cuboids.
+- `--no-fly-size-min X Y Z` and `--no-fly-size-max X Y Z`: no-fly zone size range.
 
 ## Behavior Clone One Stage
 
@@ -69,7 +85,11 @@ python curriculum/generate_scenarios.py \
   --out-dir configs/generated/teacher_compare_8_train_50 \
   --seed 8801 \
   --pattern mixed \
-  --obstacle-rate 0.02 \
+  --disjoint-start-goal \
+  --min-goal-distance 2 \
+  --max-goal-distance 8 \
+  --obstacle-rate 0.0 \
+  --obstacle-count 0 \
   --no-fly-zones 0
 ```
 
@@ -126,7 +146,13 @@ python curriculum/generate_scenarios.py \
   --out-dir configs/generated/teacher_compare_8_test_100 \
   --seed 8802 \
   --pattern mixed \
+  --disjoint-start-goal \
+  --min-goal-distance 2 \
+  --max-goal-distance 8 \
   --obstacle-rate 0.02 \
+  --obstacle-count 1 \
+  --obstacle-size-min 1 1 1 \
+  --obstacle-size-max 2 2 1 \
   --no-fly-zones 0
 
 python curriculum/evaluate_scenarios.py \

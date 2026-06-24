@@ -62,7 +62,7 @@ The visualization renders one XY grid per Z layer. Gray cells are static obstacl
 For multi-scenario and staged larger-scale training, use the scripts in `curriculum/`:
 
 ```powershell
-python curriculum\generate_scenarios.py --agents 8 --count 100 --out-dir configs\generated\train_8
+python curriculum\generate_scenarios.py --agents 8 --count 100 --out-dir configs\generated\train_8 --disjoint-start-goal --min-goal-distance 2 --max-goal-distance 8 --obstacle-rate 0.0 --obstacle-count 0 --no-fly-zones 0
 python curriculum\pretrain_bc_multi.py --scenario-dir configs\generated\train_8 --init-model-dir models\crossing_attention_stable --model-dir models\curriculum_8_bc --updates 20000
 python curriculum\train_mappo_multi.py --scenario-dir configs\generated\train_8 --init-model-dir models\curriculum_8_bc --model-dir models\curriculum_8 --timesteps 1000000
 python curriculum\evaluate_scenarios.py --scenario-dir configs\generated\train_8 --model-dir models\curriculum_8
