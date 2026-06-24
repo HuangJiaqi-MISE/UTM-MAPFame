@@ -12,6 +12,7 @@ from tqdm import tqdm
 from common import load_env, scenario_paths
 
 from utm_mappo import UTMAction, UTMMAPFEnv  # noqa: E402
+from utm_mappo.cbs_expert import cbs_plan  # noqa: E402
 from utm_mappo.expert import prioritized_shortest_path_actions  # noqa: E402
 from utm_mappo.space_time_expert import (  # noqa: E402
     action_from_transition,
@@ -39,12 +40,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument(
         "--teacher",
-        choices=("space-time", "pibt"),
+        choices=("space-time", "pibt", "cbs"),
         default="space-time",
         help=(
             "Teacher used to generate demonstrations. space-time is an offline "
-            "prioritized reservation planner; pibt is the older online heuristic."
+            "prioritized reservation planner; pibt is the older online heuristic; "
+            "cbs is a bounded CPU Conflict-Based Search teacher for comparison."
         ),
+    )
+    parser.add_argument(
+        "--cbs-max-nodes",
+        type=int,
+        default=50_000,
+        help="Maximum CBS high-level nodes. Use 0 for no explicit node limit.",
+    )
+    parser.add_argument(
+        "--cbs-max-low-level-expansions",
+        type=int,
+        default=500_000,
+        help="Maximum total low-level A* expansions per CBS solve. Use 0 for no limit.",
+    )
+    parser.add_argument(
+        "--cbs-max-seconds",
+        type=float,
+        default=30.0,
+        help="Wall-clock seconds allowed per CBS solve. Use 0 for no time limit.",
     )
     parser.add_argument(
         "--planner-retries",
@@ -88,7 +108,14 @@ def main() -> None:
         env = load_env(path)
         expected_signature = validate_signature(env, expected_signature, path)
 
-        if args.teacher == "space-time":
+        if args.teacher == "cbs":
+            arrays, metrics = collect_cbs_rollout(
+                env,
+                max_high_level_nodes=args.cbs_max_nodes,
+                max_low_level_expansions=args.cbs_max_low_level_expansions,
+                max_seconds=args.cbs_max_seconds,
+            )
+        elif args.teacher == "space-time":
             arrays, metrics = collect_space_time_rollout(
                 env,
                 planner_retries=args.planner_retries,
@@ -118,6 +145,18 @@ def main() -> None:
                     "unsafe": int(metrics["unsafe"]),
                     "oscillations": int(metrics["oscillations"]),
                     "teacher": args.teacher,
+                    "planner_reason": metrics.get("planner_reason"),
+                    "cbs_expanded_nodes": int(metrics.get("cbs_expanded_nodes", 0)),
+                    "cbs_generated_nodes": int(metrics.get("cbs_generated_nodes", 0)),
+                    "cbs_low_level_searches": int(
+                        metrics.get("cbs_low_level_searches", 0)
+                    ),
+                    "cbs_low_level_expansions": int(
+                        metrics.get("cbs_low_level_expansions", 0)
+                    ),
+                    "cbs_elapsed_seconds": float(
+                        metrics.get("cbs_elapsed_seconds", 0.0)
+                    ),
                 }
             )
             stored_index += 1
@@ -204,6 +243,41 @@ def collect_space_time_rollout(
         metrics["planner_failed"] = True
         return empty_arrays(env), metrics
     return collect_planned_rollout(env, plan)
+
+
+def collect_cbs_rollout(
+    env: UTMMAPFEnv,
+    max_high_level_nodes: int,
+    max_low_level_expansions: int,
+    max_seconds: float,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    env.reset()
+    result = cbs_plan(
+        env,
+        max_high_level_nodes=max_high_level_nodes,
+        max_low_level_expansions=max_low_level_expansions,
+        max_seconds=max_seconds,
+    )
+    if result.plan is None:
+        metrics = empty_metrics(env)
+        metrics["planner_failed"] = True
+        metrics["planner_reason"] = result.reason
+        metrics["cbs_expanded_nodes"] = result.expanded_nodes
+        metrics["cbs_generated_nodes"] = result.generated_nodes
+        metrics["cbs_low_level_searches"] = result.low_level_searches
+        metrics["cbs_low_level_expansions"] = result.low_level_expansions
+        metrics["cbs_elapsed_seconds"] = result.elapsed_seconds
+        return empty_arrays(env), metrics
+
+    arrays, metrics = collect_planned_rollout(env, result.plan)
+    metrics["planner_failed"] = False
+    metrics["planner_reason"] = result.reason
+    metrics["cbs_expanded_nodes"] = result.expanded_nodes
+    metrics["cbs_generated_nodes"] = result.generated_nodes
+    metrics["cbs_low_level_searches"] = result.low_level_searches
+    metrics["cbs_low_level_expansions"] = result.low_level_expansions
+    metrics["cbs_elapsed_seconds"] = result.elapsed_seconds
+    return arrays, metrics
 
 
 def collect_planned_rollout(
@@ -435,12 +509,11 @@ def build_metadata(
     )
     return {
         "version": 1,
-        "source": (
-            "utm_mappo.space_time_expert.prioritized_space_time_plan"
-            if args.teacher == "space-time"
-            else "utm_mappo.expert.prioritized_shortest_path_actions"
-        ),
+        "source": teacher_source(args.teacher),
         "teacher": args.teacher,
+        "cbs_max_nodes": int(args.cbs_max_nodes),
+        "cbs_max_low_level_expansions": int(args.cbs_max_low_level_expansions),
+        "cbs_max_seconds": float(args.cbs_max_seconds),
         "planner_retries": int(args.planner_retries),
         "scenario_dir": str(args.scenario_dir),
         "scenario_dir_resolved": str(args.scenario_dir.resolve()),
@@ -460,8 +533,21 @@ def build_metadata(
         "expert_mean_time_steps": mean(rows, "time_steps"),
         "expert_mean_unsafe": mean(rows, "unsafe"),
         "expert_mean_oscillations": mean(rows, "oscillations"),
+        "cbs_mean_expanded_nodes": mean(rows, "cbs_expanded_nodes"),
+        "cbs_mean_generated_nodes": mean(rows, "cbs_generated_nodes"),
+        "cbs_mean_low_level_searches": mean(rows, "cbs_low_level_searches"),
+        "cbs_mean_low_level_expansions": mean(rows, "cbs_low_level_expansions"),
+        "cbs_mean_elapsed_seconds": mean(rows, "cbs_elapsed_seconds"),
         "shards": shards,
     }
+
+
+def teacher_source(teacher: str) -> str:
+    if teacher == "cbs":
+        return "utm_mappo.cbs_expert.cbs_plan"
+    if teacher == "space-time":
+        return "utm_mappo.space_time_expert.prioritized_space_time_plan"
+    return "utm_mappo.expert.prioritized_shortest_path_actions"
 
 
 def is_clean_success(metrics: dict[str, Any]) -> bool:
@@ -491,7 +577,7 @@ def print_summary(
 def mean(rows: list[dict[str, Any]], key: str) -> float:
     if not rows:
         return 0.0
-    return float(np.mean([float(row[key]) for row in rows]))
+    return float(np.mean([float(row.get(key, 0.0)) for row in rows]))
 
 
 def mean_bool(rows: list[dict[str, Any]], key: str) -> float:

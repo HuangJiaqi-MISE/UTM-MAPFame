@@ -53,6 +53,97 @@ The older online script `curriculum/pretrain_bc_multi.py` is still available for
 
 To reproduce the older PIBT-style single-step teacher during collection, pass `--teacher pibt`. The default `--teacher space-time` is stronger for dataset generation, but it is still a prioritized planner rather than a complete centralized solver; scenarios it cannot solve are skipped.
 
+## Compare PIBT And CBS Teachers
+
+Use the same candidate scenarios when comparing teachers. This tells us whether a stronger centralized CBS teacher produces better student policies than the faster PIBT-style online heuristic.
+
+Start with a small pool because the current CBS teacher is a bounded CPU baseline. It is intended for teacher-quality experiments before CUDA integration.
+
+```bash
+python curriculum/generate_scenarios.py \
+  --agents 8 \
+  --count 50 \
+  --grid 20 20 4 \
+  --max-time-steps 180 \
+  --out-dir configs/generated/teacher_compare_8_train_50 \
+  --seed 8801 \
+  --pattern mixed \
+  --obstacle-rate 0.02 \
+  --no-fly-zones 0
+```
+
+Collect PIBT clean trajectories:
+
+```bash
+python curriculum/collect_expert_dataset.py \
+  --scenario-dir configs/generated/teacher_compare_8_train_50 \
+  --dataset-dir datasets/teacher_compare_8_pibt_clean \
+  --teacher pibt \
+  --overwrite
+```
+
+Collect CBS clean trajectories with a per-scene budget:
+
+```bash
+python curriculum/collect_expert_dataset.py \
+  --scenario-dir configs/generated/teacher_compare_8_train_50 \
+  --dataset-dir datasets/teacher_compare_8_cbs_clean \
+  --teacher cbs \
+  --cbs-max-seconds 20 \
+  --cbs-max-nodes 20000 \
+  --cbs-max-low-level-expansions 300000 \
+  --overwrite
+```
+
+Then train one BC model per teacher:
+
+```bash
+python curriculum/train_bc_dataset.py \
+  --dataset-dir datasets/teacher_compare_8_pibt_clean \
+  --scenario-dir configs/generated/teacher_compare_8_train_50 \
+  --init-model-dir models/crossing_attention_stable \
+  --model-dir models/teacher_compare_8_pibt_bc \
+  --epochs 60 \
+  --batch-size 512 \
+  --learning-rate 1e-4
+
+python curriculum/train_bc_dataset.py \
+  --dataset-dir datasets/teacher_compare_8_cbs_clean \
+  --scenario-dir configs/generated/teacher_compare_8_train_50 \
+  --init-model-dir models/crossing_attention_stable \
+  --model-dir models/teacher_compare_8_cbs_bc \
+  --epochs 60 \
+  --batch-size 512 \
+  --learning-rate 1e-4
+```
+
+Use a separate test pool for policy comparison:
+
+```bash
+python curriculum/generate_scenarios.py \
+  --agents 8 \
+  --count 100 \
+  --grid 20 20 4 \
+  --max-time-steps 180 \
+  --out-dir configs/generated/teacher_compare_8_test_100 \
+  --seed 8802 \
+  --pattern mixed \
+  --obstacle-rate 0.02 \
+  --no-fly-zones 0
+
+python curriculum/evaluate_scenarios.py \
+  --scenario-dir configs/generated/teacher_compare_8_test_100 \
+  --model-dir models/teacher_compare_8_pibt_bc \
+  --csv runs/teacher_compare_8_pibt_bc_test.csv
+
+python curriculum/evaluate_scenarios.py \
+  --scenario-dir configs/generated/teacher_compare_8_test_100 \
+  --model-dir models/teacher_compare_8_cbs_bc \
+  --csv runs/teacher_compare_8_cbs_bc_test.csv
+```
+
+Compare both teacher datasets first. If CBS stores far more clean scenarios or produces shorter/safer trajectories, then its BC model has a meaningful chance to outperform PIBT. If CBS stores too few scenarios under the time budget, increase `--cbs-max-seconds` or simplify the candidate generator before training.
+
 ## Add DAgger Recovery Data
 
 Clean expert rollouts only show the actor states that the teacher visits. If the trained actor drifts into a different state, it may not know how to recover. Use DAgger-style collection to roll in with the current actor and label those visited states with the online priority-aware teacher.
