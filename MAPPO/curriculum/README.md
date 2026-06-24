@@ -53,6 +53,51 @@ The older online script `curriculum/pretrain_bc_multi.py` is still available for
 
 To reproduce the older PIBT-style single-step teacher during collection, pass `--teacher pibt`. The default `--teacher space-time` is stronger for dataset generation, but it is still a prioritized planner rather than a complete centralized solver; scenarios it cannot solve are skipped.
 
+## Add DAgger Recovery Data
+
+Clean expert rollouts only show the actor states that the teacher visits. If the trained actor drifts into a different state, it may not know how to recover. Use DAgger-style collection to roll in with the current actor and label those visited states with the online priority-aware teacher.
+
+This command copies the clean BC dataset into a new aggregate dataset, then appends recovery samples from the current policy:
+
+```bash
+python curriculum/collect_dagger_dataset.py \
+  --scenario-dir configs/generated/train_8_easy_30 \
+  --base-dataset-dir datasets/train_8_easy_30_pibt_clean_obs645 \
+  --policy-model-dir models/curriculum_8_easy_30_bc_obs645 \
+  --dataset-dir datasets/train_8_easy_30_dagger_obs645 \
+  --episodes-per-scenario 2 \
+  --epsilon 0.05 \
+  --overwrite
+```
+
+Then continue BC from the same actor on the aggregate dataset:
+
+```bash
+python curriculum/train_bc_dataset.py \
+  --dataset-dir datasets/train_8_easy_30_dagger_obs645 \
+  --scenario-dir configs/generated/train_8_easy_30 \
+  --init-model-dir models/curriculum_8_easy_30_bc_obs645 \
+  --model-dir models/curriculum_8_easy_30_bc_obs645_dagger \
+  --epochs 40 \
+  --batch-size 512 \
+  --learning-rate 5e-5
+```
+
+Evaluate before moving to MAPPO fine-tuning:
+
+```bash
+python curriculum/evaluate_scenarios.py \
+  --scenario-dir configs/generated/train_8_easy_30 \
+  --model-dir models/curriculum_8_easy_30_bc_obs645_dagger
+```
+
+Useful DAgger collection switches:
+
+- `--epsilon`: adds random valid roll-in actions, which creates more recovery states.
+- `--stochastic`: samples from the actor policy instead of using argmax actions.
+- `--teacher-rollin-prob`: occasionally executes teacher actions while still labeling every stored state with teacher actions.
+- `--only-disagreements`: stores only states where actor and teacher actions differ.
+
 ## Train One Stage
 
 Each training stage expects all YAML files in the directory to have the same mission ids and observation shape.
