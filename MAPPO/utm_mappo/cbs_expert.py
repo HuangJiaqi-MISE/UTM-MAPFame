@@ -93,7 +93,7 @@ def cbs_plan(
     This is a CPU baseline for teacher comparison experiments. It keeps CBS
     bounded so a difficult scene is skipped instead of blocking dataset
     generation. The conflict predicate is the same UTM transition predicate used
-    by the environment, including protection boxes, edge swaps, and downwash.
+    by the environment: vertex, edge, and downwash conflicts.
     """
 
     started = time.monotonic()
@@ -265,18 +265,16 @@ def find_first_conflict(env: UTMMAPFEnv, paths: CBSPlan) -> Conflict | None:
 
 
 def constraints_for_conflict(conflict: Conflict) -> tuple[Constraint, Constraint]:
-    if conflict.reason != "protection":
+    if conflict.reason == "vertex":
         return (
             Constraint(
                 agent=conflict.agent_a,
-                time_step=conflict.time_step,
-                from_cell=conflict.from_a,
+                time_step=conflict.time_step + 1,
                 to_cell=conflict.to_a,
             ),
             Constraint(
                 agent=conflict.agent_b,
-                time_step=conflict.time_step,
-                from_cell=conflict.from_b,
+                time_step=conflict.time_step + 1,
                 to_cell=conflict.to_b,
             ),
         )
@@ -284,12 +282,14 @@ def constraints_for_conflict(conflict: Conflict) -> tuple[Constraint, Constraint
     return (
         Constraint(
             agent=conflict.agent_a,
-            time_step=conflict.time_step + 1,
+            time_step=conflict.time_step,
+            from_cell=conflict.from_a,
             to_cell=conflict.to_a,
         ),
         Constraint(
             agent=conflict.agent_b,
-            time_step=conflict.time_step + 1,
+            time_step=conflict.time_step,
+            from_cell=conflict.from_b,
             to_cell=conflict.to_b,
         ),
     )

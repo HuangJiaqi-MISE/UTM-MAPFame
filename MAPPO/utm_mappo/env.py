@@ -417,12 +417,9 @@ class UTMMAPFEnv(ParallelEnv):
 
         for index_a, mission_a in enumerate(self.scenario.missions):
             for mission_b in self.scenario.missions[index_a + 1 :]:
-                if boxes_overlap(
-                    protection_box(mission_a.start, mission_a),
-                    protection_box(mission_b.start, mission_b),
-                ):
+                if mission_a.start == mission_b.start:
                     raise ValueError(
-                        "initial protection conflict between "
+                        "initial vertex conflict between "
                         f"mission {mission_a.mission_id} and mission {mission_b.mission_id}"
                     )
                 if boxes_overlap(

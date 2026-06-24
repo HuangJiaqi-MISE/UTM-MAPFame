@@ -7,12 +7,21 @@ from typing import Any
 import yaml
 
 Cell = tuple[int, int, int]
+PROTECTION_CLASS_SIZES = {1: 1, 2: 2, 3: 3}
 
 
 def _cell(value: Any, name: str) -> Cell:
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         raise ValueError(f"{name} must be a 3-item cell coordinate")
     return int(value[0]), int(value[1]), int(value[2])
+
+
+def _protection_class(value: Any) -> int:
+    protection_class = int(value)
+    if protection_class not in PROTECTION_CLASS_SIZES:
+        allowed = ", ".join(str(item) for item in sorted(PROTECTION_CLASS_SIZES))
+        raise ValueError(f"protection_class must be one of: {allowed}")
+    return protection_class
 
 
 @dataclass(frozen=True)
@@ -36,24 +45,44 @@ class MissionConfig:
     mission_id: int
     start: Cell
     goal: Cell
-    protection_xy_radius: int = 1
-    protection_z_up: int = 0
-    protection_z_down: int = 0
+    protection_class: int = 1
     downwash_xy_radius: int = 0
     downwash_z_below: int = 0
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "protection_class",
+            _protection_class(self.protection_class),
+        )
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MissionConfig":
+        allowed_keys = {
+            "mission_id",
+            "start",
+            "goal",
+            "protection_class",
+            "downwash_xy_radius",
+            "downwash_z_below",
+        }
+        unknown_keys = sorted(set(data) - allowed_keys)
+        if unknown_keys:
+            joined = ", ".join(unknown_keys)
+            raise ValueError(f"unknown mission fields: {joined}")
+
         return cls(
             mission_id=int(data["mission_id"]),
             start=_cell(data["start"], "mission.start"),
             goal=_cell(data["goal"], "mission.goal"),
-            protection_xy_radius=max(0, int(data.get("protection_xy_radius", 1))),
-            protection_z_up=max(0, int(data.get("protection_z_up", 0))),
-            protection_z_down=max(0, int(data.get("protection_z_down", 0))),
+            protection_class=_protection_class(data.get("protection_class", 1)),
             downwash_xy_radius=max(0, int(data.get("downwash_xy_radius", 0))),
             downwash_z_below=max(0, int(data.get("downwash_z_below", 0))),
         )
+
+    @property
+    def protection_size(self) -> int:
+        return PROTECTION_CLASS_SIZES[self.protection_class]
 
 
 @dataclass(frozen=True)
@@ -135,9 +164,7 @@ class UTMScenario:
                     "mission_id": mission.mission_id,
                     "start": list(mission.start),
                     "goal": list(mission.goal),
-                    "protection_xy_radius": mission.protection_xy_radius,
-                    "protection_z_up": mission.protection_z_up,
-                    "protection_z_down": mission.protection_z_down,
+                    "protection_class": mission.protection_class,
                     "downwash_xy_radius": mission.downwash_xy_radius,
                     "downwash_z_below": mission.downwash_z_below,
                 }

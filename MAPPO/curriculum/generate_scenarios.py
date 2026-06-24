@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
         help="flows creates opposing boundary traffic; random samples arbitrary pairs.",
     )
     parser.add_argument("--no-fly-zones", type=int, default=1)
-    parser.add_argument("--protection-xy-radius", type=int, default=0)
+    parser.add_argument("--protection-class", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--downwash-xy-radius", type=int, default=1)
     parser.add_argument("--downwash-z-below", type=int, default=1)
     parser.add_argument("--prefix", type=str, default="scenario")
@@ -108,7 +108,7 @@ def try_make_scenario(args: argparse.Namespace, rng: random.Random) -> UTMScenar
                 "mission_id": mission_id,
                 "start": list(start),
                 "goal": list(goal),
-                "protection_xy_radius": args.protection_xy_radius,
+                "protection_class": args.protection_class,
                 "downwash_xy_radius": args.downwash_xy_radius,
                 "downwash_z_below": args.downwash_z_below,
             }

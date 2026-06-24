@@ -9,7 +9,8 @@ The environment is intentionally aligned with the Unreal/C++ system:
 - Actions: wait, +/-X, +/-Y, +/-Z
 - Static occupancy constraints
 - Temporal no-fly zone constraints
-- UTM protection boxes
+- Dynamic conflicts: vertex, edge, and downwash
+- Fixed protection boxes used as the affected body volume in downwash checks
 - Downwash boxes, including transition sweep checks
 - Finished agents remain as stationary goal anchors
 - Safety gate behavior: unsafe proposals are arbitrated into hold actions and penalized
@@ -90,9 +91,9 @@ missions:
   - mission_id: 1
     start: [1, 1, 1]
     goal: [10, 10, 1]
-    protection_xy_radius: 1
-    protection_z_up: 0
-    protection_z_down: 0
+    # Protection class is not a standalone MAPPO conflict type. It sets the
+    # fixed affected body volume for downwash checks: 1, 2, or 3 cells.
+    protection_class: 1
     downwash_xy_radius: 1
     downwash_z_below: 1
 no_fly_zones:

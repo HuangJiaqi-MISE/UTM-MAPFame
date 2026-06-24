@@ -64,16 +64,17 @@ def boxes_overlap(left: Box3D | None, right: Box3D | None) -> bool:
 
 
 def protection_box(cell: Cell, mission: MissionConfig) -> Box3D:
+    size = mission.protection_size
     return Box3D(
         min_cell=(
-            cell[0] - mission.protection_xy_radius,
-            cell[1] - mission.protection_xy_radius,
-            cell[2] - mission.protection_z_down,
+            cell[0] - size,
+            cell[1] - size,
+            cell[2] - size,
         ),
         max_cell=(
-            cell[0] + mission.protection_xy_radius,
-            cell[1] + mission.protection_xy_radius,
-            cell[2] + mission.protection_z_up,
+            cell[0] + size,
+            cell[1] + size,
+            cell[2] + size,
         ),
     )
 
@@ -134,11 +135,11 @@ def transition_conflict(
     to_b: Cell,
     mission_b: MissionConfig,
 ) -> str | None:
-    if boxes_overlap(protection_box(to_a, mission_a), protection_box(to_b, mission_b)):
-        return "protection"
+    if to_a == to_b:
+        return "vertex"
 
     if from_a == to_b and from_b == to_a and to_a != to_b:
-        return "edge_swap"
+        return "edge"
 
     if has_downwash_conflict(from_a, to_a, mission_a, from_b, to_b, mission_b):
         return "downwash"

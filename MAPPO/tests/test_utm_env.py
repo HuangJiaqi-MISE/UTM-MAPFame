@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from utm_mappo import UTMMAPFEnv, UTMAction
 from utm_mappo.config import GridConfig, MissionConfig, UTMScenario
+from utm_mappo.geometry import protection_box, transition_conflict
 from utm_mappo.scenarios import crossing_scenario
 
 
@@ -13,7 +14,7 @@ def test_env_reaches_goal_with_direct_actions() -> None:
                 mission_id=1,
                 start=(0, 1, 0),
                 goal=(2, 1, 0),
-                protection_xy_radius=0,
+                protection_class=1,
             ),
         ),
         max_time_steps=8,
@@ -31,7 +32,7 @@ def test_env_reaches_goal_with_direct_actions() -> None:
     assert env.render()["agents"]["agent_1"]["cell"] == (2, 1, 0)
 
 
-def test_protection_conflict_yields_higher_mission_id() -> None:
+def test_vertex_conflict_yields_higher_mission_id() -> None:
     scenario = UTMScenario(
         grid=GridConfig(dimensions=(5, 3, 2)),
         missions=(
@@ -39,13 +40,13 @@ def test_protection_conflict_yields_higher_mission_id() -> None:
                 mission_id=1,
                 start=(0, 1, 0),
                 goal=(4, 1, 0),
-                protection_xy_radius=0,
+                protection_class=1,
             ),
             MissionConfig(
                 mission_id=2,
                 start=(2, 1, 0),
                 goal=(4, 2, 0),
-                protection_xy_radius=0,
+                protection_class=1,
             ),
         ),
         max_time_steps=8,
@@ -59,8 +60,50 @@ def test_protection_conflict_yields_higher_mission_id() -> None:
 
     assert not infos["agent_1"]["unsafe_hold"]
     assert infos["agent_2"]["unsafe_hold"]
+    assert infos["agent_2"]["conflict_reason"] == "vertex"
     assert env.render()["agents"]["agent_1"]["cell"] == (1, 1, 0)
     assert env.render()["agents"]["agent_2"]["cell"] == (2, 1, 0)
+
+
+def test_overlapping_protection_boxes_are_not_standalone_conflicts() -> None:
+    mission_a = MissionConfig(
+        mission_id=1,
+        start=(1, 1, 0),
+        goal=(3, 1, 0),
+        protection_class=1,
+    )
+    mission_b = MissionConfig(
+        mission_id=2,
+        start=(3, 1, 0),
+        goal=(1, 1, 0),
+        protection_class=1,
+    )
+
+    assert (
+        transition_conflict(
+            mission_a.start,
+            mission_a.start,
+            mission_a,
+            mission_b.start,
+            mission_b.start,
+            mission_b,
+        )
+        is None
+    )
+
+
+def test_protection_class_sets_fixed_body_volume() -> None:
+    mission = MissionConfig(
+        mission_id=1,
+        start=(5, 5, 5),
+        goal=(6, 5, 5),
+        protection_class=2,
+    )
+
+    box = protection_box(mission.start, mission)
+
+    assert box.min_cell == (3, 3, 3)
+    assert box.max_cell == (7, 7, 7)
 
 
 def test_action_mask_rejects_static_invalid_moves() -> None:
@@ -71,7 +114,7 @@ def test_action_mask_rejects_static_invalid_moves() -> None:
                 mission_id=1,
                 start=(0, 1, 0),
                 goal=(2, 1, 0),
-                protection_xy_radius=0,
+                protection_class=1,
             ),
         ),
         max_time_steps=8,
