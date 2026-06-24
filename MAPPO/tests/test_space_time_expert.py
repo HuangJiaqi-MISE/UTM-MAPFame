@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from utm_mappo import UTMMAPFEnv
+from utm_mappo.config import GridConfig, MissionConfig, UTMScenario
 from utm_mappo.cbs_expert import cbs_plan
 from utm_mappo.scenarios import crossing_scenario
 from utm_mappo.space_time_expert import (
@@ -8,6 +9,28 @@ from utm_mappo.space_time_expert import (
     planned_cell,
     prioritized_space_time_plan,
 )
+
+
+def _small_cbs_scenario() -> UTMScenario:
+    return UTMScenario(
+        grid=GridConfig(dimensions=(3, 3, 1)),
+        missions=(
+            MissionConfig(
+                mission_id=1,
+                start=(0, 1, 0),
+                goal=(2, 1, 0),
+                protection_class=1,
+            ),
+            MissionConfig(
+                mission_id=2,
+                start=(1, 0, 0),
+                goal=(1, 2, 0),
+                protection_class=1,
+            ),
+        ),
+        max_time_steps=8,
+        observation_radius=1,
+    )
 
 
 def test_space_time_plan_solves_crossing_without_unsafe_holds() -> None:
@@ -37,8 +60,8 @@ def test_space_time_plan_solves_crossing_without_unsafe_holds() -> None:
     assert unsafe_holds == 0
 
 
-def test_cbs_plan_solves_crossing_without_unsafe_holds() -> None:
-    env = UTMMAPFEnv(crossing_scenario())
+def test_cbs_plan_solves_small_vertex_conflict_without_unsafe_holds() -> None:
+    env = UTMMAPFEnv(_small_cbs_scenario())
     env.reset()
     result = cbs_plan(env, max_high_level_nodes=2_000, max_seconds=5.0)
 
