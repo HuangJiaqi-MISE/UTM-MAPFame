@@ -35,6 +35,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--progress-reward-scale", type=float, default=1.0)
     parser.add_argument("--step-penalty", type=float, default=-0.02)
     parser.add_argument("--wait-penalty", type=float, default=-0.02)
+    parser.add_argument("--wait-streak-penalty-scale", type=float, default=0.0)
+    parser.add_argument("--wait-streak-penalty-cap", type=int, default=20)
+    parser.add_argument("--blocking-penalty", type=float, default=0.0)
     parser.add_argument("--oscillation-penalty", type=float, default=-0.2)
     parser.add_argument("--unsafe-hold-penalty", type=float, default=-3.0)
     return parser.parse_args()
@@ -51,6 +54,9 @@ def main() -> None:
         "progress_reward_scale": args.progress_reward_scale,
         "step_penalty": args.step_penalty,
         "wait_penalty": args.wait_penalty,
+        "wait_streak_penalty_scale": args.wait_streak_penalty_scale,
+        "wait_streak_penalty_cap": args.wait_streak_penalty_cap,
+        "blocking_penalty": args.blocking_penalty,
         "oscillation_penalty": args.oscillation_penalty,
         "unsafe_hold_penalty": args.unsafe_hold_penalty,
     }

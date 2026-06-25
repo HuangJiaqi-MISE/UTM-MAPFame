@@ -51,6 +51,9 @@ class UTMMAPFEnv(ParallelEnv):
         unsafe_hold_penalty: float = -2.0,
         step_penalty: float = -0.05,
         wait_penalty: float = -0.02,
+        wait_streak_penalty_scale: float = 0.0,
+        wait_streak_penalty_cap: int = 20,
+        blocking_penalty: float = 0.0,
         oscillation_penalty: float = -0.2,
         goal_reward: float = 10.0,
         progress_reward_scale: float = 0.25,
@@ -63,6 +66,9 @@ class UTMMAPFEnv(ParallelEnv):
         self.unsafe_hold_penalty = unsafe_hold_penalty
         self.step_penalty = step_penalty
         self.wait_penalty = wait_penalty
+        self.wait_streak_penalty_scale = wait_streak_penalty_scale
+        self.wait_streak_penalty_cap = wait_streak_penalty_cap
+        self.blocking_penalty = blocking_penalty
         self.oscillation_penalty = oscillation_penalty
         self.goal_reward = goal_reward
         self.progress_reward_scale = progress_reward_scale
@@ -175,7 +181,9 @@ class UTMMAPFEnv(ParallelEnv):
         invalid_agents: set[str] = set()
         no_fly_agents: set[str] = set()
         unsafe_agents: set[str] = set()
+        blocking_agents: set[str] = set()
         conflict_reasons: dict[str, str] = {}
+        blocking_reasons: dict[str, str] = {}
 
         for agent in self.possible_agents:
             state = self._state_by_agent[agent]
@@ -204,7 +212,9 @@ class UTMMAPFEnv(ParallelEnv):
         self._resolve_dynamic_conflicts(
             proposals=proposals,
             unsafe_agents=unsafe_agents,
+            blocking_agents=blocking_agents,
             conflict_reasons=conflict_reasons,
+            blocking_reasons=blocking_reasons,
         )
 
         rewards: dict[str, float] = {}
@@ -224,6 +234,7 @@ class UTMMAPFEnv(ParallelEnv):
             reached_now = new_cell == state.mission.goal
             waited = new_cell == old_cell and not reached_now
             oscillated = new_cell == previous_cell and new_cell != old_cell
+            wait_streak = self._wait_streak(state.path + [new_cell]) if waited else 0
 
             state.previous_cell = old_cell
             state.cell = new_cell
@@ -242,6 +253,11 @@ class UTMMAPFEnv(ParallelEnv):
                 reward += self.unsafe_hold_penalty
             if waited:
                 reward += self.wait_penalty
+                if self.wait_streak_penalty_scale != 0.0:
+                    capped_streak = min(wait_streak, self.wait_streak_penalty_cap)
+                    reward += self.wait_streak_penalty_scale * capped_streak
+            if agent in blocking_agents:
+                reward += self.blocking_penalty
             if oscillated:
                 reward += self.oscillation_penalty
             if reached_now:
@@ -258,9 +274,12 @@ class UTMMAPFEnv(ParallelEnv):
                 "invalid_action": agent in invalid_agents,
                 "no_fly_hold": agent in no_fly_agents,
                 "unsafe_hold": agent in unsafe_agents,
+                "blocking_hold": agent in blocking_agents,
                 "waited": waited,
+                "wait_streak": wait_streak,
                 "oscillated": oscillated,
                 "conflict_reason": conflict_reasons.get(agent),
+                "blocking_reason": blocking_reasons.get(agent),
             }
 
         self.agents = [
@@ -298,7 +317,9 @@ class UTMMAPFEnv(ParallelEnv):
         self,
         proposals: dict[str, Cell],
         unsafe_agents: set[str],
+        blocking_agents: set[str],
         conflict_reasons: dict[str, str],
+        blocking_reasons: dict[str, str],
     ) -> None:
         names = self.possible_agents
         max_passes = max(1, len(names) * 2)
@@ -330,6 +351,14 @@ class UTMMAPFEnv(ParallelEnv):
                         yielding_agent = other_agent
 
                     if yielding_agent in self.agents:
+                        blocking_agent = agent_b if yielding_agent == agent_a else agent_a
+                        self._mark_blocking_agent(
+                            blocking_agent,
+                            reason,
+                            proposals,
+                            blocking_agents,
+                            blocking_reasons,
+                        )
                         unsafe_agents.add(yielding_agent)
                         conflict_reasons[yielding_agent] = reason
                         current_cell = self._state_by_agent[yielding_agent].cell
@@ -346,6 +375,14 @@ class UTMMAPFEnv(ParallelEnv):
                 for agent in (agent_a, agent_b):
                     if agent not in self.agents:
                         continue
+                    other_agent = agent_b if agent == agent_a else agent_a
+                    self._mark_blocking_agent(
+                        other_agent,
+                        reason,
+                        proposals,
+                        blocking_agents,
+                        blocking_reasons,
+                    )
                     unsafe_agents.add(agent)
                     conflict_reasons[agent] = reason
                     current_cell = self._state_by_agent[agent].cell
@@ -355,6 +392,24 @@ class UTMMAPFEnv(ParallelEnv):
 
             if not changed:
                 break
+
+    def _mark_blocking_agent(
+        self,
+        agent: str,
+        reason: str,
+        proposals: dict[str, Cell],
+        blocking_agents: set[str],
+        blocking_reasons: dict[str, str],
+    ) -> None:
+        if agent not in self.agents:
+            return
+        state = self._state_by_agent[agent]
+        if state.reached_goal:
+            return
+        if proposals[agent] != state.cell:
+            return
+        blocking_agents.add(agent)
+        blocking_reasons[agent] = reason
 
     def _choose_yielding_agent(
         self, agent_a: str, agent_b: str, proposals: dict[str, Cell]

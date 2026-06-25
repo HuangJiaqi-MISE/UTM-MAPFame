@@ -163,6 +163,77 @@ def test_action_mask_rejects_static_invalid_moves() -> None:
     assert not mask[UTMAction.NEG_X]
 
 
+def test_wait_streak_penalty_increases_with_consecutive_waits() -> None:
+    scenario = UTMScenario(
+        grid=GridConfig(dimensions=(3, 3, 1)),
+        missions=(
+            MissionConfig(
+                mission_id=1,
+                start=(0, 1, 0),
+                goal=(2, 1, 0),
+            ),
+        ),
+        max_time_steps=8,
+        observation_radius=1,
+    )
+    env = UTMMAPFEnv(
+        scenario,
+        step_penalty=0.0,
+        wait_penalty=0.0,
+        progress_reward_scale=0.0,
+        wait_streak_penalty_scale=-0.1,
+    )
+    env.reset()
+
+    _, rewards, _, _, infos = env.step({"agent_1": UTMAction.WAIT})
+    assert infos["agent_1"]["wait_streak"] == 1
+    assert rewards["agent_1"] == -0.1
+
+    _, rewards, _, _, infos = env.step({"agent_1": UTMAction.WAIT})
+    assert infos["agent_1"]["wait_streak"] == 2
+    assert rewards["agent_1"] == -0.2
+
+
+def test_stationary_agent_blocking_downwash_conflict_is_penalized() -> None:
+    scenario = UTMScenario(
+        grid=GridConfig(dimensions=(3, 3, 3)),
+        missions=(
+            MissionConfig(
+                mission_id=1,
+                start=(1, 1, 1),
+                goal=(0, 1, 1),
+            ),
+            MissionConfig(
+                mission_id=2,
+                start=(2, 1, 2),
+                goal=(0, 1, 2),
+            ),
+        ),
+        max_time_steps=8,
+        observation_radius=1,
+    )
+    env = UTMMAPFEnv(
+        scenario,
+        step_penalty=0.0,
+        wait_penalty=0.0,
+        progress_reward_scale=0.0,
+        unsafe_hold_penalty=-2.0,
+        blocking_penalty=-1.25,
+    )
+    env.reset()
+
+    _, rewards, _, _, infos = env.step(
+        {"agent_1": UTMAction.WAIT, "agent_2": UTMAction.NEG_X}
+    )
+
+    assert infos["agent_1"]["blocking_hold"]
+    assert infos["agent_1"]["blocking_reason"] == "downwash"
+    assert not infos["agent_1"]["unsafe_hold"]
+    assert rewards["agent_1"] == -1.25
+    assert infos["agent_2"]["unsafe_hold"]
+    assert infos["agent_2"]["conflict_reason"] == "downwash"
+
+
 def test_crossing_observation_includes_priority_history_features() -> None:
     env = UTMMAPFEnv(crossing_scenario())
     observations, _ = env.reset()
