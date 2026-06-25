@@ -354,17 +354,20 @@ def _low_level_plan(
 
     if _violates_vertex_constraints(start, 0, constraints):
         return None
+    start_heuristic = _heuristic_distance(env, start, goal)
+    if start_heuristic is None:
+        return None
 
-    queue: list[tuple[int, int, int, Cell]] = []
+    queue: list[tuple[int, int, int, int, Cell]] = []
     parents: dict[tuple[Cell, int], tuple[Cell, int] | None] = {(start, 0): None}
     counter = 0
-    heapq.heappush(queue, (manhattan_distance(start, goal), 0, counter, start))
+    heapq.heappush(queue, (start_heuristic, start_heuristic, 0, counter, start))
 
     while queue:
         if budget.expired() or not budget.record_low_level_expansion():
             return None
 
-        _, time_step, _, cell = heapq.heappop(queue)
+        _, _, time_step, _, cell = heapq.heappop(queue)
         if cell == goal and _can_wait_at_goal(
             goal,
             time_step,
@@ -394,12 +397,15 @@ def _low_level_plan(
                 constraints=constraints,
             ):
                 continue
+            heuristic = _heuristic_distance(env, candidate, goal)
+            if heuristic is None:
+                continue
 
             parents[key] = (cell, time_step)
             counter += 1
             wait_cost = 1 if action == int(UTMAction.WAIT) else 0
-            priority = next_time + manhattan_distance(candidate, goal) + wait_cost
-            heapq.heappush(queue, (priority, next_time, counter, candidate))
+            priority = next_time + heuristic + wait_cost
+            heapq.heappush(queue, (priority, heuristic, next_time, counter, candidate))
 
     return None
 
@@ -416,6 +422,53 @@ def _ordered_actions(cell: Cell, goal: Cell) -> tuple[int, ...]:
             ),
         )
     ) + (int(UTMAction.WAIT),)
+
+
+def _heuristic_distance(env: UTMMAPFEnv, cell: Cell, goal: Cell) -> int | None:
+    if not env.scenario.grid.blocked_cells and not any(
+        zone.enabled for zone in env.scenario.no_fly_zones
+    ):
+        return manhattan_distance(cell, goal)
+    if any(zone.enabled for zone in env.scenario.no_fly_zones):
+        return manhattan_distance(cell, goal)
+    return _static_distance_map(env, goal).get(cell)
+
+
+def _static_distance_map(env: UTMMAPFEnv, goal: Cell) -> dict[Cell, int]:
+    cache = getattr(env, "_cbs_static_distance_maps", None)
+    if cache is None:
+        cache = {}
+        setattr(env, "_cbs_static_distance_maps", cache)
+
+    if goal in cache:
+        return cache[goal]
+
+    distances: dict[Cell, int] = {}
+    if not env.is_free_static(goal):
+        cache[goal] = distances
+        return distances
+
+    queue = [goal]
+    distances[goal] = 0
+    head = 0
+    moving_deltas = tuple(
+        delta for action, delta in ACTION_DELTAS.items() if action != UTMAction.WAIT
+    )
+    while head < len(queue):
+        cell = queue[head]
+        head += 1
+        distance = distances[cell]
+        for delta in moving_deltas:
+            candidate = add_cell(cell, delta)
+            if candidate in distances:
+                continue
+            if not env.is_free_static(candidate):
+                continue
+            distances[candidate] = distance + 1
+            queue.append(candidate)
+
+    cache[goal] = distances
+    return distances
 
 
 def _violates_constraints(

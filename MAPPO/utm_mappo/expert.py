@@ -237,6 +237,10 @@ def _shortest_path_length(
     ):
         return manhattan_distance(start, goal)
 
+    if not any(zone.enabled for zone in env.scenario.no_fly_zones):
+        distance_map = _static_distance_map(env, goal)
+        return distance_map.get(start)
+
     cache = _distance_cache(env)
     cache_key = (start, goal, start_time)
     if cache_key in cache:
@@ -283,6 +287,49 @@ def _distance_cache(env: UTMMAPFEnv) -> dict[tuple[Cell, Cell, int], int | None]
         cache = {}
         setattr(env, "_expert_distance_cache", cache)
     return cache
+
+
+def _static_distance_map(env: UTMMAPFEnv, goal: Cell) -> dict[Cell, int]:
+    """Shortest static-grid distance to one goal, cached per environment.
+
+    PIBT uses these distances many times per rollout to rank local actions. For
+    obstacle-only scenarios there is no need to rerun a time-expanded BFS from
+    every candidate cell; one reverse BFS from the goal is enough.
+    """
+
+    cache = getattr(env, "_expert_static_distance_maps", None)
+    if cache is None:
+        cache = {}
+        setattr(env, "_expert_static_distance_maps", cache)
+
+    if goal in cache:
+        return cache[goal]
+
+    distances: dict[Cell, int] = {}
+    if not env.is_free_static(goal):
+        cache[goal] = distances
+        return distances
+
+    queue: deque[Cell] = deque([goal])
+    distances[goal] = 0
+
+    moving_deltas = tuple(
+        delta for action, delta in ACTION_DELTAS.items() if action != UTMAction.WAIT
+    )
+    while queue:
+        cell = queue.popleft()
+        distance = distances[cell]
+        for delta in moving_deltas:
+            candidate = add_cell(cell, delta)
+            if candidate in distances:
+                continue
+            if not env.is_free_static(candidate):
+                continue
+            distances[candidate] = distance + 1
+            queue.append(candidate)
+
+    cache[goal] = distances
+    return distances
 
 
 def _conflicts_with_committed(

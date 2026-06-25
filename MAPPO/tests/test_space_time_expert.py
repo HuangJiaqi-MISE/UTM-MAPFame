@@ -72,6 +72,42 @@ def _small_independent_scenario() -> UTMScenario:
     )
 
 
+def _static_obstacle_detour_scenario() -> UTMScenario:
+    return UTMScenario(
+        grid=GridConfig(
+            dimensions=(5, 3, 1),
+            blocked_cells=((2, 1, 0),),
+        ),
+        missions=(
+            MissionConfig(
+                mission_id=1,
+                start=(0, 1, 0),
+                goal=(4, 1, 0),
+            ),
+        ),
+        max_time_steps=12,
+        observation_radius=1,
+    )
+
+
+def _static_obstacle_unreachable_scenario() -> UTMScenario:
+    return UTMScenario(
+        grid=GridConfig(
+            dimensions=(5, 3, 1),
+            blocked_cells=((2, 0, 0), (2, 1, 0), (2, 2, 0)),
+        ),
+        missions=(
+            MissionConfig(
+                mission_id=1,
+                start=(0, 1, 0),
+                goal=(4, 1, 0),
+            ),
+        ),
+        max_time_steps=12,
+        observation_radius=1,
+    )
+
+
 def test_space_time_plan_solves_crossing_without_unsafe_holds() -> None:
     env = UTMMAPFEnv(crossing_scenario())
     env.reset()
@@ -127,6 +163,32 @@ def test_pibt_action_plan_replays_after_precompute() -> None:
         agent_state["reached_goal"]
         for agent_state in render_state["agents"].values()
     )
+
+
+def test_pibt_action_plan_uses_static_obstacle_detour() -> None:
+    env = UTMMAPFEnv(_static_obstacle_detour_scenario())
+    action_plan = prioritized_pibt_action_plan(env)
+
+    observations, _ = env.reset()
+    while observations:
+        actions = {
+            agent: action_plan[agent][env.time_step]
+            for agent in observations
+        }
+        observations, _, _, _, infos = env.step(actions)
+        assert not any(info["invalid_action"] for info in infos.values())
+
+    render_state = env.render()
+    assert render_state["agents"]["agent_1"]["reached_goal"]
+
+
+def test_cbs_plan_rejects_static_unreachable_goal() -> None:
+    env = UTMMAPFEnv(_static_obstacle_unreachable_scenario())
+    env.reset()
+    result = cbs_plan(env)
+
+    assert result.plan is None
+    assert result.reason == "initial_low_level_failed"
 
 
 def test_cbs_plan_solves_small_vertex_conflict_without_unsafe_holds() -> None:
