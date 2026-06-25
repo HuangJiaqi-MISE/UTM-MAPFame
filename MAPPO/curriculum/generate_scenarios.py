@@ -55,6 +55,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-fly-size-max", type=int, nargs=3, default=(1, 1, 1))
     parser.add_argument("--prefix", type=str, default="scenario")
     parser.add_argument("--max-scenario-attempts", type=int, default=1000)
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=100,
+        help="Print generation progress every N attempts. Use 0 to disable.",
+    )
     return parser.parse_args()
 
 
@@ -69,6 +75,12 @@ def main() -> None:
         attempts += 1
         scenario = try_make_scenario(args, rng)
         if scenario is None:
+            if args.progress_every > 0 and attempts % args.progress_every == 0:
+                print(
+                    f"generate progress: generated={generated}/{args.count} "
+                    f"attempts={attempts}/{args.max_scenario_attempts}",
+                    flush=True,
+                )
             continue
 
         path = args.out_dir / f"{args.prefix}_{args.agents:03d}_{generated:04d}.yaml"
@@ -80,6 +92,12 @@ def main() -> None:
                 allow_unicode=False,
             )
         generated += 1
+        if args.progress_every > 0:
+            print(
+                f"generate progress: generated={generated}/{args.count} "
+                f"attempts={attempts}/{args.max_scenario_attempts}",
+                flush=True,
+            )
 
     if generated != args.count:
         raise RuntimeError(
@@ -193,6 +211,8 @@ def make_blocked_cells(
 ) -> set[Cell]:
     obstacle_rate = min(max(obstacle_rate, 0.0), 0.4)
     blocked: set[Cell] = set()
+    if obstacle_rate <= 0.0 and obstacle_count <= 0:
+        return blocked
     for x in range(dimensions[0]):
         for y in range(dimensions[1]):
             for z in range(dimensions[2]):
@@ -382,6 +402,9 @@ def static_reachable(
     dimensions: Cell,
     blocked: set[Cell],
 ) -> bool:
+    if not blocked:
+        return True
+
     queue: deque[Cell] = deque([start])
     visited = {start}
     while queue:
