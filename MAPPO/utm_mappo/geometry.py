@@ -4,6 +4,9 @@ from dataclasses import dataclass
 
 from .config import Cell, MissionConfig, TemporalNoFlyZoneConfig
 
+DOWNWASH_XY_RADIUS = 0
+DOWNWASH_Z_BELOW = 1
+
 
 @dataclass(frozen=True)
 class Box3D:
@@ -63,34 +66,27 @@ def boxes_overlap(left: Box3D | None, right: Box3D | None) -> bool:
     )
 
 
-def protection_box(cell: Cell, mission: MissionConfig) -> Box3D:
-    size = mission.protection_size
+def body_box(cell: Cell, mission: MissionConfig) -> Box3D:
+    del mission
     return Box3D(
-        min_cell=(
-            cell[0] - size,
-            cell[1] - size,
-            cell[2] - size,
-        ),
-        max_cell=(
-            cell[0] + size,
-            cell[1] + size,
-            cell[2] + size,
-        ),
+        min_cell=cell,
+        max_cell=cell,
     )
 
 
 def downwash_box(cell: Cell, mission: MissionConfig) -> Box3D | None:
-    if mission.downwash_z_below <= 0:
+    del mission
+    if DOWNWASH_Z_BELOW <= 0:
         return None
     return Box3D(
         min_cell=(
-            cell[0] - mission.downwash_xy_radius,
-            cell[1] - mission.downwash_xy_radius,
-            cell[2] - mission.downwash_z_below,
+            cell[0] - DOWNWASH_XY_RADIUS,
+            cell[1] - DOWNWASH_XY_RADIUS,
+            cell[2] - DOWNWASH_Z_BELOW,
         ),
         max_cell=(
-            cell[0] + mission.downwash_xy_radius,
-            cell[1] + mission.downwash_xy_radius,
+            cell[0] + DOWNWASH_XY_RADIUS,
+            cell[1] + DOWNWASH_XY_RADIUS,
             cell[2] - 1,
         ),
     )
@@ -104,11 +100,11 @@ def has_downwash_conflict(
     to_other: Cell,
     other: MissionConfig,
 ) -> bool:
-    if upper.downwash_z_below <= 0:
+    if DOWNWASH_Z_BELOW <= 0:
         return False
 
     if to_upper[2] > to_other[2] and boxes_overlap(
-        downwash_box(to_upper, upper), protection_box(to_other, other)
+        downwash_box(to_upper, upper), body_box(to_other, other)
     ):
         return True
 
@@ -122,7 +118,7 @@ def has_downwash_conflict(
         downwash_box(from_upper, upper), downwash_box(to_upper, upper)
     )
     swept_body = make_union_box(
-        protection_box(from_other, other), protection_box(to_other, other)
+        body_box(from_other, other), body_box(to_other, other)
     )
     return boxes_overlap(swept_downwash, swept_body)
 

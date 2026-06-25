@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from utm_mappo import UTMMAPFEnv, UTMAction
 from utm_mappo.config import GridConfig, MissionConfig, UTMScenario
-from utm_mappo.geometry import protection_box, transition_conflict
+from utm_mappo.geometry import body_box, transition_conflict
 from utm_mappo.scenarios import crossing_scenario
 
 
@@ -14,7 +14,6 @@ def test_env_reaches_goal_with_direct_actions() -> None:
                 mission_id=1,
                 start=(0, 1, 0),
                 goal=(2, 1, 0),
-                protection_class=0,
             ),
         ),
         max_time_steps=8,
@@ -40,13 +39,11 @@ def test_vertex_conflict_yields_higher_mission_id() -> None:
                 mission_id=1,
                 start=(0, 1, 0),
                 goal=(4, 1, 0),
-                protection_class=0,
             ),
             MissionConfig(
                 mission_id=2,
                 start=(2, 1, 0),
                 goal=(4, 2, 0),
-                protection_class=0,
             ),
         ),
         max_time_steps=8,
@@ -65,18 +62,16 @@ def test_vertex_conflict_yields_higher_mission_id() -> None:
     assert env.render()["agents"]["agent_2"]["cell"] == (2, 1, 0)
 
 
-def test_overlapping_protection_boxes_are_not_standalone_conflicts() -> None:
+def test_adjacent_robot_cells_are_not_standalone_conflicts() -> None:
     mission_a = MissionConfig(
         mission_id=1,
         start=(1, 1, 0),
         goal=(3, 1, 0),
-        protection_class=1,
     )
     mission_b = MissionConfig(
         mission_id=2,
-        start=(3, 1, 0),
+        start=(2, 1, 0),
         goal=(1, 1, 0),
-        protection_class=1,
     )
 
     assert (
@@ -92,27 +87,58 @@ def test_overlapping_protection_boxes_are_not_standalone_conflicts() -> None:
     )
 
 
-def test_protection_class_sets_fixed_body_volume() -> None:
-    point_mission = MissionConfig(
+def test_robot_body_is_single_grid_cell() -> None:
+    mission = MissionConfig(
         mission_id=1,
         start=(5, 5, 5),
         goal=(6, 5, 5),
-        protection_class=0,
     )
-    mission = MissionConfig(
+
+    box = body_box(mission.start, mission)
+
+    assert box.min_cell == (5, 5, 5)
+    assert box.max_cell == (5, 5, 5)
+
+
+def test_downwash_conflict_uses_fixed_single_cell_body() -> None:
+    upper = MissionConfig(
+        mission_id=1,
+        start=(2, 2, 2),
+        goal=(3, 2, 2),
+    )
+    lower = MissionConfig(
         mission_id=2,
-        start=(5, 5, 5),
-        goal=(6, 5, 5),
-        protection_class=2,
+        start=(2, 2, 1),
+        goal=(3, 2, 1),
+    )
+    lateral = MissionConfig(
+        mission_id=3,
+        start=(3, 2, 1),
+        goal=(4, 2, 1),
     )
 
-    point_box = protection_box(point_mission.start, point_mission)
-    box = protection_box(mission.start, mission)
-
-    assert point_box.min_cell == (5, 5, 5)
-    assert point_box.max_cell == (5, 5, 5)
-    assert box.min_cell == (3, 3, 3)
-    assert box.max_cell == (7, 7, 7)
+    assert (
+        transition_conflict(
+            upper.start,
+            upper.start,
+            upper,
+            lower.start,
+            lower.start,
+            lower,
+        )
+        == "downwash"
+    )
+    assert (
+        transition_conflict(
+            upper.start,
+            upper.start,
+            upper,
+            lateral.start,
+            lateral.start,
+            lateral,
+        )
+        is None
+    )
 
 
 def test_action_mask_rejects_static_invalid_moves() -> None:
@@ -123,7 +149,6 @@ def test_action_mask_rejects_static_invalid_moves() -> None:
                 mission_id=1,
                 start=(0, 1, 0),
                 goal=(2, 1, 0),
-                protection_class=0,
             ),
         ),
         max_time_steps=8,

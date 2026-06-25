@@ -10,8 +10,8 @@ The environment is intentionally aligned with the Unreal/C++ system:
 - Static occupancy constraints
 - Temporal no-fly zone constraints
 - Dynamic conflicts: vertex, edge, and downwash
-- Fixed protection boxes used as the affected body volume in downwash checks
-- Downwash boxes, including transition sweep checks
+- Each drone body occupies exactly one grid cell
+- Fixed downwash conflict checks: the cell directly below a drone is unsafe, including transition sweep checks
 - Finished agents remain as stationary goal anchors
 - Safety gate behavior: unsafe proposals are arbitrated into hold actions and penalized
 
@@ -91,11 +91,6 @@ missions:
   - mission_id: 1
     start: [1, 1, 2]
     goal: [8, 8, 2]
-    # Protection class is not a standalone MAPPO conflict type. Class 0 means
-    # point footprint; classes 1, 2, and 3 expand the affected body volume.
-    protection_class: 0
-    downwash_xy_radius: 1
-    downwash_z_below: 1
 no_fly_zones:
   - zone_id: 1
     enabled: true

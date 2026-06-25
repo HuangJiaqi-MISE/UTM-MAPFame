@@ -51,9 +51,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-fly-zones", type=int, default=0)
     parser.add_argument("--no-fly-size-min", type=int, nargs=3, default=(1, 1, 1))
     parser.add_argument("--no-fly-size-max", type=int, nargs=3, default=(1, 1, 1))
-    parser.add_argument("--protection-class", type=int, choices=(0, 1, 2, 3), default=0)
-    parser.add_argument("--downwash-xy-radius", type=int, default=1)
-    parser.add_argument("--downwash-z-below", type=int, default=1)
     parser.add_argument("--prefix", type=str, default="scenario")
     parser.add_argument("--max-scenario-attempts", type=int, default=1000)
     return parser.parse_args()
@@ -126,16 +123,12 @@ def try_make_scenario(args: argparse.Namespace, rng: random.Random) -> UTMScenar
 
         used_starts.add(start)
         used_goals.add(goal)
-        missions.append(
-            {
-                "mission_id": mission_id,
-                "start": list(start),
-                "goal": list(goal),
-                "protection_class": args.protection_class,
-                "downwash_xy_radius": args.downwash_xy_radius,
-                "downwash_z_below": args.downwash_z_below,
-            }
-        )
+        mission = {
+            "mission_id": mission_id,
+            "start": list(start),
+            "goal": list(goal),
+        }
+        missions.append(mission)
 
     scenario_data = {
         "grid": {

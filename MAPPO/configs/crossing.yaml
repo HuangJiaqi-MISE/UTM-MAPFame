@@ -34,27 +34,15 @@ missions:
   - mission_id: 1
     start: [1, 5, 2]
     goal: [8, 5, 2]
-    protection_class: 0
-    downwash_xy_radius: 1
-    downwash_z_below: 1
   - mission_id: 2
     start: [8, 5, 2]
     goal: [1, 5, 2]
-    protection_class: 0
-    downwash_xy_radius: 1
-    downwash_z_below: 1
   - mission_id: 3
     start: [5, 1, 2]
     goal: [5, 8, 2]
-    protection_class: 0
-    downwash_xy_radius: 1
-    downwash_z_below: 1
   - mission_id: 4
     start: [5, 8, 2]
     goal: [5, 1, 2]
-    protection_class: 0
-    downwash_xy_radius: 1
-    downwash_z_below: 1
 no_fly_zones:
   - zone_id: 1
     enabled: true

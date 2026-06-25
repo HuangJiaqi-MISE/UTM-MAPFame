@@ -10,9 +10,9 @@ from pettingzoo import ParallelEnv
 from .config import AgentRuntimeState, Cell, UTMScenario
 from .geometry import (
     add_cell,
+    body_box,
     boxes_overlap,
     manhattan_distance,
-    protection_box,
     downwash_box,
     transition_conflict,
     zone_contains,
@@ -424,10 +424,10 @@ class UTMMAPFEnv(ParallelEnv):
                     )
                 if boxes_overlap(
                     downwash_box(mission_a.start, mission_a),
-                    protection_box(mission_b.start, mission_b),
+                    body_box(mission_b.start, mission_b),
                 ) or boxes_overlap(
                     downwash_box(mission_b.start, mission_b),
-                    protection_box(mission_a.start, mission_a),
+                    body_box(mission_a.start, mission_a),
                 ):
                     raise ValueError(
                         "initial downwash conflict between "
@@ -533,7 +533,7 @@ class UTMMAPFEnv(ParallelEnv):
         grid = np.zeros((self._local_channels, side, side, side), dtype=np.float32)
 
         other_boxes = [
-            protection_box(state.cell, state.mission)
+            body_box(state.cell, state.mission)
             for other_agent, state in self._state_by_agent.items()
             if other_agent != agent
         ]

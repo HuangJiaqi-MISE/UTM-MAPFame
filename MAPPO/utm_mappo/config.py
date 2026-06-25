@@ -7,21 +7,12 @@ from typing import Any
 import yaml
 
 Cell = tuple[int, int, int]
-PROTECTION_CLASS_SIZES = {0: 0, 1: 1, 2: 2, 3: 3}
 
 
 def _cell(value: Any, name: str) -> Cell:
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         raise ValueError(f"{name} must be a 3-item cell coordinate")
     return int(value[0]), int(value[1]), int(value[2])
-
-
-def _protection_class(value: Any) -> int:
-    protection_class = int(value)
-    if protection_class not in PROTECTION_CLASS_SIZES:
-        allowed = ", ".join(str(item) for item in sorted(PROTECTION_CLASS_SIZES))
-        raise ValueError(f"protection_class must be one of: {allowed}")
-    return protection_class
 
 
 @dataclass(frozen=True)
@@ -45,16 +36,6 @@ class MissionConfig:
     mission_id: int
     start: Cell
     goal: Cell
-    protection_class: int = 0
-    downwash_xy_radius: int = 0
-    downwash_z_below: int = 0
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "protection_class",
-            _protection_class(self.protection_class),
-        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MissionConfig":
@@ -62,9 +43,6 @@ class MissionConfig:
             "mission_id",
             "start",
             "goal",
-            "protection_class",
-            "downwash_xy_radius",
-            "downwash_z_below",
         }
         unknown_keys = sorted(set(data) - allowed_keys)
         if unknown_keys:
@@ -75,14 +53,15 @@ class MissionConfig:
             mission_id=int(data["mission_id"]),
             start=_cell(data["start"], "mission.start"),
             goal=_cell(data["goal"], "mission.goal"),
-            protection_class=_protection_class(data.get("protection_class", 0)),
-            downwash_xy_radius=max(0, int(data.get("downwash_xy_radius", 0))),
-            downwash_z_below=max(0, int(data.get("downwash_z_below", 0))),
         )
 
-    @property
-    def protection_size(self) -> int:
-        return PROTECTION_CLASS_SIZES[self.protection_class]
+
+def mission_to_dict(mission: MissionConfig) -> dict[str, Any]:
+    return {
+        "mission_id": mission.mission_id,
+        "start": list(mission.start),
+        "goal": list(mission.goal),
+    }
 
 
 @dataclass(frozen=True)
@@ -159,17 +138,7 @@ class UTMScenario:
                 "dimensions": list(self.grid.dimensions),
                 "blocked_cells": [list(cell) for cell in self.grid.blocked_cells],
             },
-            "missions": [
-                {
-                    "mission_id": mission.mission_id,
-                    "start": list(mission.start),
-                    "goal": list(mission.goal),
-                    "protection_class": mission.protection_class,
-                    "downwash_xy_radius": mission.downwash_xy_radius,
-                    "downwash_z_below": mission.downwash_z_below,
-                }
-                for mission in self.missions
-            ],
+            "missions": [mission_to_dict(mission) for mission in self.missions],
             "no_fly_zones": [
                 {
                     "zone_id": zone.zone_id,
