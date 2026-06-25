@@ -5,7 +5,6 @@ from argparse import Namespace
 
 from curriculum.generate_scenarios import (
     has_pairwise_cell_conflict,
-    manhattan_distance,
     sample_box,
     try_make_scenario,
 )
@@ -34,7 +33,7 @@ def test_sample_box_respects_3d_size_range() -> None:
         assert 1 <= size[2] <= 2
 
 
-def test_generated_missions_can_enforce_disjoint_distance_constraints() -> None:
+def test_generated_missions_can_enforce_disjoint_constraints() -> None:
     args = Namespace(
         grid=(10, 10, 5),
         obstacle_rate=0.0,
@@ -45,8 +44,6 @@ def test_generated_missions_can_enforce_disjoint_distance_constraints() -> None:
         pattern="random",
         spawn_band=2,
         disjoint_start_goal=True,
-        min_goal_distance=2,
-        max_goal_distance=6,
         no_fly_zones=0,
         no_fly_size_min=(1, 1, 1),
         no_fly_size_max=(1, 1, 1),
@@ -60,9 +57,6 @@ def test_generated_missions_can_enforce_disjoint_distance_constraints() -> None:
     starts = [mission.start for mission in scenario.missions]
     goals = [mission.goal for mission in scenario.missions]
     assert len(set(starts + goals)) == len(starts) + len(goals)
-    for mission in scenario.missions:
-        distance = manhattan_distance(mission.start, mission.goal)
-        assert 2 <= distance <= 6
     assert not has_pairwise_cell_conflict(scenario.missions, "goal")
 
 

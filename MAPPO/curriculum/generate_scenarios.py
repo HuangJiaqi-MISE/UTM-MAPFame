@@ -37,13 +37,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--obstacle-size-max", type=int, nargs=3, default=(1, 1, 1))
     parser.add_argument("--spawn-band", type=int, default=2)
     parser.add_argument("--disjoint-start-goal", action="store_true")
-    parser.add_argument("--min-goal-distance", type=int, default=1)
-    parser.add_argument(
-        "--max-goal-distance",
-        type=int,
-        default=0,
-        help="Maximum Manhattan start-goal distance. Use 0 for no upper bound.",
-    )
     parser.add_argument(
         "--pattern",
         choices=("flows", "random", "mixed"),
@@ -131,8 +124,6 @@ def try_make_scenario(args: argparse.Namespace, rng: random.Random) -> UTMScenar
             pattern=args.pattern,
             spawn_band=args.spawn_band,
             disjoint_start_goal=args.disjoint_start_goal,
-            min_goal_distance=args.min_goal_distance,
-            max_goal_distance=args.max_goal_distance,
             rng=rng,
         )
         if pair is None:
@@ -238,8 +229,6 @@ def choose_mission_pair(
     pattern: str,
     spawn_band: int,
     disjoint_start_goal: bool,
-    min_goal_distance: int,
-    max_goal_distance: int,
     rng: random.Random,
 ) -> tuple[Cell, Cell] | None:
     active_pattern = pattern
@@ -260,11 +249,6 @@ def choose_mission_pair(
         if start in used_starts or goal in used_goals:
             continue
         if disjoint_start_goal and (start in used_goals or goal in used_starts):
-            continue
-        distance = manhattan_distance(start, goal)
-        if distance < max(1, min_goal_distance):
-            continue
-        if max_goal_distance > 0 and distance > max_goal_distance:
             continue
         return start, goal
     return None
@@ -386,14 +370,6 @@ def cells_in_box(min_cell: Cell, max_cell: Cell) -> set[Cell]:
         for y in range(min_cell[1], max_cell[1] + 1)
         for z in range(min_cell[2], max_cell[2] + 1)
     }
-
-
-def manhattan_distance(left: Cell, right: Cell) -> int:
-    return (
-        abs(left[0] - right[0])
-        + abs(left[1] - right[1])
-        + abs(left[2] - right[2])
-    )
 
 
 def static_reachable(

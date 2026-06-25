@@ -12,8 +12,6 @@ python curriculum/generate_scenarios.py \
   --count 100 \
   --grid 100 100 10 \
   --disjoint-start-goal \
-  --min-goal-distance 2 \
-  --max-goal-distance 8 \
   --obstacle-rate 0.0 \
   --obstacle-count 0 \
   --no-fly-zones 0 \
@@ -32,7 +30,6 @@ python curriculum/generate_scenarios.py --agents 32 --count 100 --grid 100 100 1
 Useful scenario controls:
 
 - `--disjoint-start-goal`: require all starts and goals to be globally unique.
-- `--min-goal-distance N` and `--max-goal-distance N`: constrain each mission's Manhattan start-goal distance.
 - `--obstacle-rate R`: sample independent single-cell obstacles. Defaults to 0.
 - `--obstacle-count N`: sample N cuboid obstacle blocks.
 - `--obstacle-size-min X Y Z` and `--obstacle-size-max X Y Z`: cuboid obstacle size range.
@@ -86,8 +83,6 @@ python curriculum/generate_scenarios.py \
   --seed 8801 \
   --pattern mixed \
   --disjoint-start-goal \
-  --min-goal-distance 2 \
-  --max-goal-distance 8 \
   --obstacle-rate 0.0 \
   --obstacle-count 0 \
   --no-fly-zones 0
@@ -147,8 +142,6 @@ python curriculum/generate_scenarios.py \
   --seed 8802 \
   --pattern mixed \
   --disjoint-start-goal \
-  --min-goal-distance 2 \
-  --max-goal-distance 8 \
   --obstacle-rate 0.02 \
   --obstacle-count 1 \
   --obstacle-size-min 1 1 1 \
