@@ -19,7 +19,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train the UTM MAPPO actor from an offline expert dataset."
     )
-    parser.add_argument("--dataset-dir", type=Path, required=True)
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        nargs="+",
+        required=True,
+        help="One or more offline dataset directories to concatenate.",
+    )
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--scenario-dir", type=Path, default=None)
     parser.add_argument("--init-model-dir", type=Path, default=None)
@@ -50,10 +56,11 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
     torch.manual_seed(args.seed)
 
-    metadata = load_metadata(args.dataset_dir)
-    observations, action_masks, actions = load_dataset(
+    metadata_items = [load_metadata(path) for path in args.dataset_dir]
+    metadata = combine_metadata(args.dataset_dir, metadata_items)
+    observations, action_masks, actions = load_datasets(
         args.dataset_dir,
-        metadata=metadata,
+        metadata_items=metadata_items,
         rng=rng,
         max_samples=args.max_samples,
     )
@@ -126,11 +133,85 @@ def load_metadata(dataset_dir: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
+def combine_metadata(
+    dataset_dirs: list[Path],
+    metadata_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not metadata_items:
+        raise ValueError("at least one dataset directory is required")
+
+    combined = dict(metadata_items[0])
+    combined["dataset_dirs"] = [str(path) for path in dataset_dirs]
+    combined["dataset_count"] = len(metadata_items)
+    combined["stored_scenario_count"] = sum(
+        int(item.get("stored_scenario_count", 0)) for item in metadata_items
+    )
+    combined["scenario_count"] = sum(
+        int(item.get("scenario_count", 0)) for item in metadata_items
+    )
+    combined["samples"] = sum(int(item.get("samples", 0)) for item in metadata_items)
+
+    expected_shape = tuple(metadata_items[0].get("obs_shape", ()))
+    expected_action_dim = int(metadata_items[0].get("action_dim", 0))
+    expected_agents = int(metadata_items[0].get("n_agents", 0))
+    for dataset_dir, item in zip(dataset_dirs, metadata_items, strict=True):
+        obs_shape = tuple(item.get("obs_shape", ()))
+        action_dim = int(item.get("action_dim", 0))
+        n_agents = int(item.get("n_agents", 0))
+        if obs_shape != expected_shape:
+            raise ValueError(
+                f"{dataset_dir} obs_shape {obs_shape} does not match "
+                f"{expected_shape}"
+            )
+        if action_dim != expected_action_dim:
+            raise ValueError(
+                f"{dataset_dir} action_dim {action_dim} does not match "
+                f"{expected_action_dim}"
+            )
+        if n_agents != expected_agents:
+            raise ValueError(
+                f"{dataset_dir} n_agents {n_agents} does not match "
+                f"{expected_agents}"
+            )
+
+    return combined
+
+
+def load_datasets(
+    dataset_dirs: list[Path],
+    metadata_items: list[dict[str, Any]],
+    rng: np.random.Generator,
+    max_samples: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    observation_parts: list[np.ndarray] = []
+    mask_parts: list[np.ndarray] = []
+    action_parts: list[np.ndarray] = []
+
+    for dataset_dir, metadata in zip(dataset_dirs, metadata_items, strict=True):
+        observations, action_masks, actions = load_dataset(
+            dataset_dir,
+            metadata=metadata,
+        )
+        observation_parts.append(observations)
+        mask_parts.append(action_masks)
+        action_parts.append(actions)
+
+    observations = np.concatenate(observation_parts, axis=0)
+    action_masks = np.concatenate(mask_parts, axis=0)
+    actions = np.concatenate(action_parts, axis=0)
+
+    if max_samples > 0 and observations.shape[0] > max_samples:
+        indices = rng.choice(observations.shape[0], size=max_samples, replace=False)
+        observations = observations[indices]
+        action_masks = action_masks[indices]
+        actions = actions[indices]
+
+    return observations, action_masks, actions
+
+
 def load_dataset(
     dataset_dir: Path,
     metadata: dict[str, Any],
-    rng: np.random.Generator,
-    max_samples: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     observation_parts: list[np.ndarray] = []
     mask_parts: list[np.ndarray] = []
@@ -149,12 +230,6 @@ def load_dataset(
     observations = np.concatenate(observation_parts, axis=0)
     action_masks = np.concatenate(mask_parts, axis=0)
     actions = np.concatenate(action_parts, axis=0)
-
-    if max_samples > 0 and observations.shape[0] > max_samples:
-        indices = rng.choice(observations.shape[0], size=max_samples, replace=False)
-        observations = observations[indices]
-        action_masks = action_masks[indices]
-        actions = actions[indices]
 
     if actions.min(initial=0) < 0 or actions.max(initial=0) >= action_masks.shape[1]:
         raise ValueError("dataset contains target actions outside the action space")
