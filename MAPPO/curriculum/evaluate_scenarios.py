@@ -10,7 +10,8 @@ import numpy as np
 from common import load_env, rollout_metrics, rollout_metrics_with_policy, scenario_paths
 
 from utm_mappo.cbs_expert import cbs_plan  # noqa: E402
-from utm_mappo.expert import prioritized_shortest_path_actions  # noqa: E402
+from utm_mappo.env import UTMAction  # noqa: E402
+from utm_mappo.expert import prioritized_pibt_action_plan  # noqa: E402
 from utm_mappo.mappo import DiscreteMAPPO  # noqa: E402
 from utm_mappo.space_time_expert import (  # noqa: E402
     action_from_transition,
@@ -47,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         default="space-time",
         help=(
             "Teacher for --expert-only. space-time plans once per scenario; "
-            "pibt is the older online one-step heuristic; cbs is the CPU "
+            "pibt precomputes the online one-step heuristic; cbs is the CPU "
             "Conflict-Based Search teacher."
         ),
     )
@@ -190,15 +191,22 @@ def evaluate_teacher(
     cbs_max_seconds: float,
 ) -> dict[str, object]:
     if teacher == "pibt":
+        planning_started = time.perf_counter()
+        action_plan = prioritized_pibt_action_plan(env)
+        planning_seconds = time.perf_counter() - planning_started
+
         rollout_started = time.perf_counter()
         row = rollout_metrics_with_policy(
             env,
-            lambda observations, active_env=env: prioritized_shortest_path_actions(
-                active_env, sorted(observations)
+            lambda observations, active_env=env, active_plan=action_plan: action_plan_actions(
+                active_env,
+                active_plan,
+                observations,
             ),
         )
-        row["planning_seconds"] = 0.0
+        row["planning_seconds"] = planning_seconds
         row["rollout_seconds"] = time.perf_counter() - rollout_started
+        row["planner_failed"] = False
         return row
 
     if teacher == "cbs":
@@ -277,6 +285,21 @@ def planned_actions(env, plan, observations: dict[str, np.ndarray]) -> dict[str,
         state = env._state_by_agent[agent]
         next_cell = planned_cell(plan[agent], env.time_step + 1)
         actions[agent] = action_from_transition(state.cell, next_cell)
+    return actions
+
+
+def action_plan_actions(
+    env,
+    action_plan: dict[str, list[int]],
+    observations: dict[str, np.ndarray],
+) -> dict[str, int]:
+    actions = {}
+    for agent in observations:
+        agent_actions = action_plan.get(agent, [])
+        if env.time_step < len(agent_actions):
+            actions[agent] = int(agent_actions[env.time_step])
+        else:
+            actions[agent] = int(UTMAction.WAIT)
     return actions
 
 

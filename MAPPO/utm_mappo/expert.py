@@ -4,7 +4,7 @@ from collections import deque
 
 from .config import Cell
 from .env import ACTION_DELTAS, UTMAction, UTMMAPFEnv
-from .geometry import add_cell, transition_conflict
+from .geometry import add_cell, manhattan_distance, transition_conflict
 
 
 MOVING_ACTIONS = (
@@ -15,6 +15,34 @@ MOVING_ACTIONS = (
     UTMAction.POS_Z,
     UTMAction.NEG_Z,
 )
+
+PIBTActionPlan = dict[str, list[int]]
+
+
+def prioritized_pibt_action_plan(env: UTMMAPFEnv) -> PIBTActionPlan:
+    """Precompute a full PIBT rollout as per-agent action sequences."""
+
+    observations, _ = env.reset()
+    plan: PIBTActionPlan = {agent: [] for agent in env.possible_agents}
+
+    while observations:
+        agents = sorted(observations)
+        masks = {agent: env.action_mask(agent).copy() for agent in agents}
+        expert_actions = prioritized_shortest_path_actions(env, agents)
+        actions: dict[str, int] = {}
+
+        for agent in agents:
+            action = int(expert_actions.get(agent, int(UTMAction.WAIT)))
+            if action >= masks[agent].shape[0] or not masks[agent][action]:
+                action = int(UTMAction.WAIT)
+            actions[agent] = action
+
+        for agent in env.possible_agents:
+            plan[agent].append(int(actions.get(agent, int(UTMAction.WAIT))))
+
+        observations, _, _, _, _ = env.step(actions)
+
+    return plan
 
 
 def shortest_path_action(env: UTMMAPFEnv, agent: str) -> int:
@@ -204,6 +232,11 @@ def ranked_shortest_path_actions(env: UTMMAPFEnv, agent: str) -> list[int]:
 def _shortest_path_length(
     env: UTMMAPFEnv, start: Cell, goal: Cell, start_time: int
 ) -> int | None:
+    if not env.scenario.grid.blocked_cells and not any(
+        zone.enabled for zone in env.scenario.no_fly_zones
+    ):
+        return manhattan_distance(start, goal)
+
     cache = _distance_cache(env)
     cache_key = (start, goal, start_time)
     if cache_key in cache:

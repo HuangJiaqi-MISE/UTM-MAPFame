@@ -13,7 +13,7 @@ from common import load_env, scenario_paths
 
 from utm_mappo import UTMAction, UTMMAPFEnv  # noqa: E402
 from utm_mappo.cbs_expert import cbs_plan  # noqa: E402
-from utm_mappo.expert import prioritized_shortest_path_actions  # noqa: E402
+from utm_mappo.expert import prioritized_pibt_action_plan  # noqa: E402
 from utm_mappo.space_time_expert import (  # noqa: E402
     action_from_transition,
     planned_cell,
@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
         default="space-time",
         help=(
             "Teacher used to generate demonstrations. space-time is an offline "
-            "prioritized reservation planner; pibt is the older online heuristic; "
+            "prioritized reservation planner; pibt precomputes the online heuristic; "
             "cbs is a bounded CPU Conflict-Based Search teacher for comparison."
         ),
     )
@@ -333,6 +333,14 @@ def collect_planned_rollout(
 
 
 def collect_pibt_rollout(env: UTMMAPFEnv) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    action_plan = prioritized_pibt_action_plan(env)
+    return collect_action_plan_rollout(env, action_plan)
+
+
+def collect_action_plan_rollout(
+    env: UTMMAPFEnv,
+    action_plan: dict[str, list[int]],
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     observations, _ = env.reset()
     agent_to_index = {
         agent: index for index, agent in enumerate(env.possible_agents)
@@ -347,11 +355,14 @@ def collect_pibt_rollout(env: UTMMAPFEnv) -> tuple[dict[str, np.ndarray], dict[s
     while observations:
         agents = sorted(observations)
         masks = {agent: env.action_mask(agent).copy() for agent in agents}
-        expert_actions = prioritized_shortest_path_actions(env, agents)
         actions: dict[str, int] = {}
 
         for agent in agents:
-            action = int(expert_actions.get(agent, int(UTMAction.WAIT)))
+            agent_actions = action_plan.get(agent, [])
+            if env.time_step < len(agent_actions):
+                action = int(agent_actions[env.time_step])
+            else:
+                action = int(UTMAction.WAIT)
             if action >= masks[agent].shape[0] or not masks[agent][action]:
                 action = int(UTMAction.WAIT)
             actions[agent] = action
@@ -547,7 +558,7 @@ def teacher_source(teacher: str) -> str:
         return "utm_mappo.cbs_expert.cbs_plan"
     if teacher == "space-time":
         return "utm_mappo.space_time_expert.prioritized_space_time_plan"
-    return "utm_mappo.expert.prioritized_shortest_path_actions"
+    return "utm_mappo.expert.prioritized_pibt_action_plan"
 
 
 def is_clean_success(metrics: dict[str, Any]) -> bool:

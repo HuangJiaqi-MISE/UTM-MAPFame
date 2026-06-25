@@ -3,6 +3,7 @@ from __future__ import annotations
 from utm_mappo import UTMMAPFEnv
 from utm_mappo.config import GridConfig, MissionConfig, UTMScenario
 from utm_mappo.cbs_expert import cbs_plan
+from utm_mappo.expert import prioritized_pibt_action_plan
 from utm_mappo.scenarios import crossing_scenario
 from utm_mappo.space_time_expert import (
     action_from_transition,
@@ -51,6 +52,26 @@ def _terminal_downwash_conflict_scenario() -> UTMScenario:
     )
 
 
+def _small_independent_scenario() -> UTMScenario:
+    return UTMScenario(
+        grid=GridConfig(dimensions=(5, 5, 2)),
+        missions=(
+            MissionConfig(
+                mission_id=1,
+                start=(0, 0, 0),
+                goal=(2, 0, 0),
+            ),
+            MissionConfig(
+                mission_id=2,
+                start=(4, 4, 0),
+                goal=(4, 2, 0),
+            ),
+        ),
+        max_time_steps=8,
+        observation_radius=1,
+    )
+
+
 def test_space_time_plan_solves_crossing_without_unsafe_holds() -> None:
     env = UTMMAPFEnv(crossing_scenario())
     env.reset()
@@ -87,6 +108,25 @@ def test_cbs_plan_rejects_terminal_downwash_conflict_without_searching() -> None
     assert result.reason == "terminal_downwash_conflict"
     assert result.expanded_nodes == 0
     assert result.low_level_searches == 0
+
+
+def test_pibt_action_plan_replays_after_precompute() -> None:
+    env = UTMMAPFEnv(_small_independent_scenario())
+    action_plan = prioritized_pibt_action_plan(env)
+
+    observations, _ = env.reset()
+    while observations:
+        actions = {
+            agent: action_plan[agent][env.time_step]
+            for agent in observations
+        }
+        observations, _, _, _, _ = env.step(actions)
+
+    render_state = env.render()
+    assert all(
+        agent_state["reached_goal"]
+        for agent_state in render_state["agents"].values()
+    )
 
 
 def test_cbs_plan_solves_small_vertex_conflict_without_unsafe_holds() -> None:
