@@ -10,7 +10,7 @@ Run commands from the `MAPPO` directory.
 python curriculum/generate_scenarios.py \
   --agents 8 \
   --count 100 \
-  --grid 10 10 5 \
+  --grid 100 100 10 \
   --disjoint-start-goal \
   --min-goal-distance 2 \
   --max-goal-distance 8 \
@@ -21,12 +21,12 @@ python curriculum/generate_scenarios.py \
   --seed 8
 ```
 
-For larger stages, keep the same `10 x 10 x 5` environment and increase the
+For larger stages, keep the same `100 x 100 x 10` environment and increase the
 agent count only after the smaller stage is stable:
 
 ```bash
-python curriculum/generate_scenarios.py --agents 16 --count 100 --grid 10 10 5 --max-time-steps 220 --out-dir configs/generated/train_16 --seed 16
-python curriculum/generate_scenarios.py --agents 32 --count 100 --grid 10 10 5 --max-time-steps 320 --out-dir configs/generated/train_32 --seed 32
+python curriculum/generate_scenarios.py --agents 16 --count 100 --grid 100 100 10 --max-time-steps 220 --out-dir configs/generated/train_16 --seed 16
+python curriculum/generate_scenarios.py --agents 32 --count 100 --grid 100 100 10 --max-time-steps 320 --out-dir configs/generated/train_32 --seed 32
 ```
 
 Useful scenario controls:
@@ -80,7 +80,7 @@ Start with a small pool because the current CBS teacher is a bounded CPU baselin
 python curriculum/generate_scenarios.py \
   --agents 8 \
   --count 50 \
-  --grid 10 10 5 \
+  --grid 100 100 10 \
   --max-time-steps 180 \
   --out-dir configs/generated/teacher_compare_8_train_50 \
   --seed 8801 \
@@ -141,7 +141,7 @@ Use a separate test pool for policy comparison:
 python curriculum/generate_scenarios.py \
   --agents 8 \
   --count 100 \
-  --grid 10 10 5 \
+  --grid 100 100 10 \
   --max-time-steps 180 \
   --out-dir configs/generated/teacher_compare_8_test_100 \
   --seed 8802 \

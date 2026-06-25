@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agents", type=int, required=True)
     parser.add_argument("--count", type=int, default=100)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--grid", type=int, nargs=3, default=(10, 10, 5))
+    parser.add_argument("--grid", type=int, nargs=3, default=(100, 100, 10))
     parser.add_argument("--max-time-steps", type=int, default=160)
     parser.add_argument("--observation-radius", type=int, default=2)
     parser.add_argument("--obstacle-rate", type=float, default=0.0)

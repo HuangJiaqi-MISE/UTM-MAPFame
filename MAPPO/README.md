@@ -84,7 +84,7 @@ Scenarios can be loaded from a Python dictionary or YAML file:
 
 ```yaml
 grid:
-  dimensions: [10, 10, 5]
+  dimensions: [100, 100, 10]
   blocked_cells:
     - [5, 5, 0]
 missions:
