@@ -8,6 +8,7 @@ import numpy as np
 
 from common import load_env, rollout_metrics, rollout_metrics_with_policy, scenario_paths
 
+from utm_mappo.cbs_expert import cbs_plan  # noqa: E402
 from utm_mappo.expert import prioritized_shortest_path_actions  # noqa: E402
 from utm_mappo.mappo import DiscreteMAPPO  # noqa: E402
 from utm_mappo.space_time_expert import (  # noqa: E402
@@ -33,12 +34,31 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--teacher",
-        choices=("space-time", "pibt"),
+        choices=("space-time", "pibt", "cbs"),
         default="space-time",
         help=(
             "Teacher for --expert-only. space-time plans once per scenario; "
-            "pibt is the older online one-step heuristic."
+            "pibt is the older online one-step heuristic; cbs is the CPU "
+            "Conflict-Based Search teacher."
         ),
+    )
+    parser.add_argument(
+        "--cbs-max-nodes",
+        type=int,
+        default=0,
+        help="Maximum CBS high-level nodes. Use 0 for no explicit node limit.",
+    )
+    parser.add_argument(
+        "--cbs-max-low-level-expansions",
+        type=int,
+        default=0,
+        help="Maximum total low-level A* expansions per CBS solve. Use 0 for no limit.",
+    )
+    parser.add_argument(
+        "--cbs-max-seconds",
+        type=float,
+        default=0.0,
+        help="Wall-clock seconds allowed per CBS solve. Use 0 for no time limit.",
     )
     parser.add_argument(
         "--planner-retries",
@@ -63,7 +83,14 @@ def main() -> None:
     for path in paths:
         env = load_env(path)
         if args.expert_only:
-            row = evaluate_teacher(env, args.teacher, args.planner_retries)
+            row = evaluate_teacher(
+                env,
+                args.teacher,
+                args.planner_retries,
+                args.cbs_max_nodes,
+                args.cbs_max_low_level_expansions,
+                args.cbs_max_seconds,
+            )
         else:
             signature = (
                 len(env.possible_agents),
@@ -114,6 +141,9 @@ def evaluate_teacher(
     env,
     teacher: str,
     planner_retries: int,
+    cbs_max_nodes: int,
+    cbs_max_low_level_expansions: int,
+    cbs_max_seconds: float,
 ) -> dict[str, object]:
     if teacher == "pibt":
         return rollout_metrics_with_policy(
@@ -122,6 +152,41 @@ def evaluate_teacher(
                 active_env, sorted(observations)
             ),
         )
+
+    if teacher == "cbs":
+        env.reset()
+        result = cbs_plan(
+            env,
+            max_high_level_nodes=cbs_max_nodes,
+            max_low_level_expansions=cbs_max_low_level_expansions,
+            max_seconds=cbs_max_seconds,
+        )
+        if result.plan is None:
+            row = failed_teacher_row(env)
+            row["planner_reason"] = result.reason
+            row["cbs_expanded_nodes"] = result.expanded_nodes
+            row["cbs_generated_nodes"] = result.generated_nodes
+            row["cbs_low_level_searches"] = result.low_level_searches
+            row["cbs_low_level_expansions"] = result.low_level_expansions
+            row["cbs_elapsed_seconds"] = result.elapsed_seconds
+            return row
+
+        row = rollout_metrics_with_policy(
+            env,
+            lambda observations, active_env=env, active_plan=result.plan: planned_actions(
+                active_env,
+                active_plan,
+                observations,
+            ),
+        )
+        row["planner_failed"] = False
+        row["planner_reason"] = result.reason
+        row["cbs_expanded_nodes"] = result.expanded_nodes
+        row["cbs_generated_nodes"] = result.generated_nodes
+        row["cbs_low_level_searches"] = result.low_level_searches
+        row["cbs_low_level_expansions"] = result.low_level_expansions
+        row["cbs_elapsed_seconds"] = result.elapsed_seconds
+        return row
 
     env.reset()
     plan = prioritized_space_time_plan(
