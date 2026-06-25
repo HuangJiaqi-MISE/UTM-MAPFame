@@ -13,7 +13,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from utm_mappo import UTMScenario  # noqa: E402
+from utm_mappo.config import MissionConfig  # noqa: E402
 from utm_mappo.env import ACTION_DELTAS, UTMMAPFEnv, UTMAction  # noqa: E402
+from utm_mappo.geometry import transition_conflict  # noqa: E402
 
 Cell = tuple[int, int, int]
 
@@ -153,7 +155,32 @@ def try_make_scenario(args: argparse.Namespace, rng: random.Random) -> UTMScenar
         UTMMAPFEnv(scenario)
     except ValueError:
         return None
+    if has_pairwise_cell_conflict(scenario.missions, "goal"):
+        return None
     return scenario
+
+
+def has_pairwise_cell_conflict(
+    missions: tuple[MissionConfig, ...],
+    field_name: str,
+) -> bool:
+    for index_a, mission_a in enumerate(missions):
+        cell_a = getattr(mission_a, field_name)
+        for mission_b in missions[index_a + 1 :]:
+            cell_b = getattr(mission_b, field_name)
+            if (
+                transition_conflict(
+                    cell_a,
+                    cell_a,
+                    mission_a,
+                    cell_b,
+                    cell_b,
+                    mission_b,
+                )
+                is not None
+            ):
+                return True
+    return False
 
 
 def make_blocked_cells(

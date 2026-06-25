@@ -31,6 +31,26 @@ def _small_cbs_scenario() -> UTMScenario:
     )
 
 
+def _terminal_downwash_conflict_scenario() -> UTMScenario:
+    return UTMScenario(
+        grid=GridConfig(dimensions=(3, 3, 3)),
+        missions=(
+            MissionConfig(
+                mission_id=1,
+                start=(0, 0, 2),
+                goal=(1, 1, 2),
+            ),
+            MissionConfig(
+                mission_id=2,
+                start=(2, 2, 0),
+                goal=(1, 1, 1),
+            ),
+        ),
+        max_time_steps=8,
+        observation_radius=1,
+    )
+
+
 def test_space_time_plan_solves_crossing_without_unsafe_holds() -> None:
     env = UTMMAPFEnv(crossing_scenario())
     env.reset()
@@ -56,6 +76,17 @@ def test_space_time_plan_solves_crossing_without_unsafe_holds() -> None:
         for agent_state in render_state["agents"].values()
     )
     assert unsafe_holds == 0
+
+
+def test_cbs_plan_rejects_terminal_downwash_conflict_without_searching() -> None:
+    env = UTMMAPFEnv(_terminal_downwash_conflict_scenario())
+    env.reset()
+    result = cbs_plan(env)
+
+    assert result.plan is None
+    assert result.reason == "terminal_downwash_conflict"
+    assert result.expanded_nodes == 0
+    assert result.low_level_searches == 0
 
 
 def test_cbs_plan_solves_small_vertex_conflict_without_unsafe_holds() -> None:

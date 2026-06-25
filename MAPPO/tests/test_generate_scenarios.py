@@ -4,10 +4,12 @@ import random
 from argparse import Namespace
 
 from curriculum.generate_scenarios import (
+    has_pairwise_cell_conflict,
     manhattan_distance,
     sample_box,
     try_make_scenario,
 )
+from utm_mappo.config import MissionConfig
 
 
 def test_sample_box_respects_3d_size_range() -> None:
@@ -61,3 +63,21 @@ def test_generated_missions_can_enforce_disjoint_distance_constraints() -> None:
     for mission in scenario.missions:
         distance = manhattan_distance(mission.start, mission.goal)
         assert 2 <= distance <= 6
+    assert not has_pairwise_cell_conflict(scenario.missions, "goal")
+
+
+def test_pairwise_cell_conflict_detects_goal_downwash_conflict() -> None:
+    missions = (
+        MissionConfig(
+            mission_id=1,
+            start=(0, 0, 2),
+            goal=(1, 1, 2),
+        ),
+        MissionConfig(
+            mission_id=2,
+            start=(2, 2, 0),
+            goal=(1, 1, 1),
+        ),
+    )
+
+    assert has_pairwise_cell_conflict(missions, "goal")

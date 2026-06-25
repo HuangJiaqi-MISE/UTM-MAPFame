@@ -106,6 +106,17 @@ def cbs_plan(
     if not env._state_by_agent:
         env.reset()
 
+    terminal_conflict = _terminal_goal_conflict_reason(env)
+    if terminal_conflict is not None:
+        return _result(
+            plan=None,
+            expanded_nodes=0,
+            generated_nodes=0,
+            budget=budget,
+            started=started,
+            reason=terminal_conflict,
+        )
+
     constraints: dict[str, frozenset[Constraint]] = {
         agent: frozenset() for agent in env.possible_agents
     }
@@ -228,6 +239,25 @@ def actions_from_plan(env: UTMMAPFEnv, plan: CBSPlan) -> dict[str, int]:
         next_cell = planned_cell(plan[agent], env.time_step + 1)
         actions[agent] = action_from_transition(state.cell, next_cell)
     return actions
+
+
+def _terminal_goal_conflict_reason(env: UTMMAPFEnv) -> str | None:
+    agents = tuple(env.possible_agents)
+    for index, agent_a in enumerate(agents):
+        mission_a = env._state_by_agent[agent_a].mission
+        for agent_b in agents[index + 1 :]:
+            mission_b = env._state_by_agent[agent_b].mission
+            reason = transition_conflict(
+                mission_a.goal,
+                mission_a.goal,
+                mission_a,
+                mission_b.goal,
+                mission_b.goal,
+                mission_b,
+            )
+            if reason is not None:
+                return f"terminal_{reason}_conflict"
+    return None
 
 
 def find_first_conflict(env: UTMMAPFEnv, paths: CBSPlan) -> Conflict | None:
