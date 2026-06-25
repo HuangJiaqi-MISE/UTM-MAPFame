@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import time
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--csv", type=Path, default=None)
     parser.add_argument("--stochastic", action="store_true")
+    parser.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help=(
+            "Print per-scenario timing for scenario loading, teacher planning, "
+            "and environment rollout."
+        ),
+    )
     parser.add_argument(
         "--expert-only",
         action="store_true",
@@ -81,7 +90,10 @@ def main() -> None:
         raise ValueError("--model-dir is required unless --expert-only is set")
 
     for path in paths:
+        scenario_started = time.perf_counter()
+        load_started = time.perf_counter()
         env = load_env(path)
+        load_seconds = time.perf_counter() - load_started
         if args.expert_only:
             row = evaluate_teacher(
                 env,
@@ -102,8 +114,13 @@ def main() -> None:
                 model_cache[signature] = model
             else:
                 model.env = env
+            rollout_started = time.perf_counter()
             row = rollout_metrics(env, model, stochastic=args.stochastic)
+            row["planning_seconds"] = 0.0
+            row["rollout_seconds"] = time.perf_counter() - rollout_started
 
+        row["load_seconds"] = load_seconds
+        row["scenario_wall_seconds"] = time.perf_counter() - scenario_started
         row["scenario"] = str(path)
         rows.append(row)
         print(
@@ -112,15 +129,17 @@ def main() -> None:
             f"osc={row['oscillations']}"
             f"{' planner_failed' if row.get('planner_failed') else ''}"
         )
+        if args.diagnostics:
+            print_diagnostics(path, row)
 
-    print_summary(rows)
+    print_summary(rows, show_timing=args.diagnostics)
     if args.csv is not None:
         args.csv.parent.mkdir(parents=True, exist_ok=True)
         write_csv(args.csv, rows)
         print(f"wrote {args.csv}")
 
 
-def print_summary(rows: list[dict[str, object]]) -> None:
+def print_summary(rows: list[dict[str, object]], show_timing: bool = False) -> None:
     if not rows:
         print("no scenarios evaluated")
         return
@@ -135,6 +154,31 @@ def print_summary(rows: list[dict[str, object]]) -> None:
     print(f"  mean_invalid={mean(rows, 'invalid'):.2f}")
     print(f"  mean_no_fly={mean(rows, 'no_fly'):.2f}")
     print(f"  mean_oscillations={mean(rows, 'oscillations'):.2f}")
+    if show_timing:
+        print(f"  mean_load_seconds={mean(rows, 'load_seconds'):.4f}")
+        print(f"  mean_planning_seconds={mean(rows, 'planning_seconds'):.4f}")
+        print(f"  mean_rollout_seconds={mean(rows, 'rollout_seconds'):.4f}")
+        print(f"  mean_wall_seconds={mean(rows, 'scenario_wall_seconds'):.4f}")
+
+
+def print_diagnostics(path: Path, row: dict[str, object]) -> None:
+    print("  diagnostics:")
+    print(f"    scenario={path}")
+    print(f"    load_seconds={float(row.get('load_seconds', 0.0)):.4f}")
+    print(f"    planning_seconds={float(row.get('planning_seconds', 0.0)):.4f}")
+    print(f"    rollout_seconds={float(row.get('rollout_seconds', 0.0)):.4f}")
+    print(f"    wall_seconds={float(row.get('scenario_wall_seconds', 0.0)):.4f}")
+    if "planner_reason" in row:
+        print(f"    planner_reason={row.get('planner_reason')}")
+    if "cbs_elapsed_seconds" in row:
+        print(f"    cbs_elapsed_seconds={float(row.get('cbs_elapsed_seconds', 0.0)):.4f}")
+        print(f"    cbs_expanded_nodes={int(row.get('cbs_expanded_nodes', 0))}")
+        print(f"    cbs_generated_nodes={int(row.get('cbs_generated_nodes', 0))}")
+        print(f"    cbs_low_level_searches={int(row.get('cbs_low_level_searches', 0))}")
+        print(
+            "    cbs_low_level_expansions="
+            f"{int(row.get('cbs_low_level_expansions', 0))}"
+        )
 
 
 def evaluate_teacher(
@@ -146,23 +190,31 @@ def evaluate_teacher(
     cbs_max_seconds: float,
 ) -> dict[str, object]:
     if teacher == "pibt":
-        return rollout_metrics_with_policy(
+        rollout_started = time.perf_counter()
+        row = rollout_metrics_with_policy(
             env,
             lambda observations, active_env=env: prioritized_shortest_path_actions(
                 active_env, sorted(observations)
             ),
         )
+        row["planning_seconds"] = 0.0
+        row["rollout_seconds"] = time.perf_counter() - rollout_started
+        return row
 
     if teacher == "cbs":
         env.reset()
+        planning_started = time.perf_counter()
         result = cbs_plan(
             env,
             max_high_level_nodes=cbs_max_nodes,
             max_low_level_expansions=cbs_max_low_level_expansions,
             max_seconds=cbs_max_seconds,
         )
+        planning_seconds = time.perf_counter() - planning_started
         if result.plan is None:
             row = failed_teacher_row(env)
+            row["planning_seconds"] = planning_seconds
+            row["rollout_seconds"] = 0.0
             row["planner_reason"] = result.reason
             row["cbs_expanded_nodes"] = result.expanded_nodes
             row["cbs_generated_nodes"] = result.generated_nodes
@@ -171,6 +223,7 @@ def evaluate_teacher(
             row["cbs_elapsed_seconds"] = result.elapsed_seconds
             return row
 
+        rollout_started = time.perf_counter()
         row = rollout_metrics_with_policy(
             env,
             lambda observations, active_env=env, active_plan=result.plan: planned_actions(
@@ -179,6 +232,8 @@ def evaluate_teacher(
                 observations,
             ),
         )
+        row["planning_seconds"] = planning_seconds
+        row["rollout_seconds"] = time.perf_counter() - rollout_started
         row["planner_failed"] = False
         row["planner_reason"] = result.reason
         row["cbs_expanded_nodes"] = result.expanded_nodes
@@ -189,15 +244,21 @@ def evaluate_teacher(
         return row
 
     env.reset()
+    planning_started = time.perf_counter()
     plan = prioritized_space_time_plan(
         env,
         max_retries=planner_retries,
         seed=1,
     )
+    planning_seconds = time.perf_counter() - planning_started
     if plan is None:
-        return failed_teacher_row(env)
+        row = failed_teacher_row(env)
+        row["planning_seconds"] = planning_seconds
+        row["rollout_seconds"] = 0.0
+        return row
 
-    return rollout_metrics_with_policy(
+    rollout_started = time.perf_counter()
+    row = rollout_metrics_with_policy(
         env,
         lambda observations, active_env=env, active_plan=plan: planned_actions(
             active_env,
@@ -205,6 +266,9 @@ def evaluate_teacher(
             observations,
         ),
     )
+    row["planning_seconds"] = planning_seconds
+    row["rollout_seconds"] = time.perf_counter() - rollout_started
+    return row
 
 
 def planned_actions(env, plan, observations: dict[str, np.ndarray]) -> dict[str, int]:
@@ -255,12 +319,23 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "invalid",
         "no_fly",
         "unsafe",
+        "planner_failed",
+        "planner_reason",
+        "load_seconds",
+        "planning_seconds",
+        "rollout_seconds",
+        "scenario_wall_seconds",
+        "cbs_expanded_nodes",
+        "cbs_generated_nodes",
+        "cbs_low_level_searches",
+        "cbs_low_level_expansions",
+        "cbs_elapsed_seconds",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
-            writer.writerow({field: row[field] for field in fieldnames})
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
 
 
 if __name__ == "__main__":
