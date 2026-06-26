@@ -7,6 +7,7 @@
 #include "Planning/PathPlannerBase.h"
 #include "Planning/PlanningInputValidator.h"
 #include "Planning/DroneMissionTypes.h"
+#include "Planning/MissionSchedulerTypes.h"
 #include "Planning/PlannerTypes.h"
 #include "Planning/TemporalNoFlyZoneTypes.h"
 #include "PathPlanningDemoActor.generated.h"
@@ -703,6 +704,7 @@ public:
     // 无人机数量+序号配置
     // 如果不使用 MissionConfigs，则从场景里手动配置 Start_i / Goal_i 来指定任务数量和起终点
 protected:
+    bool BuildScheduledMissionConfigs(const TArray<FDroneMissionConfig>& RawMissions, TArray<FDroneMissionConfig>& OutScheduledMissions) const;
     bool ProcessMissionConfigs();
     bool ProcessStartGoalPairsMultiAgent();
     bool ProcessMissionConfigsMultiAgent();
@@ -718,6 +720,9 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mission Config")
     TArray<FDroneMissionConfig> MissionConfigs;
+
+    UPROPERTY(EditAnywhere, Category = "Mission Scheduler", meta = (DisplayName = "Task Assignment Strategy"))
+    EMissionSchedulerType MissionSchedulerType = EMissionSchedulerType::Static;
 
     // 算法选择
 private:

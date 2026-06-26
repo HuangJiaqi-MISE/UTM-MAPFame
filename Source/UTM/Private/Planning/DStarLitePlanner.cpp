@@ -3,7 +3,7 @@
 
 namespace
 {
-    constexpr float INF_COST = 1e9f;
+    constexpr float DStarLiteInfCost = 1e9f;
 }
 
 float FDStarLitePlanner::Heuristic(const FIntVector& A, const FIntVector& B) const
@@ -66,7 +66,7 @@ float FDStarLitePlanner::Cost(const FGridMap3D& GridMap, int32 FromIdx, int32 To
 
     if (GridMap.IsBlocked(B.X, B.Y, B.Z))
     {
-        return INF_COST;
+        return DStarLiteInfCost;
     }
 
     return 1.f;
@@ -145,7 +145,7 @@ void FDStarLitePlanner::UpdateVertex(
 {
     if (UIdx != GoalIdx)
     {
-        float MinRhs = INF_COST;
+        float MinRhs = DStarLiteInfCost;
         const TArray<int32> Succ = GetNeighbors(GridMap, UIdx);
 
         for (int32 SIdx : Succ)
@@ -217,7 +217,7 @@ bool FDStarLitePlanner::ComputeShortestPath(
         }
         else
         {
-            G[Top.NodeIdx] = INF_COST;
+            G[Top.NodeIdx] = DStarLiteInfCost;
 
             TArray<int32> Pred = GetNeighbors(GridMap, Top.NodeIdx);
             Pred.Add(Top.NodeIdx);
@@ -229,7 +229,7 @@ bool FDStarLitePlanner::ComputeShortestPath(
         }
     }
 
-    return RHS[StartIdx] < INF_COST;
+    return RHS[StartIdx] < DStarLiteInfCost;
 }
 
 bool FDStarLitePlanner::ReconstructPath(
@@ -257,7 +257,7 @@ bool FDStarLitePlanner::ReconstructPath(
 
         const TArray<int32> Neighbors = GetNeighbors(GridMap, Current);
 
-        float BestCost = INF_COST;
+        float BestCost = DStarLiteInfCost;
         int32 BestNext = INDEX_NONE;
 
         for (int32 NIdx : Neighbors)
@@ -270,7 +270,7 @@ bool FDStarLitePlanner::ReconstructPath(
             }
         }
 
-        if (BestNext == INDEX_NONE || BestCost >= INF_COST)
+        if (BestNext == INDEX_NONE || BestCost >= DStarLiteInfCost)
         {
             UE_LOG(LogTemp, Error, TEXT("D* Lite failed to reconstruct a valid path"));
             return false;
@@ -324,8 +324,8 @@ bool FDStarLitePlanner::Plan(
 
     TArray<float> G;
     TArray<float> RHS;
-    G.Init(INF_COST, TotalCells);
-    RHS.Init(INF_COST, TotalCells);
+    G.Init(DStarLiteInfCost, TotalCells);
+    RHS.Init(DStarLiteInfCost, TotalCells);
 
     RHS[GoalIdx] = 0.f;
 

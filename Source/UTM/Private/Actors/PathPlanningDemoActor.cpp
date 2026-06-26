@@ -9,6 +9,7 @@
 #include "Engine/World.h"
 
 #include "Planning/DiscreteAlignmentManager.h"
+#include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlannerRegistry.h"
 
 #include "Actors/MissionMarkerActor.h"
@@ -2500,6 +2501,7 @@ FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
     Root->SetStringField(TEXT("map_type"), MapTypeName);
     Root->SetStringField(TEXT("planner_name"), PlannerName);
     Root->SetStringField(TEXT("planner_type"), PlannerName);
+    Root->SetStringField(TEXT("scheduler_type"), FMissionSchedulerRegistry::GetSchedulerTypeName(MissionSchedulerType));
     Root->SetStringField(TEXT("delay_mode"), DelayModeName);
     Root->SetStringField(TEXT("replan_mode"), ReplanModeName);
     Root->SetStringField(TEXT("execution_replan_mode"), ReplanModeName);
@@ -2854,6 +2856,35 @@ ADroneActor* APathPlanningDemoActor::SpawnDroneForPath(const TArray<FVector>& Pa
     return NewDrone;
 }
 
+bool APathPlanningDemoActor::BuildScheduledMissionConfigs(
+    const TArray<FDroneMissionConfig>& RawMissions,
+    TArray<FDroneMissionConfig>& OutScheduledMissions) const
+{
+    FMissionSchedulerContext Context;
+    Context.GridMap = &GridMap;
+    Context.RequestedMissionCount = RawMissions.Num();
+
+    const bool bScheduled = FMissionSchedulerRegistry::BuildSchedule(
+        MissionSchedulerType,
+        Context,
+        RawMissions,
+        OutScheduledMissions);
+
+    if (!bScheduled)
+    {
+        UE_LOG(LogTemp, Error, TEXT("Mission scheduler %s failed"),
+            *FMissionSchedulerRegistry::GetSchedulerTypeName(MissionSchedulerType));
+        return false;
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("Mission scheduler %s produced %d scheduled missions from %d raw missions"),
+        *FMissionSchedulerRegistry::GetSchedulerTypeName(MissionSchedulerType),
+        OutScheduledMissions.Num(),
+        RawMissions.Num());
+
+    return true;
+}
+
 // 单智能体路径规划
 // UI添加起点终点以及任务序号配置后，直接用这些配置进行路径规划，
 // 无需在场景里放置 Start_i / Goal_i Actor
@@ -2861,9 +2892,17 @@ bool APathPlanningDemoActor::ProcessMissionConfigs()
 {
     UE_LOG(LogTemp, Warning, TEXT("Using MissionConfigs mode. Mission count = %d"), MissionConfigs.Num());
 
+    TArray<FDroneMissionConfig> ScheduledMissions;
+    if (!BuildScheduledMissionConfigs(MissionConfigs, ScheduledMissions))
+    {
+        return false;
+    }
+
+    LastPlanningStats.MissionCount = ScheduledMissions.Num();
+
     bool bAnySuccess = false;
 
-    for (const FDroneMissionConfig& Mission : MissionConfigs)
+    for (const FDroneMissionConfig& Mission : ScheduledMissions)
     {
         const int32 Id = Mission.MissionId;
         const FVector StartWorld = Mission.StartWorld;
@@ -3005,13 +3044,27 @@ bool APathPlanningDemoActor::ProcessStartGoalPairsMultiAgent()
         return false;
     }
 
+    TArray<FDroneMissionConfig> ScheduledMissions;
+    if (!BuildScheduledMissionConfigs(Missions, ScheduledMissions))
+    {
+        return false;
+    }
+
+    LastPlanningStats.MissionCount = ScheduledMissions.Num();
+
+    if (ScheduledMissions.Num() <= 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("%s start/goal pair scheduler produced no missions to plan"), *GetPlannerTypeName());
+        return false;
+    }
+
     TMap<int32, TArray<FVector>> OutPaths;
 
     const double SolveStart = FPlatformTime::Seconds();
-    const bool bSuccess = PlanMultiAgentMissions(Missions, OutPaths);
+    const bool bSuccess = PlanMultiAgentMissions(ScheduledMissions, OutPaths);
     LastPlanningStats.SolveTimeMs += (FPlatformTime::Seconds() - SolveStart) * 1000.0;
 
-    for (const FDroneMissionConfig& Mission : Missions)
+    for (const FDroneMissionConfig& Mission : ScheduledMissions)
     {
         const TArray<FVector>* PathPoints = OutPaths.Find(Mission.MissionId);
 
@@ -3029,11 +3082,11 @@ bool APathPlanningDemoActor::ProcessStartGoalPairsMultiAgent()
         return false;
     }
 
-    CacheExecutionMissionConfigs(Missions);
+    CacheExecutionMissionConfigs(ScheduledMissions);
 
     bool bAnyPath = false;
 
-    for (const FDroneMissionConfig& Mission : Missions)
+    for (const FDroneMissionConfig& Mission : ScheduledMissions)
     {
         const TArray<FVector>* PathPoints = OutPaths.Find(Mission.MissionId);
         if (!PathPoints || PathPoints->Num() <= 0)
@@ -3071,13 +3124,27 @@ bool APathPlanningDemoActor::ProcessMissionConfigsMultiAgent()
         *GetPlannerTypeName(),
         MissionConfigs.Num());
 
+    TArray<FDroneMissionConfig> ScheduledMissions;
+    if (!BuildScheduledMissionConfigs(MissionConfigs, ScheduledMissions))
+    {
+        return false;
+    }
+
+    LastPlanningStats.MissionCount = ScheduledMissions.Num();
+
+    if (ScheduledMissions.Num() <= 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("%s mission scheduler produced no missions to plan"), *GetPlannerTypeName());
+        return false;
+    }
+
     TMap<int32, TArray<FVector>> OutPaths;
 
     const double SolveStart = FPlatformTime::Seconds();
-    const bool bSuccess = PlanMultiAgentMissions(MissionConfigs, OutPaths);
+    const bool bSuccess = PlanMultiAgentMissions(ScheduledMissions, OutPaths);
     LastPlanningStats.SolveTimeMs += (FPlatformTime::Seconds() - SolveStart) * 1000.0;
 
-    for (const FDroneMissionConfig& Mission : MissionConfigs)
+    for (const FDroneMissionConfig& Mission : ScheduledMissions)
     {
         const TArray<FVector>* PathPoints = OutPaths.Find(Mission.MissionId);
 
@@ -3095,11 +3162,11 @@ bool APathPlanningDemoActor::ProcessMissionConfigsMultiAgent()
         return false;
     }
 
-    CacheExecutionMissionConfigs(MissionConfigs);
+    CacheExecutionMissionConfigs(ScheduledMissions);
 
     bool bAnyPath = false;
 
-    for (const FDroneMissionConfig& Mission : MissionConfigs)
+    for (const FDroneMissionConfig& Mission : ScheduledMissions)
     {
         const TArray<FVector>* PathPoints = OutPaths.Find(Mission.MissionId);
         if (!PathPoints || PathPoints->Num() <= 0)

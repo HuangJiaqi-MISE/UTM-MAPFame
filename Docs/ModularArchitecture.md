@@ -40,6 +40,24 @@ Candidate interface:
 - Output: assigned `FDroneMissionConfig` list or per-agent task ids.
 - Default implementation: static mission list, preserving current behavior.
 
+Initial static scheduler extraction is implemented in:
+
+- `Source/UTM/Public/Planning/MissionSchedulerTypes.h`
+- `Source/UTM/Public/Planning/MissionSchedulerRegistry.h`
+- `Source/UTM/Private/Planning/MissionSchedulerRegistry.cpp`
+
+The editor-facing `MissionConfigs` array remains the default mission source.
+`APathPlanningDemoActor` now adapts raw missions through
+`BuildScheduledMissionConfigs()` before invoking multi-agent planners.
+
+Available task assignment strategies:
+
+- `Static Scheduler`: forwards `MissionConfigs` unchanged. This preserves the
+  legacy EUW workflow.
+- `Nearest-First Scheduler`: treats mission starts as current agent positions
+  and mission goals as open tasks. It visits agents by `MissionId` and greedily
+  assigns the nearest remaining goal to each agent.
+
 ### Execution Coordinator
 
 Target role: own staged execution, delay handling, conflict-aware hold decisions,
@@ -68,7 +86,9 @@ planner, scheduler, executor, and logging outputs, not own their core policy.
 1. Extract planner registry and runtime config. This is the first completed
    step and keeps current behavior unchanged.
 2. Extract mission/task source and static scheduler while keeping
-   `MissionConfigs` as the default source.
+   `MissionConfigs` as the default source. The static scheduler layer is now in
+   place; future work can add dynamic assignment policies behind the same
+   registry.
 3. Extract centralized execution state and alignment policy into an executor
    class.
 4. Move structured JSON generation into an experiment reporter.

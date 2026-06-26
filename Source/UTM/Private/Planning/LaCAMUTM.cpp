@@ -31,7 +31,7 @@ namespace
             FMath::Max(A.Z, B.Z));
     }
 
-    bool ValidateMissionIdsUniqueLaCAM(const TArray<FDroneMissionConfig>& Missions)
+    bool ValidateMissionIdsUniqueLaCAMUTM(const TArray<FDroneMissionConfig>& Missions)
     {
         TSet<int32> SeenMissionIds;
 
@@ -1571,7 +1571,7 @@ bool FLaCAMUTMPlanner::PlanMissions(
         return false;
     }
 
-    if (!ValidateMissionIdsUniqueLaCAM(Missions))
+    if (!ValidateMissionIdsUniqueLaCAMUTM(Missions))
     {
         return false;
     }
