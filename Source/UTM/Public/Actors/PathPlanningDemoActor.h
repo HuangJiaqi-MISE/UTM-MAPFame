@@ -3,12 +3,11 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Planning/GridMap3D.h"
-#include "Planning/AStarPlanner.h"
-#include "Planning/DStarLitePlanner.h"
 #include "Planning/DiscreteAlignmentManager.h"
 #include "Planning/PathPlannerBase.h"
 #include "Planning/PlanningInputValidator.h"
 #include "Planning/DroneMissionTypes.h"
+#include "Planning/PlannerTypes.h"
 #include "Planning/TemporalNoFlyZoneTypes.h"
 #include "PathPlanningDemoActor.generated.h"
 
@@ -18,24 +17,11 @@ class AMissionMarkerActor;
 class ANoFlyZoneMarkerActor;
 class AStaticMeshActor;
 
-UENUM(BlueprintType)
-enum class EPlannerType : uint8
-{
-    AStar      UMETA(DisplayName = "A*"),
-    SIPP       UMETA(DisplayName = "SIPP"),
-    DStarLite  UMETA(DisplayName = "D* Lite"),
-    JPS        UMETA(DisplayName = "JPS"),
-    CBS        UMETA(DisplayName = "CBS"),
-    ECBS       UMETA(DisplayName = "ECBS"),
-    PBS        UMETA(DisplayName = "PBS"),
-    LaCAM      UMETA(DisplayName = "LaCAM"),
-    LaCAMUTM   UMETA(DisplayName = "LaCAM-UTM")
-};
 
 /*
-Ä£Ê½ A£ºÈ«¾ÖËæ»úÑÓ³Ù,ÊÊºÏ¿ìËÙ¿´Ğ§¹û¡£
-Ä£Ê½ B£ºÖ¸¶¨ agent ÑÓ³Ù,±ÈÈçÖ»ÈÃ Mission 2 ÑÓ³Ù,ÄÜÃ÷È·¹Û²ìµ¥¸öÖ´ĞĞÒì³£ÈçºÎÆÆ»µÕûÌå schedule¡£
-Ä£Ê½ C£ºÖ¸¶¨ timestep ÑÓ³Ù,±ÈÈçÈÃ Agent 2 ÔÚ t=4, 7, 8 Ô­µØµÈ´ı,ÈÃÊµÑé¿É¸´ÏÖ¡¢¿É½âÊÍ¡£
+æ¨¡å¼ Aï¼šå…¨å±€éšæœºå»¶è¿Ÿ,é€‚åˆå¿«é€Ÿçœ‹æ•ˆæœã€‚
+æ¨¡å¼ Bï¼šæŒ‡å®š agent å»¶è¿Ÿ,æ¯”å¦‚åªè®© Mission 2 å»¶è¿Ÿ,èƒ½æ˜ç¡®è§‚å¯Ÿå•ä¸ªæ‰§è¡Œå¼‚å¸¸å¦‚ä½•ç ´åæ•´ä½“ scheduleã€‚
+æ¨¡å¼ Cï¼šæŒ‡å®š timestep å»¶è¿Ÿ,æ¯”å¦‚è®© Agent 2 åœ¨ t=4, 7, 8 åŸåœ°ç­‰å¾…,è®©å®éªŒå¯å¤ç°ã€å¯è§£é‡Šã€‚
 */
 UENUM(BlueprintType)
 enum class EExecutionDelayMode : uint8
@@ -62,7 +48,7 @@ enum class ECityLayoutType : uint8
     Mixed
 };
 
-// ÓÃÓÚ¼ÇÂ¼µ¥¸öÈÎÎñµÄ¹æ»®Í³¼ÆÊı¾İ
+// ç”¨äºè®°å½•å•ä¸ªä»»åŠ¡çš„è§„åˆ’ç»Ÿè®¡æ•°æ®
 USTRUCT(BlueprintType)
 struct FSingleMissionTimingStats
 {
@@ -81,7 +67,7 @@ struct FSingleMissionTimingStats
     double SolveTimeMs = 0.0;
 };
 
-// ÓÃÓÚ¼ÇÂ¼ÕûÌå¹æ»®¹ı³ÌµÄÍ³¼ÆÊı¾İ£¬°üÀ¨Ã¿¸öÈÎÎñµÄÍ³¼Æ
+// ç”¨äºè®°å½•æ•´ä½“è§„åˆ’è¿‡ç¨‹çš„ç»Ÿè®¡æ•°æ®ï¼ŒåŒ…æ‹¬æ¯ä¸ªä»»åŠ¡çš„ç»Ÿè®¡
 USTRUCT(BlueprintType)
 struct FPlanningTimingStats
 {
@@ -464,7 +450,7 @@ private:
     void BuildExecutionSummary();
     void LogExecutionSummary() const;
 
-	// Íâ²¿ÈÕÖ¾JSON¸ñÊ½¹æ»®½á¹ûÓÃµÄ½Ó¿Ú
+	// å¤–éƒ¨æ—¥å¿—JSONæ ¼å¼è§„åˆ’ç»“æœç”¨çš„æ¥å£
     void LogStructuredExperimentSummaryJson() const;
     FString BuildStructuredExperimentSummaryJson() const;
     void ResolveExperimentMetadata(
@@ -542,7 +528,7 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Validation", meta = (ClampMin = "0"))
     int32 MaxLoggedNoFlyZoneViolations = 20;
 
-    // ÎŞÈË»úÀ¶Í¼×Ô¶¯¹ÒÔØ
+    // æ— äººæœºè“å›¾è‡ªåŠ¨æŒ‚è½½
 protected:
     ADroneActor* SpawnDroneForPath(const TArray<FVector>& PathPoints, int32 PairId);
 
@@ -572,7 +558,7 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Spawn", meta = (ClampMin = "0.01"))
     float CBSStepDuration = 0.333f;
 
-    // Ö´ĞĞÆ÷¹¹½¨
+    // æ‰§è¡Œå™¨æ„å»º
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
     bool bUseCentralizedExecution = true;
@@ -621,35 +607,35 @@ public:
 
 
     /*
-    * Execution onlyÄ£Ê½£º
+    * Execution onlyæ¨¡å¼ï¼š
     * ---bEnableDiscreteAlignment=false
     * ---bEnableConflictAwareAlignment=false
     * ---ExecutionReplanMode=Disabled
-    * ÎŞÈË»ú°´Ö´ĞĞÆ÷ÍÆ½ø£¬ÓĞÑÓ³Ù¾ÍÔ­µØÍ££¬²»»áÖØĞÂÃª¶¨¼Æ»®Ê±¼äÏß£¬×î½Ó½ü¡°´¿²¥·Å + ÈÅ¶¯¡±µÄ»ùÏß
+    * æ— äººæœºæŒ‰æ‰§è¡Œå™¨æ¨è¿›ï¼Œæœ‰å»¶è¿Ÿå°±åŸåœ°åœï¼Œä¸ä¼šé‡æ–°é”šå®šè®¡åˆ’æ—¶é—´çº¿ï¼Œæœ€æ¥è¿‘â€œçº¯æ’­æ”¾ + æ‰°åŠ¨â€çš„åŸºçº¿
     
-    * Alignment v1Ä£Ê½£º
+    * Alignment v1æ¨¡å¼ï¼š
     * ---bEnableDiscreteAlignment=true
     * ---bEnableConflictAwareAlignment=false
     * ---ExecutionReplanMode=Disabled
-    * »á¶ÁÈ¡µ±Ç°Î»ÖÃ²¢ÖØĞÂÆ¥Åä¼Æ»® step£¬»áÍ¨¹ı snap °ÑÊ±¼äÆ«²îÀ­»Ø¼Æ»®²Î¿¼£¬ÊÊºÏÑĞ¾¿¡°ÑÓ³Ùµ¼ÖÂµÄ schedule Ê§Åä¡±
-    * µ«²»¸ºÔğ±ÜÃâ¶à»úÖ´ĞĞÆÚĞÂ³åÍ»£¡£¡£¡
+    * ä¼šè¯»å–å½“å‰ä½ç½®å¹¶é‡æ–°åŒ¹é…è®¡åˆ’ stepï¼Œä¼šé€šè¿‡ snap æŠŠæ—¶é—´åå·®æ‹‰å›è®¡åˆ’å‚è€ƒï¼Œé€‚åˆç ”ç©¶â€œå»¶è¿Ÿå¯¼è‡´çš„ schedule å¤±é…â€
+    * ä½†ä¸è´Ÿè´£é¿å…å¤šæœºæ‰§è¡ŒæœŸæ–°å†²çªï¼ï¼ï¼
     * 
-    * Alignment v2Ä£Ê½£º
+    * Alignment v2æ¨¡å¼ï¼š
     * ---bEnableDiscreteAlignment=true
     * ---bEnableConflictAwareAlignment=true
-    * ---ExecutionReplanMode=GlobalUnfinished »ò LocalConflictSet
-    * ÏÈ×ö v1 ¶ÔÆë£¬ÔÙÔ¤²âÏÂÒ»²½ vertex/edge conflict£¬³åÍ»Ê±ÈÃµÍÓÅÏÈ¼¶ÎŞÈË»úÏÈ hold
-    * Èç¹û hold ²»¹»£¬ÔÙ´¥·¢ replan£¬ÊÊºÏÑĞ¾¿¡°Ö´ĞĞÆÚ°²È«Ğ­µ÷¡±
+    * ---ExecutionReplanMode=GlobalUnfinished æˆ– LocalConflictSet
+    * å…ˆåš v1 å¯¹é½ï¼Œå†é¢„æµ‹ä¸‹ä¸€æ­¥ vertex/edge conflictï¼Œå†²çªæ—¶è®©ä½ä¼˜å…ˆçº§æ— äººæœºå…ˆ hold
+    * å¦‚æœ hold ä¸å¤Ÿï¼Œå†è§¦å‘ replanï¼Œé€‚åˆç ”ç©¶â€œæ‰§è¡ŒæœŸå®‰å…¨åè°ƒâ€
     */
 
 
-    // Ê¹ÄÜAlignment v1¿ØÖÆ£º»á×öÀëÉ¢¡°¼Æ»®-Ö´ĞĞÊ±¼ä¶ÔÆë¡±£¬¶ÁÈ¡ÎŞÈË»úÊµ¼Êµ±Ç°Î»ÖÃ
-    // ÔÚ¼Æ»®Â·¾¶ÉÏÕÒµ±Ç°×îºÏÊÊµÄ²Î¿¼ step£¬»áÓÃ SearchRadius¡¢MaxSnapAhead È¥ÕÒµ±Ç°×îÆ¥ÅäµÄ¼Æ»®Ë÷Òı¡£
-    // ×öÊ±¼ä¶ÔÆë£¬Ö÷Òª±íÏÖÎª£ºFollowPlan¡¢HoldForDelay¡¢SnapToPlanIndex¡¢GoalHold
+    // ä½¿èƒ½Alignment v1æ§åˆ¶ï¼šä¼šåšç¦»æ•£â€œè®¡åˆ’-æ‰§è¡Œæ—¶é—´å¯¹é½â€ï¼Œè¯»å–æ— äººæœºå®é™…å½“å‰ä½ç½®
+    // åœ¨è®¡åˆ’è·¯å¾„ä¸Šæ‰¾å½“å‰æœ€åˆé€‚çš„å‚è€ƒ stepï¼Œä¼šç”¨ SearchRadiusã€MaxSnapAhead å»æ‰¾å½“å‰æœ€åŒ¹é…çš„è®¡åˆ’ç´¢å¼•ã€‚
+    // åšæ—¶é—´å¯¹é½ï¼Œä¸»è¦è¡¨ç°ä¸ºï¼šFollowPlanã€HoldForDelayã€SnapToPlanIndexã€GoalHold
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
     bool bEnableDiscreteAlignment = true;
 
-    //Ê¹ÄÜAlignment v2¿ØÖÆ£ºÏÂÒ»²½³åÍ»Ô¤²â,µÍÓÅÏÈ¼¶ hold,ÓÉÔ¤²â³åÍ»´¥·¢µÄ replan
+    //ä½¿èƒ½Alignment v2æ§åˆ¶ï¼šä¸‹ä¸€æ­¥å†²çªé¢„æµ‹,ä½ä¼˜å…ˆçº§ hold,ç”±é¢„æµ‹å†²çªè§¦å‘çš„ replan
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alignment")
     bool bEnableConflictAwareAlignment = true;
 
@@ -714,8 +700,8 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution Debug")
     float ExecutionDebugDrawTime = 0.4f;
 
-    // ÎŞÈË»úÊıÁ¿+ĞòºÅÅäÖÃ
-    // Èç¹û²»Ê¹ÓÃ MissionConfigs£¬Ôò´Ó³¡¾°ÀïÊÖ¶¯ÅäÖÃ Start_i / Goal_i À´Ö¸¶¨ÈÎÎñÊıÁ¿ºÍÆğÖÕµã
+    // æ— äººæœºæ•°é‡+åºå·é…ç½®
+    // å¦‚æœä¸ä½¿ç”¨ MissionConfigsï¼Œåˆ™ä»åœºæ™¯é‡Œæ‰‹åŠ¨é…ç½® Start_i / Goal_i æ¥æŒ‡å®šä»»åŠ¡æ•°é‡å’Œèµ·ç»ˆç‚¹
 protected:
     bool ProcessMissionConfigs();
     bool ProcessStartGoalPairsMultiAgent();
@@ -724,8 +710,8 @@ protected:
     bool IsMultiAgentPlannerType() const;
 public:
     /*
-    false£º¼ÌĞøÓÃ³¡¾°ÀïÊÖ¶¯ÅäÖÃµÄ Start_i / Goal_i
-    true£º¸ÄÓÃ MissionConfigs ´Ó½çÃæÖ±½ÓÅäÖÃ
+    falseï¼šç»§ç»­ç”¨åœºæ™¯é‡Œæ‰‹åŠ¨é…ç½®çš„ Start_i / Goal_i
+    trueï¼šæ”¹ç”¨ MissionConfigs ä»ç•Œé¢ç›´æ¥é…ç½®
     */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mission Config")
     bool bUseMissionConfigs = false;
@@ -733,9 +719,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mission Config")
     TArray<FDroneMissionConfig> MissionConfigs;
 
-    // Ëã·¨Ñ¡Ôñ
+    // ç®—æ³•é€‰æ‹©
 private:
     FString GetPlannerTypeName() const;
+    FPlannerRuntimeConfig BuildPlannerRuntimeConfig() const;
     TUniquePtr<IPathPlannerBase> CreatePlannerByType() const;
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planner")
@@ -757,7 +744,7 @@ public:
     int32 LaCAMVerboseLevel = 0;
 
 
-    // UIµ¼ÈëÆğµã¡¢ÖÕµãÅäÖÃ
+    // UIå¯¼å…¥èµ·ç‚¹ã€ç»ˆç‚¹é…ç½®
 private:
     bool TryGenerateSingleMission(
         FRandomStream& RandomStream,
@@ -772,11 +759,11 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mission Editor")
     TSubclassOf<AMissionMarkerActor> MissionMarkerClass;
 
-    // ÊÇ´¿ÏÔÊ¾/±à¼­ÓÃÍ¾µÄ¸ß¶ÈÆ«ÒÆ,marker »á¸¡µÃ¸ü¸ß£¬¸üºÃ¿´¼û
+    // æ˜¯çº¯æ˜¾ç¤º/ç¼–è¾‘ç”¨é€”çš„é«˜åº¦åç§»,marker ä¼šæµ®å¾—æ›´é«˜ï¼Œæ›´å¥½çœ‹è§
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mission Editor")
     float MarkerZOffset = 30.f;
 
-    // Generate Random Missions Éú³ÉÊıÁ¿
+    // Generate Random Missions ç”Ÿæˆæ•°é‡
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mission Editor")
     int32 RandomMissionCount = 10;
 
@@ -810,54 +797,54 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Mission Editor")
     void EditorReadMissionMarkersToConfigs();
 
-    // UI±à¼­ÁÙÊ±½û·ÉÇøÅäÖÃ
-    // ±£´æµ±Ç°ËùÓĞ½û·ÉÇøÅäÖÃ
+    // UIç¼–è¾‘ä¸´æ—¶ç¦é£åŒºé…ç½®
+    // ä¿å­˜å½“å‰æ‰€æœ‰ç¦é£åŒºé…ç½®
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor")
     TArray<FTemporalNoFlyZoneConfig> NoFlyZoneConfigs;
 
-    // Ö¸¶¨³¡¾°ÀïÉú³É½û·ÉÇøºĞ×ÓÊ±ÓÃÄÄ¸öÀ¶Í¼Àà
+    // æŒ‡å®šåœºæ™¯é‡Œç”Ÿæˆç¦é£åŒºç›’å­æ—¶ç”¨å“ªä¸ªè“å›¾ç±»
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor")
     TSubclassOf<ANoFlyZoneMarkerActor> NoFlyZoneMarkerClass;
 
-    // Ä¬ÈÏÉú³É¶à´óµÄ½û·ÉÇø,µ¥Î»ÊÇ cell Õ¤¸ñ»¯×ø±ê£¬²»ÊÇÊÀ½ç×ø±ê
+    // é»˜è®¤ç”Ÿæˆå¤šå¤§çš„ç¦é£åŒº,å•ä½æ˜¯ cell æ …æ ¼åŒ–åæ ‡ï¼Œä¸æ˜¯ä¸–ç•Œåæ ‡
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor", meta = (ClampMin = "1"))
     int32 DefaultNoFlyZoneSizeCells = 3;
 
-    // Ä¬ÈÏÊ±¼ä´°³ÖĞø¶à¾Ã£¬ÀıÈçÄ¬ÈÏ 10£¬¾Í»áÉú³ÉÀàËÆ£ºStartTimeStep = 0    EndTimeStep = 9
+    // é»˜è®¤æ—¶é—´çª—æŒç»­å¤šä¹…ï¼Œä¾‹å¦‚é»˜è®¤ 10ï¼Œå°±ä¼šç”Ÿæˆç±»ä¼¼ï¼šStartTimeStep = 0    EndTimeStep = 9
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor", meta = (ClampMin = "1"))
     int32 DefaultNoFlyZoneDuration = 10;
 
-    // Ò»´ÎËæ»úÉú³É¶àÉÙ¸ö½û·ÉÇø
+    // ä¸€æ¬¡éšæœºç”Ÿæˆå¤šå°‘ä¸ªç¦é£åŒº
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor", meta = (ClampMin = "0"))
     int32 RandomNoFlyZoneCount = 5;
 
-    // Í¬ÑùµÄÖÖ×Ó + Í¬ÑùµÄ²ÎÊı£¬ÀíÂÛÉÏ»áÉú³ÉÍ¬Ò»Åú½û·ÉÇøÅäÖÃÊÊºÏ×ö¿É¸´ÏÖÊµÑé
+    // åŒæ ·çš„ç§å­ + åŒæ ·çš„å‚æ•°ï¼Œç†è®ºä¸Šä¼šç”ŸæˆåŒä¸€æ‰¹ç¦é£åŒºé…ç½®é€‚åˆåšå¯å¤ç°å®éªŒ
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor")
     int32 NoFlyZoneRandomSeed = 12345;
 
-    // Ëæ»ú½û·ÉÇøµÄ×îĞ¡Æ½Ãæ³ß´ç¡£ÕâÀïÖ÷Òª¿ØÖÆ XY ³ß´çÏÂ½ç¡£
+    // éšæœºç¦é£åŒºçš„æœ€å°å¹³é¢å°ºå¯¸ã€‚è¿™é‡Œä¸»è¦æ§åˆ¶ XY å°ºå¯¸ä¸‹ç•Œã€‚
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor", meta = (ClampMin = "1"))
     int32 RandomNoFlyZoneMinSizeCells = 2;
 
-    // Ëæ»ú½û·ÉÇøµÄ×î´óÆ½Ãæ³ß´ç¡£ÕâÀïÖ÷Òª¿ØÖÆ XY ³ß´çÉÏ½ç¡£¾ÙÀı£ºMinSize = 2   MaxSize = 6  ±íÊ¾½û·ÉÇøµÄ X / Y ³ß´ç»áÔÚ 2 µ½ 6 ¸ö cell Ö®¼äËæ»ú¡£
+    // éšæœºç¦é£åŒºçš„æœ€å¤§å¹³é¢å°ºå¯¸ã€‚è¿™é‡Œä¸»è¦æ§åˆ¶ XY å°ºå¯¸ä¸Šç•Œã€‚ä¸¾ä¾‹ï¼šMinSize = 2   MaxSize = 6  è¡¨ç¤ºç¦é£åŒºçš„ X / Y å°ºå¯¸ä¼šåœ¨ 2 åˆ° 6 ä¸ª cell ä¹‹é—´éšæœºã€‚
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor", meta = (ClampMin = "1"))
     int32 RandomNoFlyZoneMaxSizeCells = 6;
 
-    // ½û·ÉÇø×îÔç´ÓÄÄ¸öÊ±¼ä²½¿ªÊ¼ÉúĞ§
-    // ¾ÙÀı£ºMinStartTimeStep = 0   MaxStartTimeStep = 50  ±íÊ¾½û·ÉÇøµÄ¿ªÊ¼Ê±¼ä»áÔÚ 0 µ½ 50 ¸öÊ±¼ä²½Ö®¼äËæ»ú¡£
+    // ç¦é£åŒºæœ€æ—©ä»å“ªä¸ªæ—¶é—´æ­¥å¼€å§‹ç”Ÿæ•ˆ
+    // ä¸¾ä¾‹ï¼šMinStartTimeStep = 0   MaxStartTimeStep = 50  è¡¨ç¤ºç¦é£åŒºçš„å¼€å§‹æ—¶é—´ä¼šåœ¨ 0 åˆ° 50 ä¸ªæ—¶é—´æ­¥ä¹‹é—´éšæœºã€‚
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor", meta = (ClampMin = "0"))
     int32 RandomNoFlyZoneMinStartTimeStep = 0;
 
-    // ½û·ÉÇø×îÍí´ÓÄÄ¸öÊ±¼ä²½¿ªÊ¼ÉúĞ§
+    // ç¦é£åŒºæœ€æ™šä»å“ªä¸ªæ—¶é—´æ­¥å¼€å§‹ç”Ÿæ•ˆ
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor", meta = (ClampMin = "0"))
     int32 RandomNoFlyZoneMaxStartTimeStep = 5;
 
-    // ½û·ÉÇøÊ±¼ä´°µÄ×î¶Ì³ÖĞøÊ±¼ä
-    // ¾ÙÀı£º MinDuration = 10   MaxDuration = 30  ±íÊ¾Ã¿¸ö½û·ÉÇø»á³ÖĞø 10 µ½ 30 ¸öÊ±¼ä²½¡£
+    // ç¦é£åŒºæ—¶é—´çª—çš„æœ€çŸ­æŒç»­æ—¶é—´
+    // ä¸¾ä¾‹ï¼š MinDuration = 10   MaxDuration = 30  è¡¨ç¤ºæ¯ä¸ªç¦é£åŒºä¼šæŒç»­ 10 åˆ° 30 ä¸ªæ—¶é—´æ­¥ã€‚
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor", meta = (ClampMin = "1"))
     int32 RandomNoFlyZoneMinDuration = 5;
 
-    // ½û·ÉÇøÊ±¼ä´°µÄ×î³¤³ÖĞøÊ±¼ä
+    // ç¦é£åŒºæ—¶é—´çª—çš„æœ€é•¿æŒç»­æ—¶é—´
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "No-Fly Zone Editor", meta = (ClampMin = "1"))
     int32 RandomNoFlyZoneMaxDuration = 15;
 
@@ -883,7 +870,7 @@ public:
 
 
 
-    // ¾²Ì¬ÕÏ°­ÎïÉú³ÉÓë±à¼­
+    // é™æ€éšœç¢ç‰©ç”Ÿæˆä¸ç¼–è¾‘
 private:
     void SpawnCityBuilding(const FVector& Center, const FVector& Extent);
     void GenerateCityLayout_Manhattan(FRandomStream& RandomStream);
@@ -945,7 +932,7 @@ public:
     UFUNCTION(BlueprintCallable, Category = "City Generator")
     void EditorClearCityEnvironment();
 
-    //  Í³¼ÆÇó½âÊ±¼äµÈÊı¾İ
+    //  ç»Ÿè®¡æ±‚è§£æ—¶é—´ç­‰æ•°æ®
 public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Timing")
     FPlanningTimingStats LastPlanningStats;

@@ -8,14 +8,8 @@
 #include "Actors/DroneActor.h"
 #include "Engine/World.h"
 
-#include "Planning/AStarPlanner.h"
-#include "Planning/CBSPlanner.h"
 #include "Planning/DiscreteAlignmentManager.h"
-#include "Planning/ECBSPlanner.h"
-#include "Planning/LaCAMPlanner.h"
-#include "Planning/LaCAMUTM.h"
-#include "Planning/PBSPlanner.h"
-#include "Planning/SIPPPlanner.h"
+#include "Planning/PlannerRegistry.h"
 
 #include "Actors/MissionMarkerActor.h"
 #include "Engine/StaticMeshActor.h"
@@ -23,7 +17,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Misc/ScopeExit.h"
 
-// ÕÏ°­Îï½¨Öş¹¹½¨
+// éšœç¢ç‰©å»ºç­‘æ„å»º
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 
@@ -342,7 +336,7 @@ APathPlanningDemoActor::APathPlanningDemoActor()
     RootComponent = SceneRoot;
 }
 
-// ¸üĞÂ´úÂë½á¹¹£¬ÊÖ¶¯¿ØÖÆÊÇ·ñÔÚ BeginPlay Àï×Ô¶¯ÔËĞĞ¹æ»®Âß¼­£¬·½±ãµ÷ÊÔºÍ±à¼­Æ÷½»»¥
+// æ›´æ–°ä»£ç ç»“æ„ï¼Œæ‰‹åŠ¨æ§åˆ¶æ˜¯å¦åœ¨ BeginPlay é‡Œè‡ªåŠ¨è¿è¡Œè§„åˆ’é€»è¾‘ï¼Œæ–¹ä¾¿è°ƒè¯•å’Œç¼–è¾‘å™¨äº¤äº’
 void APathPlanningDemoActor::BeginPlay()
 {
     Super::BeginPlay();
@@ -665,7 +659,7 @@ FColor APathPlanningDemoActor::GetDebugColorById(int32 Id) const
     return Colors[(Id - 1) % Count];
 }
 
-// LogPathCoordinates¿ª¹Ø£¬¿ØÖÆÊä³öÂ·¾¶×ø±êµ½ÈÕÖ¾£¬·½±ãµ÷ÊÔÑéÖ¤
+// LogPathCoordinateså¼€å…³ï¼Œæ§åˆ¶è¾“å‡ºè·¯å¾„åæ ‡åˆ°æ—¥å¿—ï¼Œæ–¹ä¾¿è°ƒè¯•éªŒè¯
 void APathPlanningDemoActor::LogPathCoordinates(const TArray<FVector>& InPath, int32 Id, const TCHAR* Label) const
 {
     if (!bLogPathCoordinates)
@@ -960,8 +954,8 @@ void APathPlanningDemoActor::ValidateLastPlannedPathsAgainstNoFlyZones()
     LogNoFlyZonePathValidationSummary(LastNoFlyZonePathValidation);
 }
 
-// ´óÀà£ºĞÂÔöÖ´ĞĞÆ÷´úÂë
-// ½«ÊÀ½ç×ø±êÂ·¾¶×ª»»ÎªÍø¸ñ×ø±êÂ·¾¶£¬·½±ãºóĞøÖ´ĞĞºÍÑéÖ¤Ê¹ÓÃ
+// å¤§ç±»ï¼šæ–°å¢æ‰§è¡Œå™¨ä»£ç 
+// å°†ä¸–ç•Œåæ ‡è·¯å¾„è½¬æ¢ä¸ºç½‘æ ¼åæ ‡è·¯å¾„ï¼Œæ–¹ä¾¿åç»­æ‰§è¡Œå’ŒéªŒè¯ä½¿ç”¨
 TArray<FIntVector> APathPlanningDemoActor::BuildCellPathFromWorldPath(const TArray<FVector>& PathPoints) const
 {
     TArray<FIntVector> Result;
@@ -2357,7 +2351,7 @@ void APathPlanningDemoActor::ResolveExperimentMetadata(
         OutRunId.ParseIntoArray(Tokens, TEXT("_"), true);
     }
 
-	// 1. ÓÅÏÈ´Ó run_id ½âÎöÏÔÊ½ĞÅÏ¢£¬Ò»°ãÎª¿Õ»ò²»¹æ·¶£¬µ«Èç¹û·ûºÏÔ¼¶¨¸ñÊ½ÔòÓÅÏÈÊ¹ÓÃ
+	// 1. ä¼˜å…ˆä» run_id è§£ææ˜¾å¼ä¿¡æ¯ï¼Œä¸€èˆ¬ä¸ºç©ºæˆ–ä¸è§„èŒƒï¼Œä½†å¦‚æœç¬¦åˆçº¦å®šæ ¼å¼åˆ™ä¼˜å…ˆä½¿ç”¨
     if ((OutPhase.IsEmpty() || !IsKnownExperimentPhase(OutPhase)) &&
         Tokens.Num() > 0 &&
         IsKnownExperimentPhase(Tokens[0]))
@@ -2372,8 +2366,8 @@ void APathPlanningDemoActor::ResolveExperimentMetadata(
         OutGroupId = Tokens[1];
     }
 
-    // 2. Èç¹û phase »¹²»Ã÷È·£¬ÏÈÓÃ seed ¾ö¶¨ phase
-    // µ±Ç°ÊµÑéĞ­ÒéÔ¼¶¨£º
+    // 2. å¦‚æœ phase è¿˜ä¸æ˜ç¡®ï¼Œå…ˆç”¨ seed å†³å®š phase
+    // å½“å‰å®éªŒåè®®çº¦å®šï¼š
     //   seed == 1 -> PhaseA
     //   seed == 3 -> PhaseB
     if (OutPhase.IsEmpty() || !IsKnownExperimentPhase(OutPhase))
@@ -2385,7 +2379,7 @@ void APathPlanningDemoActor::ResolveExperimentMetadata(
         }
     }
 
-    // 3. phase È·¶¨ºó£¬ÔÙ¸ù¾İÅäÖÃÍÆ group_id
+    // 3. phase ç¡®å®šåï¼Œå†æ ¹æ®é…ç½®æ¨ group_id
     if (OutGroupId.IsEmpty() || !IsKnownExperimentGroupId(OutGroupId))
     {
         if (!bEnableDiscreteAlignment && !bEnableConflictAwareAlignment)
@@ -2418,13 +2412,13 @@ void APathPlanningDemoActor::ResolveExperimentMetadata(
         }
     }
 
-    // 4. Èç¹û phase »¹Ã»¶¨ÏÂÀ´£¬ÔÙ¸ù¾İ group_id ¶µµ×
+    // 4. å¦‚æœ phase è¿˜æ²¡å®šä¸‹æ¥ï¼Œå†æ ¹æ® group_id å…œåº•
     if (OutPhase.IsEmpty() || !IsKnownExperimentPhase(OutPhase))
     {
         OutPhase = GetDefaultExperimentPhaseByGroupId(OutGroupId);
     }
 
-    // 5. ¹éÒ»»¯ G3 / R3 Óë phase µÄ¶ÔÓ¦¹ØÏµ
+    // 5. å½’ä¸€åŒ– G3 / R3 ä¸ phase çš„å¯¹åº”å…³ç³»
     if (OutGroupId == TEXT("G3") && OutPhase == TEXT("PhaseB"))
     {
         OutGroupId = TEXT("R3");
@@ -2434,19 +2428,19 @@ void APathPlanningDemoActor::ResolveExperimentMetadata(
         OutGroupId = TEXT("G3");
     }
 
-    // 6. group_name °´ group_id Í³Ò»Éú³É
+    // 6. group_name æŒ‰ group_id ç»Ÿä¸€ç”Ÿæˆ
     if (OutGroupName.IsEmpty() || GetDefaultExperimentGroupNameById(OutGroupId) != OutGroupName)
     {
         OutGroupName = GetDefaultExperimentGroupNameById(OutGroupId);
     }
 
-    // 7. Èç¹û run_id Îª¿Õ£¬×Ô¶¯Éú³É
+    // 7. å¦‚æœ run_id ä¸ºç©ºï¼Œè‡ªåŠ¨ç”Ÿæˆ
     if (OutRunId.IsEmpty())
     {
         OutRunId = BuildFallbackExperimentRunId(OutPhase, OutGroupId, OutScenarioName);
     }
 
-    // 8. ¿ÉÑ¡µÄÒ»ÖÂĞÔ¸æ¾¯
+    // 8. å¯é€‰çš„ä¸€è‡´æ€§å‘Šè­¦
     if (OutPhase == TEXT("PhaseA") && ExecutionRandomSeed != 1)
     {
         UE_LOG(LogTemp, Warning,
@@ -2769,7 +2763,7 @@ void APathPlanningDemoActor::DrawExecutionDebugForState(const FExecutionAgentSta
 }
 
 
-// ×Ô¶¯¹ÒÔØÎŞÈË»úÀ¶Í¼Àà
+// è‡ªåŠ¨æŒ‚è½½æ— äººæœºè“å›¾ç±»
 ADroneActor* APathPlanningDemoActor::SpawnDroneForPath(const TArray<FVector>& PathPoints, int32 PairId)
 {
     if (!bAutoSpawnDrones)
@@ -2828,10 +2822,10 @@ ADroneActor* APathPlanningDemoActor::SpawnDroneForPath(const TArray<FVector>& Pa
         return nullptr;
     }
 
-    // ÖØ¸´Â·¾¶µã»áÔ­µØµÈ´ıÍêÕûÒ»¸öÊ±¼ä²½£¬²»ÔÙÖ»µÈÒ»¸ö Tick¡£
-    // ËùÓĞÂ·¾¶¶Î¶¼ÔÚÍ¬Ò»Ê±³¤ÄÚÍê³É£¬ºÍ CBS / ECBS µÄÀëÉ¢ timestep ÓïÒåÒ»ÖÂ¡£
-    // ·Ç¶àÖÇÄÜÌåËã·¨ÈÔÈ»×ßÔ­À´µÄÁ¬ĞøËÙ¶ÈÄ£Ê½£¬²»»áÓ°Ïìµ¥ÖÇÄÜÌåÁ´Â·¡£
-    // Ö»ÓĞSAPFA DroneActor ×Ô¼º²Å»áÍêÃÀÖ´ĞĞÂ·¾¶
+    // é‡å¤è·¯å¾„ç‚¹ä¼šåŸåœ°ç­‰å¾…å®Œæ•´ä¸€ä¸ªæ—¶é—´æ­¥ï¼Œä¸å†åªç­‰ä¸€ä¸ª Tickã€‚
+    // æ‰€æœ‰è·¯å¾„æ®µéƒ½åœ¨åŒä¸€æ—¶é•¿å†…å®Œæˆï¼Œå’Œ CBS / ECBS çš„ç¦»æ•£ timestep è¯­ä¹‰ä¸€è‡´ã€‚
+    // éå¤šæ™ºèƒ½ä½“ç®—æ³•ä»ç„¶èµ°åŸæ¥çš„è¿ç»­é€Ÿåº¦æ¨¡å¼ï¼Œä¸ä¼šå½±å“å•æ™ºèƒ½ä½“é“¾è·¯ã€‚
+    // åªæœ‰SAPFA DroneActor è‡ªå·±æ‰ä¼šå®Œç¾æ‰§è¡Œè·¯å¾„
     SpawnedDrones.Add(NewDrone);
     SpawnedDroneByMissionId.Add(PairId, NewDrone);
 
@@ -2860,9 +2854,9 @@ ADroneActor* APathPlanningDemoActor::SpawnDroneForPath(const TArray<FVector>& Pa
     return NewDrone;
 }
 
-// µ¥ÖÇÄÜÌåÂ·¾¶¹æ»®
-// UIÌí¼ÓÆğµãÖÕµãÒÔ¼°ÈÎÎñĞòºÅÅäÖÃºó£¬Ö±½ÓÓÃÕâĞ©ÅäÖÃ½øĞĞÂ·¾¶¹æ»®£¬
-// ÎŞĞèÔÚ³¡¾°Àï·ÅÖÃ Start_i / Goal_i Actor
+// å•æ™ºèƒ½ä½“è·¯å¾„è§„åˆ’
+// UIæ·»åŠ èµ·ç‚¹ç»ˆç‚¹ä»¥åŠä»»åŠ¡åºå·é…ç½®åï¼Œç›´æ¥ç”¨è¿™äº›é…ç½®è¿›è¡Œè·¯å¾„è§„åˆ’ï¼Œ
+// æ— éœ€åœ¨åœºæ™¯é‡Œæ”¾ç½® Start_i / Goal_i Actor
 bool APathPlanningDemoActor::ProcessMissionConfigs()
 {
     UE_LOG(LogTemp, Warning, TEXT("Using MissionConfigs mode. Mission count = %d"), MissionConfigs.Num());
@@ -2955,8 +2949,8 @@ bool APathPlanningDemoActor::ProcessMissionConfigs()
     return bAnySuccess;
 }
 
-// °Ñ³¡¾°ÀïÊÕ¼¯µ½µÄ Start_i / Goal_i Åä¶Ô×ª»»³É FDroneMissionConfig Êı×é£¬
-// ×öÊäÈëĞ£Ñé£¬È»ºóÍ³Ò»µ÷ÓÃ¶àÖÇÄÜÌå¹æ»®Æ÷¡£
+// æŠŠåœºæ™¯é‡Œæ”¶é›†åˆ°çš„ Start_i / Goal_i é…å¯¹è½¬æ¢æˆ FDroneMissionConfig æ•°ç»„ï¼Œ
+// åšè¾“å…¥æ ¡éªŒï¼Œç„¶åç»Ÿä¸€è°ƒç”¨å¤šæ™ºèƒ½ä½“è§„åˆ’å™¨ã€‚
 bool APathPlanningDemoActor::ProcessStartGoalPairsMultiAgent()
 {
     TArray<int32> Ids;
@@ -3149,38 +3143,8 @@ bool APathPlanningDemoActor::PlanMultiAgentMissionsOnGrid(
     const TArray<FDroneMissionConfig>& Missions,
     TMap<int32, TArray<FVector>>& OutPaths) const
 {
-    if (PlannerType == EPlannerType::CBS)
-    {
-        FCBSPlanner Planner;
-        return Planner.PlanMissions(PlanningGrid, Missions, OutPaths);
-    }
-
-    if (PlannerType == EPlannerType::ECBS)
-    {
-        FECBSPlanner Planner(ECBSSuboptimalityBound);
-        return Planner.PlanMissions(PlanningGrid, Missions, OutPaths);
-    }
-
-    if (PlannerType == EPlannerType::PBS)
-    {
-        FPBSPlanner Planner;
-        return Planner.PlanMissions(PlanningGrid, Missions, OutPaths);
-    }
-
-    if (PlannerType == EPlannerType::LaCAM)
-    {
-        FLaCAMPlanner Planner(LaCAMTimeLimitMs, LaCAMRandomSeed, bLaCAMAnytime, LaCAMVerboseLevel);
-        return Planner.PlanMissions(PlanningGrid, Missions, OutPaths);
-    }
-
-    if (PlannerType == EPlannerType::LaCAMUTM)
-    {
-        FLaCAMUTMPlanner Planner(LaCAMTimeLimitMs, LaCAMRandomSeed, bLaCAMAnytime, LaCAMVerboseLevel, NoFlyZoneConfigs);
-        return Planner.PlanMissions(PlanningGrid, Missions, OutPaths);
-    }
-
-    UE_LOG(LogTemp, Error, TEXT("PlannerType=%d is not a multi-agent planner"), (int32)PlannerType);
-    return false;
+    const FPlannerRuntimeConfig Config = BuildPlannerRuntimeConfig();
+    return FPlannerRegistry::PlanMultiAgentMissions(PlannerType, Config, PlanningGrid, Missions, OutPaths);
 }
 
 bool APathPlanningDemoActor::TryExecutionReplan(
@@ -4072,82 +4036,31 @@ bool APathPlanningDemoActor::TryExecutionReplan(
 }
 bool APathPlanningDemoActor::IsMultiAgentPlannerType() const
 {
-    return PlannerType == EPlannerType::CBS
-        || PlannerType == EPlannerType::ECBS
-        || PlannerType == EPlannerType::PBS
-        || PlannerType == EPlannerType::LaCAM
-        || PlannerType == EPlannerType::LaCAMUTM;
+    return FPlannerRegistry::IsMultiAgentPlannerType(PlannerType);
 }
 
-// ¸ù¾İ PlannerType ´´½¨¶ÔÓ¦µÄÂ·¾¶¹æ»®Æ÷ÊµÀı
+FPlannerRuntimeConfig APathPlanningDemoActor::BuildPlannerRuntimeConfig() const
+{
+    FPlannerRuntimeConfig Config;
+    Config.ECBSSuboptimalityBound = ECBSSuboptimalityBound;
+    Config.LaCAMTimeLimitMs = LaCAMTimeLimitMs;
+    Config.LaCAMRandomSeed = LaCAMRandomSeed;
+    Config.bLaCAMAnytime = bLaCAMAnytime;
+    Config.LaCAMVerboseLevel = LaCAMVerboseLevel;
+    Config.NoFlyZoneConfigs = NoFlyZoneConfigs;
+    return Config;
+}
+
 TUniquePtr<IPathPlannerBase> APathPlanningDemoActor::CreatePlannerByType() const
 {
-    switch (PlannerType)
-    {
-    case EPlannerType::AStar:
-        UE_LOG(LogTemp, Warning, TEXT("Planner created: FAStarPlanner"));
-        return MakeUnique<FAStarPlanner>();
-
-    case EPlannerType::SIPP:
-        UE_LOG(LogTemp, Warning, TEXT("Planner created: FSIPPPlanner"));
-        return MakeUnique<FSIPPPlanner>(NoFlyZoneConfigs);
-
-    case EPlannerType::DStarLite:
-        UE_LOG(LogTemp, Warning, TEXT("Planner created: FDStarLitePlanner"));
-        return MakeUnique<FDStarLitePlanner>();
-
-    case EPlannerType::JPS:
-        UE_LOG(LogTemp, Warning, TEXT("JPS planner not implemented yet. Fallback to A*"));
-        UE_LOG(LogTemp, Warning, TEXT("Planner created: FAStarPlanner"));
-        return MakeUnique<FAStarPlanner>();
-
-    case EPlannerType::PBS:
-        UE_LOG(LogTemp, Warning, TEXT("PBS is a multi-agent planner and is not created by CreatePlannerByType()"));
-        return nullptr;
-
-    case EPlannerType::CBS:
-    case EPlannerType::ECBS:
-    case EPlannerType::LaCAM:
-    case EPlannerType::LaCAMUTM:
-        UE_LOG(LogTemp, Warning, TEXT("%s is a multi-agent planner and is not created by CreatePlannerByType()"), *GetPlannerTypeName());
-        return nullptr;
-
-    default:
-        UE_LOG(LogTemp, Warning, TEXT("Unknown planner type. Fallback to A*"));
-        UE_LOG(LogTemp, Warning, TEXT("Planner created: FAStarPlanner"));
-        return MakeUnique<FAStarPlanner>();
-    }
+    return FPlannerRegistry::CreateSingleAgentPlanner(PlannerType, BuildPlannerRuntimeConfig());
 }
 
-// »ñÈ¡µ±Ç°Ñ¡ÔñµÄÂ·¾¶¹æ»®Ëã·¨Ãû³Æ£¬¹©UIÏÔÊ¾
 FString APathPlanningDemoActor::GetPlannerTypeName() const
 {
-    switch (PlannerType)
-    {
-    case EPlannerType::AStar:
-        return TEXT("A*");
-    case EPlannerType::SIPP:
-        return TEXT("SIPP");
-    case EPlannerType::DStarLite:
-        return TEXT("D* Lite");
-    case EPlannerType::CBS:
-        return TEXT("CBS");
-    case EPlannerType::ECBS:
-        return TEXT("ECBS");
-    case EPlannerType::PBS:
-        return TEXT("PBS");
-    case EPlannerType::LaCAM:
-        return TEXT("LaCAM");
-    case EPlannerType::LaCAMUTM:
-        return TEXT("LaCAM-UTM");
-    default:
-        return TEXT("Unknown");
-    }
+    return FPlannerRegistry::GetPlannerTypeName(PlannerType);
 }
 
-
-
-// UI½çÃæÌí¼ÓÆğÖ¹µã¡¢µ¼Èë±í¸ñÊı¾İ
 void APathPlanningDemoActor::GetMissionMarkerActors(TArray<AMissionMarkerActor*>& OutMarkers) const
 {
     OutMarkers.Reset();
@@ -4542,7 +4455,7 @@ void APathPlanningDemoActor::EditorReadMissionMarkersToConfigs()
 }
 
 
-//¸ºÔğÉ¾³ıËùÓĞÓÉ³ÇÊĞÉú³ÉÆ÷Éú³ÉµÄ½¨Öş Actor
+//è´Ÿè´£åˆ é™¤æ‰€æœ‰ç”±åŸå¸‚ç”Ÿæˆå™¨ç”Ÿæˆçš„å»ºç­‘ Actor
 void APathPlanningDemoActor::EditorClearCityEnvironment()
 {
     UWorld* World = GetWorld();
@@ -4572,7 +4485,7 @@ void APathPlanningDemoActor::EditorClearCityEnvironment()
     UE_LOG(LogTemp, Warning, TEXT("EditorClearCityEnvironment deleted %d actors"), DeleteCount);
 }
 
-// ¸ºÔğÉú³ÉÒ»¸ö½¨Öş¿é
+// è´Ÿè´£ç”Ÿæˆä¸€ä¸ªå»ºç­‘å—
 void APathPlanningDemoActor::SpawnCityBuilding(const FVector& Center, const FVector& Extent)
 {
     UWorld* World = GetWorld();
@@ -4625,7 +4538,7 @@ void APathPlanningDemoActor::SpawnCityBuilding(const FVector& Center, const FVec
     ));
 }
 
-// ManhattanCityÉú³ÉÆ÷ÔÚÖ¸¶¨ÇøÓòÄÚÉú³ÉÒ»¸ö¸ö½¨Öş¿é£¬ĞÎ³ÉÒ»¸ö¼òµ¥µÄ³ÇÊĞ»·¾³
+// ManhattanCityç”Ÿæˆå™¨åœ¨æŒ‡å®šåŒºåŸŸå†…ç”Ÿæˆä¸€ä¸ªä¸ªå»ºç­‘å—ï¼Œå½¢æˆä¸€ä¸ªç®€å•çš„åŸå¸‚ç¯å¢ƒ
 void APathPlanningDemoActor::GenerateCityLayout_Manhattan(FRandomStream& RandomStream)
 {
     const float Pitch = CityBlockSize + CityRoadWidth;
@@ -4651,7 +4564,7 @@ void APathPlanningDemoActor::GenerateCityLayout_Manhattan(FRandomStream& RandomS
                 0.f
             );
 
-            // Âü¹ş¶Ù½ÖÇø£ºÃ¿¸ö block Àï 1~4 ¸öÖĞ¸ß²ã½¨Öş
+            // æ›¼å“ˆé¡¿è¡—åŒºï¼šæ¯ä¸ª block é‡Œ 1~4 ä¸ªä¸­é«˜å±‚å»ºç­‘
             const int32 BuildingCount = RandomStream.RandRange(1, 4);
 
             for (int32 k = 0; k < BuildingCount; ++k)
@@ -4660,7 +4573,7 @@ void APathPlanningDemoActor::GenerateCityLayout_Manhattan(FRandomStream& RandomS
                 const float Depth = RandomStream.FRandRange(DepthMin, DepthMax);
                 const float Height = RandomStream.FRandRange(HeightMin, HeightMax);
 
-                // ÁôÒ»µã±ß¾à£¬±ÜÃâ½¨Öş³å³ö block
+                // ç•™ä¸€ç‚¹è¾¹è·ï¼Œé¿å…å»ºç­‘å†²å‡º block
                 const float Margin = 40.f;
 
                 const float OffsetXLimit = FMath::Max(0.f, CityBlockSize * 0.5f - Width * 0.5f - Margin);
@@ -4727,8 +4640,8 @@ void APathPlanningDemoActor::EditorGenerateManhattanCity()
 
 
 /*
-×¡Õ¬Æ¬Çø£ºGenerateCityLayout_Residential
-ÌØÕ÷:×¡Õ¬ÇøÓ¦¸ÃÌåÏÖ£º½¨Öş½Ï°«½¨Öş½ÏĞ¡½¨Öş¸ü¶àµ«¸ü·ÖÉ¢,µÀÂ·ºÍ¿ÕµØÏà¶Ô¿íËÉ,ÕûÌå¸ü¿ªÀ«
+ä½å®…ç‰‡åŒºï¼šGenerateCityLayout_Residential
+ç‰¹å¾:ä½å®…åŒºåº”è¯¥ä½“ç°ï¼šå»ºç­‘è¾ƒçŸ®å»ºç­‘è¾ƒå°å»ºç­‘æ›´å¤šä½†æ›´åˆ†æ•£,é“è·¯å’Œç©ºåœ°ç›¸å¯¹å®½æ¾,æ•´ä½“æ›´å¼€é˜”
 */
 void APathPlanningDemoActor::GenerateCityLayout_Residential(FRandomStream& RandomStream)
 {
@@ -4815,8 +4728,8 @@ void APathPlanningDemoActor::EditorGenerateResidentialDistrict()
 }
 
 /*
-¹¤ÒµÔ°Çø£ºGenerateCityLayout_Industrial
-ÌØÕ÷:¹¤ÒµÇøÓ¦¸ÃÌåÏÖ,½¨ÖşÊıÁ¿ÉÙ,µ¥Ìå½¨Öş´ó¸ß¶ÈÖĞµÈ,Áô´óÃæ»ı¿ªÀ«Çø,¸üÊÊºÏ²âÊÔ´ó³ß¶ÈÈÆĞĞ
+å·¥ä¸šå›­åŒºï¼šGenerateCityLayout_Industrial
+ç‰¹å¾:å·¥ä¸šåŒºåº”è¯¥ä½“ç°,å»ºç­‘æ•°é‡å°‘,å•ä½“å»ºç­‘å¤§é«˜åº¦ä¸­ç­‰,ç•™å¤§é¢ç§¯å¼€é˜”åŒº,æ›´é€‚åˆæµ‹è¯•å¤§å°ºåº¦ç»•è¡Œ
 */
 void APathPlanningDemoActor::GenerateCityLayout_Industrial(FRandomStream& RandomStream)
 {
@@ -4903,8 +4816,8 @@ void APathPlanningDemoActor::EditorGenerateIndustrialPark()
 }
 
 /*
-»ìºÏ³ÇÇø£ºGenerateCityLayout_Mixed
-ÌØÕ÷:Ò»²¿·Ö¸ßÂ¥ÃÜ¼¯,Ò»²¿·ÖµÍ°«×¡Õ¬,Ò»²¿·Ö´óÌåÁ¿¹¤Òµ½¨Öş,ÕûÌåÒìÖÊĞÔ¸ß
+æ··åˆåŸåŒºï¼šGenerateCityLayout_Mixed
+ç‰¹å¾:ä¸€éƒ¨åˆ†é«˜æ¥¼å¯†é›†,ä¸€éƒ¨åˆ†ä½çŸ®ä½å®…,ä¸€éƒ¨åˆ†å¤§ä½“é‡å·¥ä¸šå»ºç­‘,æ•´ä½“å¼‚è´¨æ€§é«˜
 */
 
 void APathPlanningDemoActor::GenerateCityLayout_Mixed(FRandomStream& RandomStream)
@@ -4934,7 +4847,7 @@ void APathPlanningDemoActor::GenerateCityLayout_Mixed(FRandomStream& RandomStrea
 
             if (DistrictType == 0)
             {
-                // Âü¹ş¶Ù·ç¸ñ
+                // æ›¼å“ˆé¡¿é£æ ¼
                 BuildingCount = RandomStream.RandRange(1, 4);
                 WidthMin = BuildingWidthMin;
                 WidthMax = BuildingWidthMax;
@@ -4946,7 +4859,7 @@ void APathPlanningDemoActor::GenerateCityLayout_Mixed(FRandomStream& RandomStrea
             }
             else if (DistrictType == 1)
             {
-                // ×¡Õ¬·ç¸ñ
+                // ä½å®…é£æ ¼
                 BuildingCount = RandomStream.RandRange(2, 5);
                 WidthMin = FMath::Min(BuildingWidthMin, BuildingWidthMax);
                 WidthMax = FMath::Max(BuildingWidthMin, BuildingWidthMax) * 0.8f;
@@ -4958,7 +4871,7 @@ void APathPlanningDemoActor::GenerateCityLayout_Mixed(FRandomStream& RandomStrea
             }
             else
             {
-                // ¹¤Òµ·ç¸ñ
+                // å·¥ä¸šé£æ ¼
                 BuildingCount = RandomStream.RandRange(1, 2);
                 WidthMin = FMath::Min(BuildingWidthMin, BuildingWidthMax) * 1.4f;
                 WidthMax = FMath::Max(BuildingWidthMin, BuildingWidthMax) * 2.0f;
@@ -5027,7 +4940,7 @@ void APathPlanningDemoActor::EditorGenerateMixedUrbanArea()
 }
 
 
-// Çó½âÊ±¼äÍ³¼Æ
+// æ±‚è§£æ—¶é—´ç»Ÿè®¡
 void APathPlanningDemoActor::ResetPlanningStats()
 {
     LastPlanningStats = FPlanningTimingStats();
