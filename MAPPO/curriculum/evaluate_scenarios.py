@@ -11,7 +11,7 @@ from common import load_env, rollout_metrics, rollout_metrics_with_policy, scena
 
 from utm_mappo.cbs_expert import cbs_plan  # noqa: E402
 from utm_mappo.env import UTMAction  # noqa: E402
-from utm_mappo.expert import prioritized_pibt_action_plan  # noqa: E402
+from utm_mappo.expert import get_pibt_profile, prioritized_pibt_action_plan  # noqa: E402
 from utm_mappo.mappo import DiscreteMAPPO  # noqa: E402
 from utm_mappo.space_time_expert import (  # noqa: E402
     action_from_transition,
@@ -76,6 +76,20 @@ def parse_args() -> argparse.Namespace:
         default=64,
         help="Priority-order attempts for the space-time teacher.",
     )
+    parser.add_argument(
+        "--pibt-profile",
+        action="store_true",
+        help="Collect PIBT shortest-path profiling counters for --teacher pibt.",
+    )
+    parser.add_argument(
+        "--pibt-profile-interval",
+        type=float,
+        default=0.0,
+        help=(
+            "Seconds between live PIBT profiling logs while planning. "
+            "Use 0 to only print final diagnostics."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -103,6 +117,8 @@ def main() -> None:
                 args.cbs_max_nodes,
                 args.cbs_max_low_level_expansions,
                 args.cbs_max_seconds,
+                args.pibt_profile,
+                args.pibt_profile_interval,
             )
         else:
             signature = (
@@ -180,6 +196,34 @@ def print_diagnostics(path: Path, row: dict[str, object]) -> None:
             "    cbs_low_level_expansions="
             f"{int(row.get('cbs_low_level_expansions', 0))}"
         )
+    if "pibt_shortest_path_calls" in row:
+        print(f"    pibt_planning_steps={int(row.get('pibt_planning_steps', 0))}")
+        print(
+            "    pibt_shortest_path_calls="
+            f"{int(row.get('pibt_shortest_path_calls', 0))}"
+        )
+        print(f"    pibt_manhattan_calls={int(row.get('pibt_manhattan_calls', 0))}")
+        print(
+            "    pibt_static_distance_calls="
+            f"{int(row.get('pibt_static_distance_calls', 0))}"
+        )
+        print(f"    pibt_time_bfs_calls={int(row.get('pibt_time_bfs_calls', 0))}")
+        print(
+            "    pibt_time_bfs_cache_hits="
+            f"{int(row.get('pibt_time_bfs_cache_hits', 0))}"
+        )
+        print(
+            "    pibt_time_bfs_expansions="
+            f"{int(row.get('pibt_time_bfs_expansions', 0))}"
+        )
+        print(
+            "    pibt_time_bfs_seconds="
+            f"{float(row.get('pibt_time_bfs_seconds', 0.0)):.4f}"
+        )
+        print(
+            "    pibt_time_bfs_max_seconds="
+            f"{float(row.get('pibt_time_bfs_max_seconds', 0.0)):.4f}"
+        )
 
 
 def evaluate_teacher(
@@ -189,10 +233,16 @@ def evaluate_teacher(
     cbs_max_nodes: int,
     cbs_max_low_level_expansions: int,
     cbs_max_seconds: float,
+    pibt_profile: bool,
+    pibt_profile_interval: float,
 ) -> dict[str, object]:
     if teacher == "pibt":
         planning_started = time.perf_counter()
-        action_plan = prioritized_pibt_action_plan(env)
+        action_plan = prioritized_pibt_action_plan(
+            env,
+            profile=pibt_profile,
+            profile_log_interval=pibt_profile_interval,
+        )
         planning_seconds = time.perf_counter() - planning_started
 
         rollout_started = time.perf_counter()
@@ -207,6 +257,8 @@ def evaluate_teacher(
         row["planning_seconds"] = planning_seconds
         row["rollout_seconds"] = time.perf_counter() - rollout_started
         row["planner_failed"] = False
+        if pibt_profile:
+            add_pibt_profile(row, env)
         return row
 
     if teacher == "cbs":
@@ -277,6 +329,30 @@ def evaluate_teacher(
     row["planning_seconds"] = planning_seconds
     row["rollout_seconds"] = time.perf_counter() - rollout_started
     return row
+
+
+def add_pibt_profile(row: dict[str, object], env) -> None:
+    profile = get_pibt_profile(env)
+    if profile is None:
+        return
+
+    mapping = {
+        "planning_steps": "pibt_planning_steps",
+        "active_agent_steps": "pibt_active_agent_steps",
+        "shortest_path_calls": "pibt_shortest_path_calls",
+        "manhattan_calls": "pibt_manhattan_calls",
+        "static_distance_calls": "pibt_static_distance_calls",
+        "time_bfs_cache_hits": "pibt_time_bfs_cache_hits",
+        "time_bfs_calls": "pibt_time_bfs_calls",
+        "time_bfs_successes": "pibt_time_bfs_successes",
+        "time_bfs_failures": "pibt_time_bfs_failures",
+        "time_bfs_expansions": "pibt_time_bfs_expansions",
+        "time_bfs_seconds": "pibt_time_bfs_seconds",
+        "time_bfs_max_expansions": "pibt_time_bfs_max_expansions",
+        "time_bfs_max_seconds": "pibt_time_bfs_max_seconds",
+    }
+    for source, target in mapping.items():
+        row[target] = profile.get(source, 0)
 
 
 def planned_actions(env, plan, observations: dict[str, np.ndarray]) -> dict[str, int]:
@@ -353,6 +429,19 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "cbs_low_level_searches",
         "cbs_low_level_expansions",
         "cbs_elapsed_seconds",
+        "pibt_planning_steps",
+        "pibt_active_agent_steps",
+        "pibt_shortest_path_calls",
+        "pibt_manhattan_calls",
+        "pibt_static_distance_calls",
+        "pibt_time_bfs_cache_hits",
+        "pibt_time_bfs_calls",
+        "pibt_time_bfs_successes",
+        "pibt_time_bfs_failures",
+        "pibt_time_bfs_expansions",
+        "pibt_time_bfs_seconds",
+        "pibt_time_bfs_max_expansions",
+        "pibt_time_bfs_max_seconds",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
