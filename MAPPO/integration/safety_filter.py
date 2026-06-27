@@ -76,7 +76,11 @@ def select_shielded_actions(
     decisions: list[ActionDecision] = []
     committed: dict[str, tuple[int, int, int]] = {}
     current_by_id = {agent.agent_id: agent.current_cell for agent in request.failed_agents}
-    occupied_by_rid = {neighbor.cell for neighbor in request.rid_neighbors}
+    occupied_by_rid = {
+        neighbor.cell
+        for neighbor in request.rid_neighbors
+        if neighbor.agent_id not in current_by_id
+    }
 
     for agent in request.failed_agents:
         ranking = _ensure_wait_fallback(action_rankings[agent.agent_id])
@@ -89,6 +93,7 @@ def select_shielded_actions(
         status = "fallback_wait"
         fallback_used = True
         reject_reason = "no_safe_candidate"
+        raw_reject_reason: str | None = None
 
         for action in ranking:
             candidate = add_cell(agent.current_cell, ACTION_DELTAS[action])
@@ -102,12 +107,14 @@ def select_shielded_actions(
                 occupied_by_rid=occupied_by_rid,
             )
             if reason is not None:
+                if action == raw_action and raw_reject_reason is None:
+                    raw_reject_reason = reason
                 reject_reason = reason
                 continue
             selected_action = action
             status = "accepted" if action == raw_action else "substituted"
             fallback_used = action != raw_action
-            reject_reason = None
+            reject_reason = raw_reject_reason if fallback_used else None
             break
 
         committed[agent.agent_id] = add_cell(

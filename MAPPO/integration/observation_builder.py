@@ -181,7 +181,12 @@ def _local_observation(
         for other in request.failed_agents
         if other.agent_id != agent.agent_id
     }
-    occupied_cells.update(neighbor.cell for neighbor in request.rid_neighbors)
+    failed_agent_ids = {item.agent_id for item in request.failed_agents}
+    occupied_cells.update(
+        neighbor.cell
+        for neighbor in request.rid_neighbors
+        if neighbor.agent_id not in failed_agent_ids
+    )
 
     for dx in range(-radius, radius + 1):
         for dy in range(-radius, radius + 1):

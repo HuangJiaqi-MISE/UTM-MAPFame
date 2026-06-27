@@ -65,6 +65,35 @@ http://127.0.0.1:8765/step
 
 The prototype uses only `POST /step`. The UE client should send one emergency decision step per request.
 
+## Smoke Tests
+
+Run all four modes and generated safety-filter conflict cases:
+
+```bash
+python -m integration.run_smoke_tests \
+  --model-dir models/utm8_100x100_obs_mappo_ft2_deadlock \
+  --device cpu
+```
+
+To also write the generated conflict requests as JSON files:
+
+```bash
+python -m integration.run_smoke_tests \
+  --model-dir models/utm8_100x100_obs_mappo_ft2_deadlock \
+  --device cpu \
+  --write-requests integration/test_requests
+```
+
+The generated cases cover:
+
+```text
+rid_occupied_block
+no_fly_block
+downwash_block
+failed_occupancy_block
+swap_risk_block
+```
+
 ## Observation Contract
 
 The prototype builds the same 645-dimensional observation used by the current MAPPO training setup:
