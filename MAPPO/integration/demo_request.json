@@ -1,0 +1,108 @@
+{
+  "episode_id": "demo_ue_emergency_0001",
+  "time_step": 32,
+  "grid_dimensions": [100, 100, 10],
+  "max_time_steps": 240,
+  "observation_radius": 2,
+  "failed_agents": [
+    {
+      "agent_id": "uav_01",
+      "mission_id": 1,
+      "current_cell": [10, 10, 3],
+      "previous_cell": [9, 10, 3],
+      "goal_cell": [90, 10, 3],
+      "last_action": "+X",
+      "recent_path": [[8, 10, 3], [9, 10, 3], [10, 10, 3]]
+    },
+    {
+      "agent_id": "uav_02",
+      "mission_id": 2,
+      "current_cell": [90, 12, 3],
+      "previous_cell": [91, 12, 3],
+      "goal_cell": [10, 12, 3],
+      "last_action": "-X",
+      "recent_path": [[92, 12, 3], [91, 12, 3], [90, 12, 3]]
+    },
+    {
+      "agent_id": "uav_03",
+      "mission_id": 3,
+      "current_cell": [12, 20, 2],
+      "previous_cell": [12, 19, 2],
+      "goal_cell": [12, 90, 2],
+      "last_action": "+Y",
+      "recent_path": [[12, 18, 2], [12, 19, 2], [12, 20, 2]]
+    },
+    {
+      "agent_id": "uav_04",
+      "mission_id": 4,
+      "current_cell": [14, 90, 2],
+      "previous_cell": [14, 91, 2],
+      "goal_cell": [14, 20, 2],
+      "last_action": "-Y",
+      "recent_path": [[14, 92, 2], [14, 91, 2], [14, 90, 2]]
+    },
+    {
+      "agent_id": "uav_05",
+      "mission_id": 5,
+      "current_cell": [20, 30, 4],
+      "previous_cell": [19, 30, 4],
+      "goal_cell": [85, 30, 4],
+      "last_action": "+X",
+      "recent_path": [[18, 30, 4], [19, 30, 4], [20, 30, 4]]
+    },
+    {
+      "agent_id": "uav_06",
+      "mission_id": 6,
+      "current_cell": [85, 32, 4],
+      "previous_cell": [86, 32, 4],
+      "goal_cell": [20, 32, 4],
+      "last_action": "-X",
+      "recent_path": [[87, 32, 4], [86, 32, 4], [85, 32, 4]]
+    },
+    {
+      "agent_id": "uav_07",
+      "mission_id": 7,
+      "current_cell": [30, 40, 5],
+      "previous_cell": [30, 39, 5],
+      "goal_cell": [30, 85, 5],
+      "last_action": "+Y",
+      "recent_path": [[30, 38, 5], [30, 39, 5], [30, 40, 5]]
+    },
+    {
+      "agent_id": "uav_08",
+      "mission_id": 8,
+      "current_cell": [32, 85, 5],
+      "previous_cell": [32, 86, 5],
+      "goal_cell": [32, 40, 5],
+      "last_action": "-Y",
+      "recent_path": [[32, 87, 5], [32, 86, 5], [32, 85, 5]]
+    }
+  ],
+  "rid_neighbors": [
+    {
+      "agent_id": "normal_101",
+      "cell": [13, 10, 3],
+      "is_failed_agent": false
+    },
+    {
+      "agent_id": "normal_102",
+      "cell": [30, 42, 5],
+      "is_failed_agent": false
+    }
+  ],
+  "blocked_cells_local_or_global": [
+    [50, 50, 3],
+    [51, 50, 3],
+    [52, 50, 3]
+  ],
+  "no_fly_zones": [
+    {
+      "zone_id": 1,
+      "min_cell": [45, 45, 2],
+      "max_cell": [50, 50, 3],
+      "start_time_step": 20,
+      "end_time_step": 80,
+      "enabled": true
+    }
+  ]
+}
