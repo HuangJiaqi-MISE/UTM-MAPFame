@@ -19,7 +19,7 @@ try:
         select_rule_based_actions,
         select_shielded_actions,
     )
-    from .schemas import EmergencyStepRequest, parse_request
+    from .schemas import ACTION_NAMES, EmergencyStepRequest, parse_request
 except ImportError:  # Allows `python integration/emergency_service.py`.
     from integration.observation_builder import build_env_for_model, build_observations
     from integration.safety_filter import (
@@ -30,7 +30,7 @@ except ImportError:  # Allows `python integration/emergency_service.py`.
         select_rule_based_actions,
         select_shielded_actions,
     )
-    from integration.schemas import EmergencyStepRequest, parse_request
+    from integration.schemas import ACTION_NAMES, EmergencyStepRequest, parse_request
 
 
 MODES = ("no_recovery", "rule", "mappo", "mappo_shield")
@@ -63,11 +63,17 @@ class EmergencyRecoveryService:
 
         policy_probs: dict[str, list[float]] | None = None
         inference_ms = 0.0
+        model_load_ms = 0.0
+        model_forward_ms = 0.0
         raw_policy_actions: dict[str, int] | None = None
 
         if self.mode in ("mappo", "mappo_shield"):
             inference_started = time.perf_counter()
-            policy_probs = self._predict(request, built.observations, built.action_masks)
+            policy_probs, model_load_ms, model_forward_ms = self._predict(
+                request,
+                built.observations,
+                built.action_masks,
+            )
             inference_ms = _elapsed_ms(inference_started)
 
         filter_started = time.perf_counter()
@@ -96,6 +102,8 @@ class EmergencyRecoveryService:
             "actions": decisions_to_response_items(decisions, policy_probs),
             "timing_ms": {
                 "observation_build": round(observation_ms, 4),
+                "model_load_or_cache": round(model_load_ms, 4),
+                "model_forward": round(model_forward_ms, 4),
                 "policy_inference": round(inference_ms, 4),
                 "safety_filter": round(filter_ms, 4),
                 "total": round(_elapsed_ms(started), 4),
@@ -107,10 +115,12 @@ class EmergencyRecoveryService:
         request: EmergencyStepRequest,
         observations: np.ndarray,
         action_masks: np.ndarray,
-    ) -> dict[str, list[float]]:
+    ) -> tuple[dict[str, list[float]], float, float]:
         import torch
 
+        load_started = time.perf_counter()
         model = self._load_model(request)
+        model_load_ms = _elapsed_ms(load_started)
         obs_tensor = torch.as_tensor(
             observations,
             dtype=torch.float32,
@@ -121,14 +131,29 @@ class EmergencyRecoveryService:
             dtype=torch.bool,
             device=model.device,
         )
+        forward_started = time.perf_counter()
         with torch.no_grad():
             dist = model.model.action_distribution(obs_tensor, mask_tensor)
             probs = dist.probs.detach().cpu().numpy()
+        model_forward_ms = _elapsed_ms(forward_started)
 
-        return {
+        expected_shape = (len(request.failed_agents), len(ACTION_NAMES))
+        if probs.shape != expected_shape:
+            raise ValueError(
+                f"policy output has shape {probs.shape}, expected {expected_shape}"
+            )
+
+        policy_probs = {
             agent.agent_id: [float(value) for value in probs[index]]
             for index, agent in enumerate(request.failed_agents)
         }
+        for agent_id, values in policy_probs.items():
+            if len(values) != len(ACTION_NAMES):
+                raise ValueError(
+                    f"policy probabilities for {agent_id} have length "
+                    f"{len(values)}, expected {len(ACTION_NAMES)}"
+                )
+        return policy_probs, model_load_ms, model_forward_ms
 
     def _load_model(self, request: EmergencyStepRequest) -> Any:
         from utm_mappo.mappo import DiscreteMAPPO, default_device
