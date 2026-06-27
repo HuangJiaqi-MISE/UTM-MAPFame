@@ -19,6 +19,8 @@
 
 #include "Actors/MissionMarkerActor.h"
 #include "Engine/StaticMeshActor.h"
+#include "HttpModule.h"
+#include "Interfaces/IHttpResponse.h"
 #include "Dom/JsonObject.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/ScopeExit.h"
@@ -530,6 +532,7 @@ void APathPlanningDemoActor::Tick(float DeltaTime)
     {
         ExecutionAccumulator -= CBSStepDuration;
         AdvanceExecutionOneStep();
+        MaybeTriggerMappoEmergencyRequest();
     }
 
     if (!bExecutionRunning)
@@ -544,6 +547,369 @@ void APathPlanningDemoActor::Tick(float DeltaTime)
     UpdateExecutionVisuals(Alpha);
 }
 
+namespace
+{
+    TSharedPtr<FJsonValue> MakeMappoCellValue(const FIntVector& Cell)
+    {
+        TArray<TSharedPtr<FJsonValue>> Items;
+        Items.Add(MakeShared<FJsonValueNumber>(Cell.X));
+        Items.Add(MakeShared<FJsonValueNumber>(Cell.Y));
+        Items.Add(MakeShared<FJsonValueNumber>(Cell.Z));
+        return MakeShared<FJsonValueArray>(Items);
+    }
+
+    void SetMappoCellField(const TSharedRef<FJsonObject>& Object, const TCHAR* FieldName, const FIntVector& Cell)
+    {
+        TArray<TSharedPtr<FJsonValue>> Items;
+        Items.Add(MakeShared<FJsonValueNumber>(Cell.X));
+        Items.Add(MakeShared<FJsonValueNumber>(Cell.Y));
+        Items.Add(MakeShared<FJsonValueNumber>(Cell.Z));
+        Object->SetArrayField(FieldName, Items);
+    }
+}
+
+void APathPlanningDemoActor::MaybeTriggerMappoEmergencyRequest()
+{
+    if (!bEnableMappoEmergencyClient || bMappoEmergencyTriggered || bMappoEmergencyRequestInFlight)
+    {
+        return;
+    }
+
+    if (CurrentExecutionTimeStep < MappoEmergencyTriggerTimeStep)
+    {
+        return;
+    }
+
+    bMappoEmergencyTriggered = true;
+    TriggerMappoEmergencySnapshot();
+}
+
+void APathPlanningDemoActor::TriggerMappoEmergencySnapshot()
+{
+    if (bMappoEmergencyRequestInFlight)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] request already in flight; skipping trigger"));
+        return;
+    }
+
+    FString RequestJson;
+    TArray<int32> SelectedMissionIds;
+    if (!BuildMappoEmergencyRequestJson(RequestJson, SelectedMissionIds))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] failed to build request at time_step=%d"), CurrentExecutionTimeStep);
+        return;
+    }
+
+    if (MappoEmergencyServiceUrl.IsEmpty())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] service URL is empty"));
+        return;
+    }
+
+    TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
+    Request->SetURL(MappoEmergencyServiceUrl);
+    Request->SetVerb(TEXT("POST"));
+    Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
+    Request->SetContentAsString(RequestJson);
+    Request->OnProcessRequestComplete().BindUObject(this, &APathPlanningDemoActor::HandleMappoEmergencyResponse);
+
+    bMappoEmergencyRequestInFlight = true;
+    MappoEmergencyRequestStartSeconds = FPlatformTime::Seconds();
+
+    UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] sending snapshot to %s at UE time_step=%d, bytes=%d"),
+        *MappoEmergencyServiceUrl,
+        CurrentExecutionTimeStep,
+        RequestJson.Len());
+
+    for (int32 Index = 0; Index < SelectedMissionIds.Num(); ++Index)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] mapping UE MissionId=%d -> MAPPO mission_id=%d"),
+            SelectedMissionIds[Index],
+            Index + 1);
+    }
+
+    if (!Request->ProcessRequest())
+    {
+        bMappoEmergencyRequestInFlight = false;
+        UE_LOG(LogTemp, Error, TEXT("[MAPPO Emergency] failed to start HTTP request"));
+    }
+}
+
+bool APathPlanningDemoActor::BuildMappoEmergencyRequestJson(FString& OutJson, TArray<int32>& OutMissionIds) const
+{
+    OutJson.Reset();
+    OutMissionIds.Reset();
+
+    TArray<int32> MissionIds;
+    ExecutionStates.GetKeys(MissionIds);
+    MissionIds.Sort();
+
+    const int32 RequiredAgentCount = 8;
+    if (MissionIds.Num() < RequiredAgentCount)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] current model requires 8 failed agents, but only %d execution states exist"), MissionIds.Num());
+        return false;
+    }
+
+    const int32 RequestedAgentCount = FMath::Clamp(MappoEmergencyAgentCount, 1, RequiredAgentCount);
+    if (RequestedAgentCount != RequiredAgentCount)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] current Python service expects exactly 8 agents; configured count=%d"), RequestedAgentCount);
+        return false;
+    }
+
+    for (int32 Index = 0; Index < RequiredAgentCount; ++Index)
+    {
+        OutMissionIds.Add(MissionIds[Index]);
+    }
+
+    TSet<int32> SelectedMissionIdSet;
+    for (const int32 MissionId : OutMissionIds)
+    {
+        SelectedMissionIdSet.Add(MissionId);
+    }
+    TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+    Root->SetStringField(TEXT("episode_id"), FString::Printf(TEXT("ue_emergency_%s_t%d"), *GetName(), CurrentExecutionTimeStep));
+    Root->SetNumberField(TEXT("time_step"), CurrentExecutionTimeStep);
+    Root->SetNumberField(TEXT("max_time_steps"), FMath::Max(1, MappoEmergencyMaxTimeSteps));
+    Root->SetNumberField(TEXT("observation_radius"), FMath::Max(1, MappoEmergencyObservationRadius));
+
+    TArray<TSharedPtr<FJsonValue>> GridDimArray;
+    GridDimArray.Add(MakeShared<FJsonValueNumber>(GridMap.GridDim.X));
+    GridDimArray.Add(MakeShared<FJsonValueNumber>(GridMap.GridDim.Y));
+    GridDimArray.Add(MakeShared<FJsonValueNumber>(GridMap.GridDim.Z));
+    Root->SetArrayField(TEXT("grid_dimensions"), GridDimArray);
+
+    TArray<TSharedPtr<FJsonValue>> FailedAgents;
+    FailedAgents.Reserve(RequiredAgentCount);
+    for (int32 Index = 0; Index < OutMissionIds.Num(); ++Index)
+    {
+        const int32 UeMissionId = OutMissionIds[Index];
+        const int32 MappoMissionId = Index + 1;
+        const FExecutionAgentState* State = ExecutionStates.Find(UeMissionId);
+        if (!State)
+        {
+            return false;
+        }
+
+        const FIntVector CurrentCell = GetObservedExecutionCell(*State);
+        TArray<FIntVector> RecentCells;
+        const int32 RecentStart = FMath::Max(0, State->ActualCells.Num() - 3);
+        for (int32 RecentIndex = RecentStart; RecentIndex < State->ActualCells.Num(); ++RecentIndex)
+        {
+            RecentCells.Add(State->ActualCells[RecentIndex]);
+        }
+        if (RecentCells.Num() <= 0)
+        {
+            RecentCells.Add(CurrentCell);
+        }
+        if (RecentCells.Last() != CurrentCell)
+        {
+            RecentCells.Add(CurrentCell);
+        }
+
+        const FIntVector PreviousCell = RecentCells.Num() >= 2
+            ? RecentCells[RecentCells.Num() - 2]
+            : CurrentCell;
+
+        TSharedRef<FJsonObject> Agent = MakeShared<FJsonObject>();
+        Agent->SetStringField(TEXT("agent_id"), FString::Printf(TEXT("ue_mission_%d"), UeMissionId));
+        Agent->SetNumberField(TEXT("mission_id"), MappoMissionId);
+        SetMappoCellField(Agent, TEXT("current_cell"), CurrentCell);
+        SetMappoCellField(Agent, TEXT("previous_cell"), PreviousCell);
+        SetMappoCellField(Agent, TEXT("goal_cell"), State->GoalCell);
+        Agent->SetStringField(TEXT("last_action"), GetMappoActionNameFromDelta(CurrentCell - PreviousCell));
+        Agent->SetNumberField(TEXT("consecutive_wait_count"), State->ConsecutiveSafetyGateHoldCount);
+        Agent->SetNumberField(TEXT("consecutive_filter_reject_count"), State->ConsecutiveConflictHoldCount);
+
+        TArray<TSharedPtr<FJsonValue>> RecentPath;
+        for (const FIntVector& Cell : RecentCells)
+        {
+            RecentPath.Add(MakeMappoCellValue(Cell));
+        }
+        Agent->SetArrayField(TEXT("recent_path"), RecentPath);
+        FailedAgents.Add(MakeShared<FJsonValueObject>(Agent));
+    }
+    Root->SetArrayField(TEXT("failed_agents"), FailedAgents);
+
+    TArray<TSharedPtr<FJsonValue>> RidNeighbors;
+    for (const int32 MissionId : MissionIds)
+    {
+        if (SelectedMissionIdSet.Contains(MissionId))
+        {
+            continue;
+        }
+
+        const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+        if (!State)
+        {
+            continue;
+        }
+
+        TSharedRef<FJsonObject> Neighbor = MakeShared<FJsonObject>();
+        Neighbor->SetStringField(TEXT("agent_id"), FString::Printf(TEXT("ue_mission_%d"), MissionId));
+        SetMappoCellField(Neighbor, TEXT("cell"), GetObservedExecutionCell(*State));
+        Neighbor->SetBoolField(TEXT("is_failed_agent"), false);
+        RidNeighbors.Add(MakeShared<FJsonValueObject>(Neighbor));
+    }
+    Root->SetArrayField(TEXT("rid_neighbors"), RidNeighbors);
+
+    TArray<TSharedPtr<FJsonValue>> BlockedCells;
+    if (bMappoEmergencyIncludeBlockedCells)
+    {
+        const int32 MaxBlockedCells = FMath::Max(0, MappoEmergencyMaxBlockedCells);
+        for (int32 Z = 0; Z < GridMap.GridDim.Z && BlockedCells.Num() < MaxBlockedCells; ++Z)
+        {
+            for (int32 Y = 0; Y < GridMap.GridDim.Y && BlockedCells.Num() < MaxBlockedCells; ++Y)
+            {
+                for (int32 X = 0; X < GridMap.GridDim.X && BlockedCells.Num() < MaxBlockedCells; ++X)
+                {
+                    if (GridMap.IsBlocked(X, Y, Z))
+                    {
+                        BlockedCells.Add(MakeMappoCellValue(FIntVector(X, Y, Z)));
+                    }
+                }
+            }
+        }
+    }
+    Root->SetArrayField(TEXT("blocked_cells"), BlockedCells);
+
+    TArray<TSharedPtr<FJsonValue>> NoFlyZones;
+    for (const FTemporalNoFlyZoneConfig& ZoneConfig : NoFlyZoneConfigs)
+    {
+        TSharedRef<FJsonObject> Zone = MakeShared<FJsonObject>();
+        Zone->SetNumberField(TEXT("zone_id"), ZoneConfig.ZoneId);
+        Zone->SetBoolField(TEXT("enabled"), ZoneConfig.bEnabled);
+        SetMappoCellField(Zone, TEXT("min_cell"), ZoneConfig.MinCell);
+        SetMappoCellField(Zone, TEXT("max_cell"), ZoneConfig.MaxCell);
+        Zone->SetNumberField(TEXT("start_time_step"), ZoneConfig.StartTimeStep);
+        Zone->SetNumberField(TEXT("end_time_step"), ZoneConfig.EndTimeStep);
+        NoFlyZones.Add(MakeShared<FJsonValueObject>(Zone));
+    }
+    Root->SetArrayField(TEXT("no_fly_zones"), NoFlyZones);
+
+    TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+        TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&OutJson);
+    return FJsonSerializer::Serialize(Root, Writer);
+}
+
+void APathPlanningDemoActor::HandleMappoEmergencyResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
+{
+    bMappoEmergencyRequestInFlight = false;
+    const double ElapsedMs = (FPlatformTime::Seconds() - MappoEmergencyRequestStartSeconds) * 1000.0;
+    const int32 ResponseCode = Response.IsValid() ? Response->GetResponseCode() : 0;
+
+    if (!bWasSuccessful || !Response.IsValid())
+    {
+        UE_LOG(LogTemp, Error, TEXT("[MAPPO Emergency] HTTP request failed after %.3f ms, code=%d"), ElapsedMs, ResponseCode);
+        return;
+    }
+
+    const FString Body = Response->GetContentAsString();
+    TSharedPtr<FJsonObject> Root;
+    TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(Body);
+    if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
+    {
+        UE_LOG(LogTemp, Error, TEXT("[MAPPO Emergency] failed to parse response after %.3f ms, code=%d, body=%s"),
+            ElapsedMs,
+            ResponseCode,
+            *Body.Left(512));
+        return;
+    }
+
+    FString Mode;
+    Root->TryGetStringField(TEXT("mode"), Mode);
+    UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] response received in %.3f ms, code=%d, mode=%s"),
+        ElapsedMs,
+        ResponseCode,
+        *Mode);
+
+    const TSharedPtr<FJsonObject>* TimingObject = nullptr;
+    if (Root->TryGetObjectField(TEXT("timing_ms"), TimingObject) && TimingObject && TimingObject->IsValid())
+    {
+        double TotalMs = 0.0;
+        double PolicyMs = 0.0;
+        double ForwardMs = 0.0;
+        (*TimingObject)->TryGetNumberField(TEXT("total"), TotalMs);
+        (*TimingObject)->TryGetNumberField(TEXT("policy_inference"), PolicyMs);
+        (*TimingObject)->TryGetNumberField(TEXT("model_forward"), ForwardMs);
+        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] service timing total=%.3f ms policy=%.3f ms forward=%.3f ms"),
+            TotalMs,
+            PolicyMs,
+            ForwardMs);
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* Actions = nullptr;
+    if (!Root->TryGetArrayField(TEXT("actions"), Actions) || !Actions)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] response has no actions array"));
+        return;
+    }
+
+    for (const TSharedPtr<FJsonValue>& ActionValue : *Actions)
+    {
+        const TSharedPtr<FJsonObject> Action = ActionValue.IsValid() ? ActionValue->AsObject() : nullptr;
+        if (!Action.IsValid())
+        {
+            continue;
+        }
+
+        FString AgentId;
+        FString SelectedAction;
+        FString RawPolicyAction;
+        FString SafetyStatus;
+        FString RejectReason;
+        bool bFallbackUsed = false;
+        double MissionIdNumber = 0.0;
+
+        Action->TryGetStringField(TEXT("agent_id"), AgentId);
+        Action->TryGetNumberField(TEXT("mission_id"), MissionIdNumber);
+        Action->TryGetStringField(TEXT("selected_action"), SelectedAction);
+        Action->TryGetStringField(TEXT("raw_policy_action"), RawPolicyAction);
+        Action->TryGetStringField(TEXT("safety_filter_status"), SafetyStatus);
+        Action->TryGetBoolField(TEXT("fallback_used"), bFallbackUsed);
+        Action->TryGetStringField(TEXT("reject_reason"), RejectReason);
+
+        UE_LOG(LogTemp, Warning,
+            TEXT("[MAPPO Emergency] action agent=%s mappo_mission=%d selected=%s raw=%s safety=%s fallback=%s reject=%s"),
+            *AgentId,
+            FMath::RoundToInt(MissionIdNumber),
+            *SelectedAction,
+            *RawPolicyAction,
+            *SafetyStatus,
+            bFallbackUsed ? TEXT("true") : TEXT("false"),
+            RejectReason.IsEmpty() ? TEXT("None") : *RejectReason);
+    }
+}
+
+FString APathPlanningDemoActor::GetMappoActionNameFromDelta(const FIntVector& Delta) const
+{
+    if (Delta == FIntVector(1, 0, 0))
+    {
+        return TEXT("+X");
+    }
+    if (Delta == FIntVector(-1, 0, 0))
+    {
+        return TEXT("-X");
+    }
+    if (Delta == FIntVector(0, 1, 0))
+    {
+        return TEXT("+Y");
+    }
+    if (Delta == FIntVector(0, -1, 0))
+    {
+        return TEXT("-Y");
+    }
+    if (Delta == FIntVector(0, 0, 1))
+    {
+        return TEXT("+Z");
+    }
+    if (Delta == FIntVector(0, 0, -1))
+    {
+        return TEXT("-Z");
+    }
+    return TEXT("WAIT");
+}
 bool APathPlanningDemoActor::ParseTaggedId(AActor* Actor, const FString& Prefix, int32& OutId) const
 {
     if (!Actor)
@@ -1007,6 +1373,9 @@ void APathPlanningDemoActor::ResetExecutionCache()
     TotalExecutionReplanCount = 0;
     ExecutionReplanTimingStats = FExecutionReplanTimingStats();
     bExecutionRunning = false;
+    bMappoEmergencyTriggered = false;
+    bMappoEmergencyRequestInFlight = false;
+    MappoEmergencyRequestStartSeconds = 0.0;
 
     LastExecutionSummary = FExecutionSummary();
 }

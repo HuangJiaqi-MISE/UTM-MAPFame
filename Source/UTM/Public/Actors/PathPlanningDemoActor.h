@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Planning/GridMap3D.h"
+#include "Interfaces/IHttpRequest.h"
 #include "Planning/AStarPlanner.h"
 #include "Planning/DStarLitePlanner.h"
 #include "Planning/DiscreteAlignmentManager.h"
@@ -498,6 +499,9 @@ public:
     UFUNCTION(BlueprintCallable, Category = "No-Fly Zone Validation")
     void ValidateLastPlannedPathsAgainstNoFlyZones();
 
+    UFUNCTION(BlueprintCallable, Category = "MAPPO Emergency")
+    void TriggerMappoEmergencySnapshot();
+
 
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
@@ -561,6 +565,15 @@ private:
     int32 TotalExecutionReplanCount = 0;
     FExecutionReplanTimingStats ExecutionReplanTimingStats;
     float ExecutionAccumulator = 0.f;
+
+    bool bMappoEmergencyTriggered = false;
+    bool bMappoEmergencyRequestInFlight = false;
+    double MappoEmergencyRequestStartSeconds = 0.0;
+
+    void MaybeTriggerMappoEmergencyRequest();
+    bool BuildMappoEmergencyRequestJson(FString& OutJson, TArray<int32>& OutMissionIds) const;
+    void HandleMappoEmergencyResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful);
+    FString GetMappoActionNameFromDelta(const FIntVector& Delta) const;
 
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Spawn")
@@ -713,6 +726,30 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution Debug")
     float ExecutionDebugDrawTime = 0.4f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    bool bEnableMappoEmergencyClient = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    FString MappoEmergencyServiceUrl = TEXT("http://127.0.0.1:8765/step");
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "0"))
+    int32 MappoEmergencyTriggerTimeStep = 32;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "1", ClampMax = "8"))
+    int32 MappoEmergencyAgentCount = 8;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "1"))
+    int32 MappoEmergencyObservationRadius = 2;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "1"))
+    int32 MappoEmergencyMaxTimeSteps = 240;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    bool bMappoEmergencyIncludeBlockedCells = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "0"))
+    int32 MappoEmergencyMaxBlockedCells = 5000;
 
     // 无人机数量+序号配置
     // 如果不使用 MissionConfigs，则从场景里手动配置 Start_i / Goal_i 来指定任务数量和起终点
