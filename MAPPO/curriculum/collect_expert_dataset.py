@@ -13,7 +13,10 @@ from common import load_env, scenario_paths
 
 from utm_mappo import UTMAction, UTMMAPFEnv  # noqa: E402
 from utm_mappo.cbs_expert import cbs_plan  # noqa: E402
-from utm_mappo.expert import prioritized_pibt_action_plan  # noqa: E402
+from utm_mappo.expert import (  # noqa: E402
+    DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+    prioritized_pibt_action_plan,
+)
 from utm_mappo.space_time_expert import (  # noqa: E402
     action_from_transition,
     planned_cell,
@@ -72,6 +75,25 @@ def parse_args() -> argparse.Namespace:
         default=64,
         help="Priority-order attempts for the offline space-time teacher.",
     )
+    parser.add_argument(
+        "--pibt-distance-mode",
+        choices=("static", "astar"),
+        default="static",
+        help=(
+            "Distance heuristic used by --teacher pibt. static matches the "
+            "fast LaCAM-UTM-style static distance heuristic; astar uses "
+            "time-expanded A* for temporal no-fly awareness."
+        ),
+    )
+    parser.add_argument(
+        "--pibt-astar-max-expansions",
+        type=int,
+        default=DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+        help=(
+            "Per-query expansion budget for --pibt-distance-mode astar. "
+            "Use 0 for no explicit budget."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument(
         "--include-failures",
@@ -122,7 +144,11 @@ def main() -> None:
                 seed=args.seed + scenario_index,
             )
         else:
-            arrays, metrics = collect_pibt_rollout(env)
+            arrays, metrics = collect_pibt_rollout(
+                env,
+                distance_mode=args.pibt_distance_mode,
+                astar_max_expansions=args.pibt_astar_max_expansions,
+            )
         metrics["scenario"] = str(path)
         metrics["samples"] = int(arrays["actions"].shape[0])
         metrics["clean"] = is_clean_success(metrics)
@@ -332,8 +358,16 @@ def collect_planned_rollout(
     return build_arrays(env, observation_rows, mask_rows, action_rows, time_rows, agent_rows), metrics
 
 
-def collect_pibt_rollout(env: UTMMAPFEnv) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    action_plan = prioritized_pibt_action_plan(env)
+def collect_pibt_rollout(
+    env: UTMMAPFEnv,
+    distance_mode: str,
+    astar_max_expansions: int,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    action_plan = prioritized_pibt_action_plan(
+        env,
+        distance_mode=distance_mode,
+        astar_max_expansions=astar_max_expansions,
+    )
     return collect_action_plan_rollout(env, action_plan)
 
 
@@ -526,6 +560,8 @@ def build_metadata(
         "cbs_max_low_level_expansions": int(args.cbs_max_low_level_expansions),
         "cbs_max_seconds": float(args.cbs_max_seconds),
         "planner_retries": int(args.planner_retries),
+        "pibt_distance_mode": str(args.pibt_distance_mode),
+        "pibt_astar_max_expansions": int(args.pibt_astar_max_expansions),
         "scenario_dir": str(args.scenario_dir),
         "scenario_dir_resolved": str(args.scenario_dir.resolve()),
         "success_only": not bool(args.include_failures),

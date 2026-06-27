@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from utm_mappo import UTMMAPFEnv
-from utm_mappo.config import GridConfig, MissionConfig, UTMScenario
+from utm_mappo.config import (
+    GridConfig,
+    MissionConfig,
+    TemporalNoFlyZoneConfig,
+    UTMScenario,
+)
 from utm_mappo.cbs_expert import cbs_plan
-from utm_mappo.expert import prioritized_pibt_action_plan
+from utm_mappo.expert import _shortest_path_length, prioritized_pibt_action_plan
 from utm_mappo.scenarios import crossing_scenario
 from utm_mappo.space_time_expert import (
     action_from_transition,
@@ -108,6 +113,30 @@ def _static_obstacle_unreachable_scenario() -> UTMScenario:
     )
 
 
+def _temporal_no_fly_wait_scenario() -> UTMScenario:
+    return UTMScenario(
+        grid=GridConfig(dimensions=(3, 1, 1)),
+        missions=(
+            MissionConfig(
+                mission_id=1,
+                start=(0, 0, 0),
+                goal=(2, 0, 0),
+            ),
+        ),
+        no_fly_zones=(
+            TemporalNoFlyZoneConfig(
+                zone_id=1,
+                min_cell=(1, 0, 0),
+                max_cell=(1, 0, 0),
+                start_time_step=1,
+                end_time_step=1,
+            ),
+        ),
+        max_time_steps=6,
+        observation_radius=1,
+    )
+
+
 def test_space_time_plan_solves_crossing_without_unsafe_holds() -> None:
     env = UTMMAPFEnv(crossing_scenario())
     env.reset()
@@ -180,6 +209,33 @@ def test_pibt_action_plan_uses_static_obstacle_detour() -> None:
 
     render_state = env.render()
     assert render_state["agents"]["agent_1"]["reached_goal"]
+
+
+def test_pibt_astar_distance_accounts_for_temporal_no_fly_wait() -> None:
+    env = UTMMAPFEnv(_temporal_no_fly_wait_scenario())
+    env.reset()
+
+    assert (
+        _shortest_path_length(
+            env,
+            start=(0, 0, 0),
+            goal=(2, 0, 0),
+            start_time=0,
+            distance_mode="static",
+        )
+        == 2
+    )
+    assert (
+        _shortest_path_length(
+            env,
+            start=(0, 0, 0),
+            goal=(2, 0, 0),
+            start_time=0,
+            distance_mode="astar",
+            astar_max_expansions=1_000,
+        )
+        == 3
+    )
 
 
 def test_cbs_plan_rejects_static_unreachable_goal() -> None:

@@ -9,7 +9,10 @@ import torch.nn.functional as F
 from tqdm import trange
 
 from utm_mappo import UTMMAPFEnv, UTMScenario
-from utm_mappo.expert import prioritized_shortest_path_actions
+from utm_mappo.expert import (
+    DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+    prioritized_shortest_path_actions,
+)
 from utm_mappo.mappo import DiscreteMAPPO
 
 
@@ -24,6 +27,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-dir", type=Path, default=Path("models/crossing_bc"))
     parser.add_argument("--updates", type=int, default=3000)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument(
+        "--pibt-distance-mode",
+        choices=("static", "astar"),
+        default="static",
+        help="Distance heuristic used by the online PIBT teacher.",
+    )
+    parser.add_argument(
+        "--pibt-astar-max-expansions",
+        type=int,
+        default=DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+        help="Per-query expansion budget when --pibt-distance-mode astar.",
+    )
     return parser.parse_args()
 
 
@@ -42,7 +57,12 @@ def main() -> None:
 
         agents = sorted(observations)
         masks = [env.action_mask(agent) for agent in agents]
-        expert_actions = prioritized_shortest_path_actions(env, agents)
+        expert_actions = prioritized_shortest_path_actions(
+            env,
+            agents,
+            distance_mode=args.pibt_distance_mode,
+            astar_max_expansions=args.pibt_astar_max_expansions,
+        )
         target_list = []
         for agent, mask in zip(agents, masks):
             action = expert_actions[agent]

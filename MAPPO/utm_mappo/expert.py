@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import heapq
 import time
 from collections import deque
+from typing import Literal
 
 from .config import Cell
 from .env import ACTION_DELTAS, UTMAction, UTMMAPFEnv
@@ -18,19 +20,30 @@ MOVING_ACTIONS = (
 )
 
 PIBTActionPlan = dict[str, list[int]]
-PIBTProfile = dict[str, float | int]
+PIBTProfile = dict[str, float | int | str]
+PIBTDistanceMode = Literal["static", "astar"]
+DEFAULT_PIBT_DISTANCE_MODE: PIBTDistanceMode = "static"
+DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS = 200_000
 
 
 def prioritized_pibt_action_plan(
     env: UTMMAPFEnv,
     profile: bool = False,
     profile_log_interval: float = 0.0,
+    distance_mode: PIBTDistanceMode = DEFAULT_PIBT_DISTANCE_MODE,
+    astar_max_expansions: int = DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
 ) -> PIBTActionPlan:
     """Precompute a full PIBT rollout as per-agent action sequences."""
 
+    distance_mode = _validate_distance_mode(distance_mode)
     observations, _ = env.reset()
     if profile:
-        reset_pibt_profile(env, log_interval_seconds=profile_log_interval)
+        reset_pibt_profile(
+            env,
+            log_interval_seconds=profile_log_interval,
+            distance_mode=distance_mode,
+            astar_max_expansions=astar_max_expansions,
+        )
     plan: PIBTActionPlan = {agent: [] for agent in env.possible_agents}
 
     while observations:
@@ -40,7 +53,12 @@ def prioritized_pibt_action_plan(
             active_profile["active_agent_steps"] += len(observations)
         agents = sorted(observations)
         masks = {agent: env.action_mask(agent).copy() for agent in agents}
-        expert_actions = prioritized_shortest_path_actions(env, agents)
+        expert_actions = prioritized_shortest_path_actions(
+            env,
+            agents,
+            distance_mode=distance_mode,
+            astar_max_expansions=astar_max_expansions,
+        )
         actions: dict[str, int] = {}
 
         for agent in agents:
@@ -59,7 +77,12 @@ def prioritized_pibt_action_plan(
     return plan
 
 
-def reset_pibt_profile(env: UTMMAPFEnv, log_interval_seconds: float = 0.0) -> None:
+def reset_pibt_profile(
+    env: UTMMAPFEnv,
+    log_interval_seconds: float = 0.0,
+    distance_mode: PIBTDistanceMode = DEFAULT_PIBT_DISTANCE_MODE,
+    astar_max_expansions: int = DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+) -> None:
     now = time.perf_counter()
     setattr(
         env,
@@ -68,11 +91,14 @@ def reset_pibt_profile(env: UTMMAPFEnv, log_interval_seconds: float = 0.0) -> No
             "started_at": now,
             "last_log_at": now,
             "log_interval_seconds": max(0.0, float(log_interval_seconds)),
+            "distance_mode": distance_mode,
+            "astar_max_expansions": max(0, int(astar_max_expansions)),
             "planning_steps": 0,
             "active_agent_steps": 0,
             "shortest_path_calls": 0,
             "manhattan_calls": 0,
             "static_distance_calls": 0,
+            "static_fallbacks": 0,
             "time_bfs_cache_hits": 0,
             "time_bfs_calls": 0,
             "time_bfs_successes": 0,
@@ -81,6 +107,15 @@ def reset_pibt_profile(env: UTMMAPFEnv, log_interval_seconds: float = 0.0) -> No
             "time_bfs_seconds": 0.0,
             "time_bfs_max_expansions": 0,
             "time_bfs_max_seconds": 0.0,
+            "time_astar_cache_hits": 0,
+            "time_astar_calls": 0,
+            "time_astar_successes": 0,
+            "time_astar_failures": 0,
+            "time_astar_budget_exhaustions": 0,
+            "time_astar_expansions": 0,
+            "time_astar_seconds": 0.0,
+            "time_astar_max_expansions": 0,
+            "time_astar_max_seconds": 0.0,
         },
     )
 
@@ -98,15 +133,26 @@ def shortest_path_action(env: UTMMAPFEnv, agent: str) -> int:
 
 
 def prioritized_shortest_path_actions(
-    env: UTMMAPFEnv, agents: list[str] | tuple[str, ...] | None = None
+    env: UTMMAPFEnv,
+    agents: list[str] | tuple[str, ...] | None = None,
+    *,
+    distance_mode: PIBTDistanceMode = DEFAULT_PIBT_DISTANCE_MODE,
+    astar_max_expansions: int = DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
 ) -> dict[str, int]:
+    distance_mode = _validate_distance_mode(distance_mode)
     if agents is None:
         agents = tuple(env.agents)
 
     active_set = set(agents)
     active_agents = sorted(
         agents,
-        key=lambda name: _dynamic_priority_key(env, name, len(active_set)),
+        key=lambda name: _dynamic_priority_key(
+            env,
+            name,
+            len(active_set),
+            distance_mode=distance_mode,
+            astar_max_expansions=astar_max_expansions,
+        ),
     )
     proposals = {
         agent: state.cell
@@ -128,7 +174,12 @@ def prioritized_shortest_path_actions(
         state = env._state_by_agent[agent]
         planning_stack.add(agent)
 
-        for action in ranked_shortest_path_actions(env, agent):
+        for action in ranked_shortest_path_actions(
+            env,
+            agent,
+            distance_mode=distance_mode,
+            astar_max_expansions=astar_max_expansions,
+        ):
             candidate = add_cell(state.cell, ACTION_DELTAS[action])
             blocker = current_occupants.get(candidate)
             if blocker == agent:
@@ -169,7 +220,12 @@ def prioritized_shortest_path_actions(
 
 
 def _dynamic_priority_key(
-    env: UTMMAPFEnv, agent: str, active_count: int
+    env: UTMMAPFEnv,
+    agent: str,
+    active_count: int,
+    *,
+    distance_mode: PIBTDistanceMode,
+    astar_max_expansions: int,
 ) -> tuple[int, int, int, int, int]:
     state = env._state_by_agent[agent]
     mission_id = state.mission.mission_id
@@ -180,6 +236,8 @@ def _dynamic_priority_key(
         start=state.cell,
         goal=state.mission.goal,
         start_time=env.time_step,
+        distance_mode=distance_mode,
+        astar_max_expansions=astar_max_expansions,
     )
     if distance is None:
         distance = 10_000
@@ -229,7 +287,14 @@ def _recent_visit_count(path: list[Cell], candidate: Cell, window: int = 8) -> i
     return sum(1 for cell in path[-window:] if cell == candidate)
 
 
-def ranked_shortest_path_actions(env: UTMMAPFEnv, agent: str) -> list[int]:
+def ranked_shortest_path_actions(
+    env: UTMMAPFEnv,
+    agent: str,
+    *,
+    distance_mode: PIBTDistanceMode = DEFAULT_PIBT_DISTANCE_MODE,
+    astar_max_expansions: int = DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+) -> list[int]:
+    distance_mode = _validate_distance_mode(distance_mode)
     state = env._state_by_agent[agent]
     if state.cell == state.mission.goal:
         return [int(UTMAction.WAIT)]
@@ -249,6 +314,8 @@ def ranked_shortest_path_actions(env: UTMMAPFEnv, agent: str) -> list[int]:
             start=candidate,
             goal=state.mission.goal,
             start_time=env.time_step + 1,
+            distance_mode=distance_mode,
+            astar_max_expansions=astar_max_expansions,
         )
         if remaining is None:
             continue
@@ -277,48 +344,98 @@ def ranked_shortest_path_actions(env: UTMMAPFEnv, agent: str) -> list[int]:
 
 
 def _shortest_path_length(
-    env: UTMMAPFEnv, start: Cell, goal: Cell, start_time: int
+    env: UTMMAPFEnv,
+    start: Cell,
+    goal: Cell,
+    start_time: int,
+    *,
+    distance_mode: PIBTDistanceMode = DEFAULT_PIBT_DISTANCE_MODE,
+    astar_max_expansions: int = DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
 ) -> int | None:
+    distance_mode = _validate_distance_mode(distance_mode)
     profile = get_pibt_profile(env)
     if profile is not None:
         profile["shortest_path_calls"] += 1
 
-    if not env.scenario.grid.blocked_cells and not any(
-        zone.enabled for zone in env.scenario.no_fly_zones
-    ):
+    has_no_fly = _has_enabled_no_fly(env)
+    if not env.scenario.grid.blocked_cells and not has_no_fly:
         if profile is not None:
             profile["manhattan_calls"] += 1
         return manhattan_distance(start, goal)
 
-    if not any(zone.enabled for zone in env.scenario.no_fly_zones):
+    if distance_mode == "static" or not has_no_fly:
         if profile is not None:
             profile["static_distance_calls"] += 1
         distance_map = _static_distance_map(env, goal)
         return distance_map.get(start)
 
     cache = _distance_cache(env)
-    cache_key = (start, goal, start_time)
+    search_budget = max(0, int(astar_max_expansions))
+    cache_key = ("astar", start, goal, start_time, search_budget)
     if cache_key in cache:
         if profile is not None:
-            profile["time_bfs_cache_hits"] += 1
+            profile["time_astar_cache_hits"] += 1
         return cache[cache_key]
 
     if start == goal:
         cache[cache_key] = 0
         return 0
 
+    result, budget_exhausted = _time_expanded_astar_length(
+        env,
+        start=start,
+        goal=goal,
+        start_time=start_time,
+        max_expansions=search_budget,
+    )
+    if result is None and budget_exhausted:
+        if profile is not None:
+            profile["static_fallbacks"] += 1
+        result = _static_distance_map(env, goal).get(start)
+    cache[cache_key] = result
+    return result
+
+
+def _time_expanded_astar_length(
+    env: UTMMAPFEnv,
+    start: Cell,
+    goal: Cell,
+    start_time: int,
+    max_expansions: int,
+) -> tuple[int | None, bool]:
+    profile = get_pibt_profile(env)
     if profile is not None:
-        profile["time_bfs_calls"] += 1
-    bfs_started = time.perf_counter()
+        profile["time_astar_calls"] += 1
+    search_started = time.perf_counter()
     expansions = 0
     result: int | None = None
+    budget_exhausted = False
     horizon = env.scenario.max_time_steps
-    queue: deque[tuple[Cell, int, int]] = deque([(start, start_time, 0)])
-    visited: set[tuple[Cell, int]] = {(start, start_time)}
+    static_distances = _static_distance_map(env, goal)
+    initial_h = static_distances.get(start)
+    if initial_h is None:
+        _record_time_astar_profile(
+            env,
+            result=None,
+            expansions=0,
+            elapsed=time.perf_counter() - search_started,
+            budget_exhausted=False,
+        )
+        return None, False
+
+    queue: list[tuple[int, int, int, int, Cell, int]] = []
+    sequence = 0
+    heapq.heappush(queue, (initial_h, initial_h, 0, sequence, start, start_time))
+    best_distance: dict[tuple[Cell, int], int] = {(start, start_time): 0}
 
     while queue:
-        cell, time_step, distance = queue.popleft()
+        _, _, distance, _, cell, time_step = heapq.heappop(queue)
+        if best_distance.get((cell, time_step)) != distance:
+            continue
         expansions += 1
+        if max_expansions > 0 and expansions > max_expansions:
+            budget_exhausted = True
+            break
         if cell == goal:
             result = distance
             break
@@ -329,40 +446,76 @@ def _shortest_path_length(
         for delta in ACTION_DELTAS.values():
             candidate = add_cell(cell, delta)
             next_time = time_step + 1
-            visit_key = (candidate, next_time)
-            if visit_key in visited:
-                continue
             if not env.is_free_static(candidate):
                 continue
             if env.is_no_fly(candidate, next_time):
                 continue
+            heuristic = static_distances.get(candidate)
+            if heuristic is None:
+                continue
 
-            visited.add(visit_key)
-            queue.append((candidate, next_time, distance + 1))
+            next_distance = distance + 1
+            visit_key = (candidate, next_time)
+            if next_distance >= best_distance.get(visit_key, 1_000_000_000):
+                continue
+            best_distance[visit_key] = next_distance
+            sequence += 1
+            heapq.heappush(
+                queue,
+                (
+                    next_distance + heuristic,
+                    heuristic,
+                    next_distance,
+                    sequence,
+                    candidate,
+                    next_time,
+                ),
+            )
 
-        _maybe_log_pibt_bfs_progress(env, expansions)
+        _maybe_log_pibt_time_search_progress(env, expansions)
 
-    cache[cache_key] = result
-    if profile is not None:
-        elapsed = time.perf_counter() - bfs_started
-        profile["time_bfs_expansions"] += expansions
-        profile["time_bfs_seconds"] += elapsed
-        profile["time_bfs_max_expansions"] = max(
-            int(profile["time_bfs_max_expansions"]),
-            expansions,
-        )
-        profile["time_bfs_max_seconds"] = max(
-            float(profile["time_bfs_max_seconds"]),
-            elapsed,
-        )
-        if result is None:
-            profile["time_bfs_failures"] += 1
-        else:
-            profile["time_bfs_successes"] += 1
-    return result
+    _record_time_astar_profile(
+        env,
+        result=result,
+        expansions=expansions,
+        elapsed=time.perf_counter() - search_started,
+        budget_exhausted=budget_exhausted,
+    )
+    return result, budget_exhausted
 
 
-def _maybe_log_pibt_bfs_progress(env: UTMMAPFEnv, current_bfs_expansions: int) -> None:
+def _record_time_astar_profile(
+    env: UTMMAPFEnv,
+    *,
+    result: int | None,
+    expansions: int,
+    elapsed: float,
+    budget_exhausted: bool,
+) -> None:
+    profile = get_pibt_profile(env)
+    if profile is None:
+        return
+    profile["time_astar_expansions"] += expansions
+    profile["time_astar_seconds"] += elapsed
+    profile["time_astar_max_expansions"] = max(
+        int(profile["time_astar_max_expansions"]),
+        expansions,
+    )
+    profile["time_astar_max_seconds"] = max(
+        float(profile["time_astar_max_seconds"]),
+        elapsed,
+    )
+    if budget_exhausted:
+        profile["time_astar_budget_exhaustions"] += 1
+    if result is None:
+        profile["time_astar_failures"] += 1
+    else:
+        profile["time_astar_successes"] += 1
+
+
+def _maybe_log_pibt_time_search_progress(
+    env: UTMMAPFEnv, current_expansions: int
+) -> None:
     profile = get_pibt_profile(env)
     if profile is None:
         return
@@ -375,7 +528,7 @@ def _maybe_log_pibt_bfs_progress(env: UTMMAPFEnv, current_bfs_expansions: int) -
     profile["last_log_at"] = now
     _log_pibt_profile(
         env,
-        prefix=f"pibt profile in-bfs current_expansions={current_bfs_expansions}",
+        prefix=f"pibt profile in-search current_expansions={current_expansions}",
     )
 
 
@@ -391,31 +544,50 @@ def _log_pibt_profile(
     if not force and interval <= 0.0:
         return
     elapsed = time.perf_counter() - float(profile["started_at"])
-    calls = max(1, int(profile["time_bfs_calls"]))
-    mean_bfs_seconds = float(profile["time_bfs_seconds"]) / calls
-    mean_bfs_expansions = float(profile["time_bfs_expansions"]) / calls
+    astar_calls = max(1, int(profile["time_astar_calls"]))
+    mean_astar_seconds = float(profile["time_astar_seconds"]) / astar_calls
+    mean_astar_expansions = float(profile["time_astar_expansions"]) / astar_calls
     print(
         f"{prefix}: elapsed={elapsed:.1f}s time_step={env.time_step} "
+        f"mode={profile.get('distance_mode', DEFAULT_PIBT_DISTANCE_MODE)} "
         f"planning_steps={int(profile['planning_steps'])} "
         f"shortest_calls={int(profile['shortest_path_calls'])} "
-        f"time_bfs_calls={int(profile['time_bfs_calls'])} "
-        f"cache_hits={int(profile['time_bfs_cache_hits'])} "
-        f"bfs_seconds={float(profile['time_bfs_seconds']):.2f} "
-        f"mean_bfs_seconds={mean_bfs_seconds:.4f} "
-        f"bfs_expansions={int(profile['time_bfs_expansions'])} "
-        f"mean_bfs_expansions={mean_bfs_expansions:.1f} "
-        f"max_bfs_seconds={float(profile['time_bfs_max_seconds']):.4f} "
-        f"max_bfs_expansions={int(profile['time_bfs_max_expansions'])}",
+        f"static_calls={int(profile['static_distance_calls'])} "
+        f"static_fallbacks={int(profile['static_fallbacks'])} "
+        f"time_astar_calls={int(profile['time_astar_calls'])} "
+        f"cache_hits={int(profile['time_astar_cache_hits'])} "
+        f"budget_exhaustions={int(profile['time_astar_budget_exhaustions'])} "
+        f"astar_seconds={float(profile['time_astar_seconds']):.2f} "
+        f"mean_astar_seconds={mean_astar_seconds:.4f} "
+        f"astar_expansions={int(profile['time_astar_expansions'])} "
+        f"mean_astar_expansions={mean_astar_expansions:.1f} "
+        f"max_astar_seconds={float(profile['time_astar_max_seconds']):.4f} "
+        f"max_astar_expansions={int(profile['time_astar_max_expansions'])}",
         flush=True,
     )
 
 
-def _distance_cache(env: UTMMAPFEnv) -> dict[tuple[Cell, Cell, int], int | None]:
+def _distance_cache(
+    env: UTMMAPFEnv,
+) -> dict[tuple[str, Cell, Cell, int, int], int | None]:
     cache = getattr(env, "_expert_distance_cache", None)
     if cache is None:
         cache = {}
         setattr(env, "_expert_distance_cache", cache)
     return cache
+
+
+def _has_enabled_no_fly(env: UTMMAPFEnv) -> bool:
+    return any(zone.enabled for zone in env.scenario.no_fly_zones)
+
+
+def _validate_distance_mode(distance_mode: str) -> PIBTDistanceMode:
+    if distance_mode not in ("static", "astar"):
+        raise ValueError(
+            f"unsupported PIBT distance mode {distance_mode!r}; "
+            "expected 'static' or 'astar'"
+        )
+    return distance_mode  # type: ignore[return-value]
 
 
 def _static_distance_map(env: UTMMAPFEnv, goal: Cell) -> dict[Cell, int]:

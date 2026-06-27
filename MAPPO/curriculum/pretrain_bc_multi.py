@@ -11,7 +11,10 @@ from tqdm import trange
 
 from common import load_env, scenario_paths, validate_env_compatibility
 
-from utm_mappo.expert import prioritized_shortest_path_actions  # noqa: E402
+from utm_mappo.expert import (  # noqa: E402
+    DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+    prioritized_shortest_path_actions,
+)
 from utm_mappo.mappo import DiscreteMAPPO  # noqa: E402
 
 
@@ -26,6 +29,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--freeze-actor-encoder", action="store_true")
+    parser.add_argument(
+        "--pibt-distance-mode",
+        choices=("static", "astar"),
+        default="static",
+        help="Distance heuristic used by the online PIBT teacher.",
+    )
+    parser.add_argument(
+        "--pibt-astar-max-expansions",
+        type=int,
+        default=DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+        help="Per-query expansion budget when --pibt-distance-mode astar.",
+    )
     return parser.parse_args()
 
 
@@ -60,7 +75,12 @@ def main() -> None:
 
         agents = sorted(observations)
         masks = [env.action_mask(agent) for agent in agents]
-        expert_actions = prioritized_shortest_path_actions(env, agents)
+        expert_actions = prioritized_shortest_path_actions(
+            env,
+            agents,
+            distance_mode=args.pibt_distance_mode,
+            astar_max_expansions=args.pibt_astar_max_expansions,
+        )
         target_list = []
         for agent, mask in zip(agents, masks):
             action = expert_actions[agent]

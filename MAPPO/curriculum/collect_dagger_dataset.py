@@ -24,7 +24,10 @@ from collect_expert_dataset import (  # noqa: E402
 from common import load_env, scenario_paths
 
 from utm_mappo import UTMAction, UTMMAPFEnv  # noqa: E402
-from utm_mappo.expert import prioritized_shortest_path_actions  # noqa: E402
+from utm_mappo.expert import (  # noqa: E402
+    DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+    prioritized_shortest_path_actions,
+)
 from utm_mappo.mappo import DiscreteMAPPO  # noqa: E402
 
 
@@ -69,6 +72,18 @@ def parse_args() -> argparse.Namespace:
             "Per-agent probability of executing the teacher action instead of "
             "the student action. Labels are always teacher actions."
         ),
+    )
+    parser.add_argument(
+        "--pibt-distance-mode",
+        choices=("static", "astar"),
+        default="static",
+        help="Distance heuristic used by the PIBT label teacher.",
+    )
+    parser.add_argument(
+        "--pibt-astar-max-expansions",
+        type=int,
+        default=DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+        help="Per-query expansion budget when --pibt-distance-mode astar.",
     )
     parser.add_argument(
         "--only-disagreements",
@@ -143,6 +158,8 @@ def main() -> None:
                 epsilon=args.epsilon,
                 teacher_rollin_prob=args.teacher_rollin_prob,
                 only_disagreements=args.only_disagreements,
+                pibt_distance_mode=args.pibt_distance_mode,
+                pibt_astar_max_expansions=args.pibt_astar_max_expansions,
             )
             metrics["scenario"] = str(path)
             metrics["scenario_index"] = scenario_index
@@ -288,6 +305,8 @@ def collect_recovery_rollout(
     epsilon: float,
     teacher_rollin_prob: float,
     only_disagreements: bool,
+    pibt_distance_mode: str,
+    pibt_astar_max_expansions: int,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     observations, _ = env.reset(seed=seed)
     agent_to_index = {
@@ -307,7 +326,12 @@ def collect_recovery_rollout(
     while observations:
         agents = sorted(observations)
         masks = {agent: env.action_mask(agent).copy() for agent in agents}
-        teacher_actions = prioritized_shortest_path_actions(env, agents)
+        teacher_actions = prioritized_shortest_path_actions(
+            env,
+            agents,
+            distance_mode=pibt_distance_mode,
+            astar_max_expansions=pibt_astar_max_expansions,
+        )
         student_actions = model.predict(
             observations,
             deterministic=not stochastic,
@@ -435,6 +459,8 @@ def build_dagger_metadata(
         "stochastic": bool(args.stochastic),
         "epsilon": float(args.epsilon),
         "teacher_rollin_prob": float(args.teacher_rollin_prob),
+        "pibt_distance_mode": str(args.pibt_distance_mode),
+        "pibt_astar_max_expansions": int(args.pibt_astar_max_expansions),
         "only_disagreements": bool(args.only_disagreements),
         "scenario_count": len(rows),
         "stored_scenario_count": len(shards),

@@ -8,7 +8,11 @@ import torch.nn.functional as F
 from tqdm import trange
 
 from .env import UTMMAPFEnv
-from .expert import prioritized_shortest_path_actions
+from .expert import (
+    DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+    DEFAULT_PIBT_DISTANCE_MODE,
+    prioritized_shortest_path_actions,
+)
 from .networks import ActorCritic
 from .rollout_buffer import MAPPORolloutBuffer
 
@@ -39,6 +43,8 @@ class DiscreteMAPPO:
         features_dim: int = 256,
         hidden_dim: int = 256,
         freeze_actor_encoder: bool = False,
+        bc_anchor_distance_mode: str = DEFAULT_PIBT_DISTANCE_MODE,
+        bc_anchor_astar_max_expansions: int = DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
         device: torch.device | None = None,
     ):
         self.env = env
@@ -55,6 +61,8 @@ class DiscreteMAPPO:
         self.features_dim = features_dim
         self.hidden_dim = hidden_dim
         self.freeze_actor_encoder = freeze_actor_encoder
+        self.bc_anchor_distance_mode = bc_anchor_distance_mode
+        self.bc_anchor_astar_max_expansions = bc_anchor_astar_max_expansions
         self.device = device or default_device()
         self.agent_order = list(env.possible_agents)
         self.n_agents = len(self.agent_order)
@@ -400,7 +408,10 @@ class DiscreteMAPPO:
     ) -> np.ndarray:
         expert_actions = np.zeros(self.n_agents, dtype=np.int64)
         expert_actions_by_agent = prioritized_shortest_path_actions(
-            self.env, tuple(observations)
+            self.env,
+            tuple(observations),
+            distance_mode=self.bc_anchor_distance_mode,
+            astar_max_expansions=self.bc_anchor_astar_max_expansions,
         )
         for index, agent in enumerate(self.agent_order):
             if agent not in observations:

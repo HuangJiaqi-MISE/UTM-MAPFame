@@ -9,6 +9,7 @@ from tqdm import trange
 
 from common import load_env, rollout_metrics, scenario_paths, validate_env_compatibility
 
+from utm_mappo.expert import DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS  # noqa: E402
 from utm_mappo.mappo import DiscreteMAPPO  # noqa: E402
 
 
@@ -27,6 +28,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=5e-5)
     parser.add_argument("--entropy-coef", type=float, default=0.001)
     parser.add_argument("--bc-anchor-coef", type=float, default=0.05)
+    parser.add_argument(
+        "--bc-anchor-distance-mode",
+        choices=("static", "astar"),
+        default="static",
+        help="Distance heuristic used by the online PIBT BC anchor.",
+    )
+    parser.add_argument(
+        "--bc-anchor-astar-max-expansions",
+        type=int,
+        default=DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+        help="Per-query expansion budget when --bc-anchor-distance-mode astar.",
+    )
     parser.add_argument("--freeze-actor-encoder", action="store_true")
     parser.add_argument("--eval-interval", type=int, default=0)
     parser.add_argument("--eval-episodes", type=int, default=8)
@@ -71,6 +84,8 @@ def main() -> None:
         update_epochs=args.epochs,
         entropy_coef=args.entropy_coef,
         bc_anchor_coef=args.bc_anchor_coef,
+        bc_anchor_distance_mode=args.bc_anchor_distance_mode,
+        bc_anchor_astar_max_expansions=args.bc_anchor_astar_max_expansions,
         freeze_actor_encoder=args.freeze_actor_encoder,
     )
     if args.init_model_dir is not None:

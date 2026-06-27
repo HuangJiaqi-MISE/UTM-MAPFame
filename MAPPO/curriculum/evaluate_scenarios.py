@@ -11,7 +11,11 @@ from common import load_env, rollout_metrics, rollout_metrics_with_policy, scena
 
 from utm_mappo.cbs_expert import cbs_plan  # noqa: E402
 from utm_mappo.env import UTMAction  # noqa: E402
-from utm_mappo.expert import get_pibt_profile, prioritized_pibt_action_plan  # noqa: E402
+from utm_mappo.expert import (  # noqa: E402
+    DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+    get_pibt_profile,
+    prioritized_pibt_action_plan,
+)
 from utm_mappo.mappo import DiscreteMAPPO  # noqa: E402
 from utm_mappo.space_time_expert import (  # noqa: E402
     action_from_transition,
@@ -90,6 +94,25 @@ def parse_args() -> argparse.Namespace:
             "Use 0 to only print final diagnostics."
         ),
     )
+    parser.add_argument(
+        "--pibt-distance-mode",
+        choices=("static", "astar"),
+        default="static",
+        help=(
+            "Distance heuristic used by --teacher pibt. static ignores future "
+            "no-fly windows and only relies on env action masks for the next "
+            "step; astar uses time-expanded A*."
+        ),
+    )
+    parser.add_argument(
+        "--pibt-astar-max-expansions",
+        type=int,
+        default=DEFAULT_PIBT_ASTAR_MAX_EXPANSIONS,
+        help=(
+            "Per-query expansion budget for --pibt-distance-mode astar. "
+            "Use 0 for no explicit budget."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -119,6 +142,8 @@ def main() -> None:
                 args.cbs_max_seconds,
                 args.pibt_profile,
                 args.pibt_profile_interval,
+                args.pibt_distance_mode,
+                args.pibt_astar_max_expansions,
             )
         else:
             signature = (
@@ -197,6 +222,11 @@ def print_diagnostics(path: Path, row: dict[str, object]) -> None:
             f"{int(row.get('cbs_low_level_expansions', 0))}"
         )
     if "pibt_shortest_path_calls" in row:
+        print(f"    pibt_distance_mode={row.get('pibt_distance_mode', '')}")
+        print(
+            "    pibt_astar_max_expansions="
+            f"{int(row.get('pibt_astar_max_expansions', 0))}"
+        )
         print(f"    pibt_planning_steps={int(row.get('pibt_planning_steps', 0))}")
         print(
             "    pibt_shortest_path_calls="
@@ -224,6 +254,31 @@ def print_diagnostics(path: Path, row: dict[str, object]) -> None:
             "    pibt_time_bfs_max_seconds="
             f"{float(row.get('pibt_time_bfs_max_seconds', 0.0)):.4f}"
         )
+        print(f"    pibt_static_fallbacks={int(row.get('pibt_static_fallbacks', 0))}")
+        print(
+            "    pibt_time_astar_calls="
+            f"{int(row.get('pibt_time_astar_calls', 0))}"
+        )
+        print(
+            "    pibt_time_astar_cache_hits="
+            f"{int(row.get('pibt_time_astar_cache_hits', 0))}"
+        )
+        print(
+            "    pibt_time_astar_budget_exhaustions="
+            f"{int(row.get('pibt_time_astar_budget_exhaustions', 0))}"
+        )
+        print(
+            "    pibt_time_astar_expansions="
+            f"{int(row.get('pibt_time_astar_expansions', 0))}"
+        )
+        print(
+            "    pibt_time_astar_seconds="
+            f"{float(row.get('pibt_time_astar_seconds', 0.0)):.4f}"
+        )
+        print(
+            "    pibt_time_astar_max_seconds="
+            f"{float(row.get('pibt_time_astar_max_seconds', 0.0)):.4f}"
+        )
 
 
 def evaluate_teacher(
@@ -235,6 +290,8 @@ def evaluate_teacher(
     cbs_max_seconds: float,
     pibt_profile: bool,
     pibt_profile_interval: float,
+    pibt_distance_mode: str,
+    pibt_astar_max_expansions: int,
 ) -> dict[str, object]:
     if teacher == "pibt":
         planning_started = time.perf_counter()
@@ -242,6 +299,8 @@ def evaluate_teacher(
             env,
             profile=pibt_profile,
             profile_log_interval=pibt_profile_interval,
+            distance_mode=pibt_distance_mode,
+            astar_max_expansions=pibt_astar_max_expansions,
         )
         planning_seconds = time.perf_counter() - planning_started
 
@@ -257,6 +316,8 @@ def evaluate_teacher(
         row["planning_seconds"] = planning_seconds
         row["rollout_seconds"] = time.perf_counter() - rollout_started
         row["planner_failed"] = False
+        row["pibt_distance_mode"] = pibt_distance_mode
+        row["pibt_astar_max_expansions"] = int(pibt_astar_max_expansions)
         if pibt_profile:
             add_pibt_profile(row, env)
         return row
@@ -342,6 +403,7 @@ def add_pibt_profile(row: dict[str, object], env) -> None:
         "shortest_path_calls": "pibt_shortest_path_calls",
         "manhattan_calls": "pibt_manhattan_calls",
         "static_distance_calls": "pibt_static_distance_calls",
+        "static_fallbacks": "pibt_static_fallbacks",
         "time_bfs_cache_hits": "pibt_time_bfs_cache_hits",
         "time_bfs_calls": "pibt_time_bfs_calls",
         "time_bfs_successes": "pibt_time_bfs_successes",
@@ -350,6 +412,15 @@ def add_pibt_profile(row: dict[str, object], env) -> None:
         "time_bfs_seconds": "pibt_time_bfs_seconds",
         "time_bfs_max_expansions": "pibt_time_bfs_max_expansions",
         "time_bfs_max_seconds": "pibt_time_bfs_max_seconds",
+        "time_astar_cache_hits": "pibt_time_astar_cache_hits",
+        "time_astar_calls": "pibt_time_astar_calls",
+        "time_astar_successes": "pibt_time_astar_successes",
+        "time_astar_failures": "pibt_time_astar_failures",
+        "time_astar_budget_exhaustions": "pibt_time_astar_budget_exhaustions",
+        "time_astar_expansions": "pibt_time_astar_expansions",
+        "time_astar_seconds": "pibt_time_astar_seconds",
+        "time_astar_max_expansions": "pibt_time_astar_max_expansions",
+        "time_astar_max_seconds": "pibt_time_astar_max_seconds",
     }
     for source, target in mapping.items():
         row[target] = profile.get(source, 0)
@@ -430,10 +501,13 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "cbs_low_level_expansions",
         "cbs_elapsed_seconds",
         "pibt_planning_steps",
+        "pibt_distance_mode",
+        "pibt_astar_max_expansions",
         "pibt_active_agent_steps",
         "pibt_shortest_path_calls",
         "pibt_manhattan_calls",
         "pibt_static_distance_calls",
+        "pibt_static_fallbacks",
         "pibt_time_bfs_cache_hits",
         "pibt_time_bfs_calls",
         "pibt_time_bfs_successes",
@@ -442,6 +516,15 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "pibt_time_bfs_seconds",
         "pibt_time_bfs_max_expansions",
         "pibt_time_bfs_max_seconds",
+        "pibt_time_astar_cache_hits",
+        "pibt_time_astar_calls",
+        "pibt_time_astar_successes",
+        "pibt_time_astar_failures",
+        "pibt_time_astar_budget_exhaustions",
+        "pibt_time_astar_expansions",
+        "pibt_time_astar_seconds",
+        "pibt_time_astar_max_expansions",
+        "pibt_time_astar_max_seconds",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
