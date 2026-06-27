@@ -60,7 +60,12 @@ def run_conflict_smoke_tests(base: dict, model_dir: Path, device: str) -> None:
         mode="mappo_shield",
         device=device,
     )
-    for name, payload in generated_conflict_requests(base).items():
+    substitution_cases = {
+        key: value
+        for key, value in generated_conflict_requests(base).items()
+        if key != "no_fly_block"
+    }
+    for name, payload in substitution_cases.items():
         response = service.step(payload)
         target = next(
             item for item in response["actions"] if item["agent_id"] == "uav_01"
@@ -80,6 +85,24 @@ def run_conflict_smoke_tests(base: dict, model_dir: Path, device: str) -> None:
             f"status={target['safety_filter_status']} "
             f"reason={target['reject_reason']}"
         )
+
+    response = service.step(no_fly_block(base))
+    target = next(item for item in response["actions"] if item["agent_id"] == "uav_01")
+    assert target["selected_action"] != "+X", (
+        "no_fly_block: +X enters a next-step no-fly cell and must not be selected"
+    )
+    assert target["safety_filter_status"] in (
+        "accepted",
+        "substituted",
+        "fallback_wait",
+    )
+    print(
+        "case=no_fly_block ok "
+        f"raw={target['raw_policy_action']} "
+        f"selected={target['selected_action']} "
+        f"status={target['safety_filter_status']} "
+        "note=blocked by action mask or safety filter"
+    )
 
 
 def generated_conflict_requests(base: dict) -> dict[str, dict]:
