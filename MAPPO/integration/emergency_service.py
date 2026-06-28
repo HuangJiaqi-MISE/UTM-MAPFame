@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,9 @@ try:
         select_rule_based_actions,
         select_shielded_actions,
     )
-    from .schemas import ACTION_NAMES, EmergencyStepRequest, parse_request
+    from .schemas import ACTION_NAMES, EmergencyStepRequest, FailedAgentSnapshot, parse_request
+    from utm_mappo.env import ACTION_DELTAS, UTMAction
+    from utm_mappo.geometry import add_cell
 except ImportError:  # Allows `python integration/emergency_service.py`.
     from integration.observation_builder import build_env_for_model, build_observations
     from integration.safety_filter import (
@@ -30,7 +33,9 @@ except ImportError:  # Allows `python integration/emergency_service.py`.
         select_rule_based_actions,
         select_shielded_actions,
     )
-    from integration.schemas import ACTION_NAMES, EmergencyStepRequest, parse_request
+    from integration.schemas import ACTION_NAMES, EmergencyStepRequest, FailedAgentSnapshot, parse_request
+    from utm_mappo.env import ACTION_DELTAS, UTMAction
+    from utm_mappo.geometry import add_cell
 
 
 MODES = ("no_recovery", "rule", "mappo", "mappo_shield")
@@ -56,7 +61,81 @@ class EmergencyRecoveryService:
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
         request = parse_request(payload)
+        action_horizon = max(1, min(30, int(payload.get("action_horizon", 1))))
 
+        horizon_steps = []
+        total_observation_ms = 0.0
+        total_inference_ms = 0.0
+        total_model_load_ms = 0.0
+        total_model_forward_ms = 0.0
+        total_filter_ms = 0.0
+        first_shape: list[int] | None = None
+        first_actions: list[dict[str, object]] | None = None
+
+        rollout_request = request
+        for step_offset in range(action_horizon):
+            (
+                decisions,
+                policy_probs,
+                observation_shape,
+                observation_ms,
+                inference_ms,
+                model_load_ms,
+                model_forward_ms,
+                filter_ms,
+            ) = self._decide_once(rollout_request)
+
+            actions = decisions_to_response_items(decisions, policy_probs)
+            if first_actions is None:
+                first_actions = actions
+                first_shape = observation_shape
+
+            horizon_steps.append(
+                {
+                    "step_offset": step_offset,
+                    "time_step": rollout_request.time_step,
+                    "actions": actions,
+                }
+            )
+
+            total_observation_ms += observation_ms
+            total_inference_ms += inference_ms
+            total_model_load_ms += model_load_ms
+            total_model_forward_ms += model_forward_ms
+            total_filter_ms += filter_ms
+            rollout_request = _advance_request(rollout_request, decisions)
+
+        return {
+            "episode_id": request.episode_id,
+            "time_step": request.time_step,
+            "mode": self.mode,
+            "action_horizon_length": action_horizon,
+            "observation_shape": first_shape or [0, 0],
+            "actions": first_actions or [],
+            "action_horizon": horizon_steps,
+            "timing_ms": {
+                "observation_build": round(total_observation_ms, 4),
+                "model_load_or_cache": round(total_model_load_ms, 4),
+                "model_forward": round(total_model_forward_ms, 4),
+                "policy_inference": round(total_inference_ms, 4),
+                "safety_filter": round(total_filter_ms, 4),
+                "total": round(_elapsed_ms(started), 4),
+            },
+        }
+
+    def _decide_once(
+        self,
+        request: EmergencyStepRequest,
+    ) -> tuple[
+        list[Any],
+        dict[str, list[float]] | None,
+        list[int],
+        float,
+        float,
+        float,
+        float,
+        float,
+    ]:
         obs_started = time.perf_counter()
         built = build_observations(request)
         observation_ms = _elapsed_ms(obs_started)
@@ -65,7 +144,6 @@ class EmergencyRecoveryService:
         inference_ms = 0.0
         model_load_ms = 0.0
         model_forward_ms = 0.0
-        raw_policy_actions: dict[str, int] | None = None
 
         if self.mode in ("mappo", "mappo_shield"):
             inference_started = time.perf_counter()
@@ -94,21 +172,16 @@ class EmergencyRecoveryService:
             )
         filter_ms = _elapsed_ms(filter_started)
 
-        return {
-            "episode_id": request.episode_id,
-            "time_step": request.time_step,
-            "mode": self.mode,
-            "observation_shape": list(built.observations.shape),
-            "actions": decisions_to_response_items(decisions, policy_probs),
-            "timing_ms": {
-                "observation_build": round(observation_ms, 4),
-                "model_load_or_cache": round(model_load_ms, 4),
-                "model_forward": round(model_forward_ms, 4),
-                "policy_inference": round(inference_ms, 4),
-                "safety_filter": round(filter_ms, 4),
-                "total": round(_elapsed_ms(started), 4),
-            },
-        }
+        return (
+            decisions,
+            policy_probs,
+            list(built.observations.shape),
+            observation_ms,
+            inference_ms,
+            model_load_ms,
+            model_forward_ms,
+            filter_ms,
+        )
 
     def _predict(
         self,
@@ -179,6 +252,51 @@ class EmergencyRecoveryService:
         return model
 
 
+def _advance_request(
+    request: EmergencyStepRequest,
+    decisions: list[Any],
+) -> EmergencyStepRequest:
+    decisions_by_id = {decision.agent_id: decision for decision in decisions}
+    next_agents: list[FailedAgentSnapshot] = []
+
+    for agent in request.failed_agents:
+        decision = decisions_by_id.get(agent.agent_id)
+        action = (
+            int(decision.selected_action)
+            if decision is not None
+            else int(UTMAction.WAIT)
+        )
+        next_cell = add_cell(agent.current_cell, ACTION_DELTAS[action])
+        recent_path = (*agent.recent_path, next_cell)
+        if len(recent_path) > 8:
+            recent_path = recent_path[-8:]
+        next_agents.append(
+            replace(
+                agent,
+                previous_cell=agent.current_cell,
+                current_cell=next_cell,
+                last_action=action,
+                recent_path=recent_path,
+                consecutive_wait_count=(
+                    agent.consecutive_wait_count + 1
+                    if action == int(UTMAction.WAIT)
+                    else 0
+                ),
+                consecutive_filter_reject_count=(
+                    agent.consecutive_filter_reject_count + 1
+                    if decision is not None and decision.fallback_used
+                    else 0
+                ),
+            )
+        )
+
+    return replace(
+        request,
+        time_step=request.time_step + 1,
+        failed_agents=tuple(sorted(next_agents, key=lambda agent: agent.mission_id)),
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="UE-MAPPO emergency recovery inference prototype."
@@ -204,6 +322,12 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Torch device for MAPPO inference: auto, cpu, cuda, or cuda:0.",
     )
+    parser.add_argument(
+        "--action-horizon",
+        type=int,
+        default=None,
+        help="Override request action_horizon for one-shot inference.",
+    )
     return parser.parse_args()
 
 
@@ -222,6 +346,8 @@ def main() -> None:
     if args.request is None:
         raise ValueError("--request is required unless --serve is set")
     payload = json.loads(args.request.read_text(encoding="utf-8"))
+    if args.action_horizon is not None:
+        payload["action_horizon"] = args.action_horizon
     response = service.step(payload)
     print(json.dumps(response, indent=2))
 

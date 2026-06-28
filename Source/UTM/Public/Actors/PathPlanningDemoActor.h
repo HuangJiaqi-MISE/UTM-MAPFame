@@ -17,6 +17,7 @@ class USceneComponent;
 class ADroneActor;
 class AMissionMarkerActor;
 class ANoFlyZoneMarkerActor;
+class FJsonObject;
 class AStaticMeshActor;
 
 UENUM(BlueprintType)
@@ -499,7 +500,7 @@ public:
     UFUNCTION(BlueprintCallable, Category = "No-Fly Zone Validation")
     void ValidateLastPlannedPathsAgainstNoFlyZones();
 
-    UFUNCTION(BlueprintCallable, Category = "MAPPO Emergency")
+    UFUNCTION(BlueprintCallable, CallInEditor, Category = "MAPPO Emergency")
     void TriggerMappoEmergencySnapshot();
 
 
@@ -569,10 +570,59 @@ private:
     bool bMappoEmergencyTriggered = false;
     bool bMappoEmergencyRequestInFlight = false;
     double MappoEmergencyRequestStartSeconds = 0.0;
+    int32 MappoEmergencySentRequestCount = 0;
+    int32 MappoEmergencySkippedInFlightCount = 0;
+    int32 MappoEmergencyNextRequestId = 1;
+    int32 MappoEmergencyPendingRequestId = INDEX_NONE;
+    int32 MappoEmergencyPendingTimeStep = 0;
+    TArray<int32> MappoEmergencyPendingMissionIds;
+    TMap<int32, FIntVector> MappoEmergencyPendingCurrentCellsByMappoMissionId;
+    TMap<int32, FIntVector> MappoEmergencyPendingGoalCellsByMappoMissionId;
+    FString MappoEmergencyCsvLogPath;
+    FString MappoEmergencyJsonlLogPath;
+    bool bMappoEmergencyCsvHeaderWritten = false;
+    bool bMappoEmergencySummaryLogged = false;
+    bool bMappoEmergencySummaryPendingAfterInFlight = false;
+    int32 MappoEmergencyResponseCount = 0;
+    int32 MappoEmergencyFailedResponseCount = 0;
+    int32 MappoEmergencyActionCount = 0;
+    int32 MappoEmergencyAcceptedActionCount = 0;
+    int32 MappoEmergencySubstitutedActionCount = 0;
+    int32 MappoEmergencyFallbackActionCount = 0;
+    double MappoEmergencyRoundTripTotalMs = 0.0;
+    double MappoEmergencyRoundTripMinMs = 0.0;
+    double MappoEmergencyRoundTripMaxMs = 0.0;
+    double MappoEmergencyServiceTotalTotalMs = 0.0;
+    double MappoEmergencyServiceTotalMinMs = 0.0;
+    double MappoEmergencyServiceTotalMaxMs = 0.0;
+    TMap<int32, FIntVector> MappoEmergencyGhostCellsByMappoMissionId;
+    TMap<int32, FIntVector> MappoEmergencyGhostPreviousCellsByMappoMissionId;
+    TMap<int32, TArray<FIntVector>> MappoEmergencyGhostRecentCellsByMappoMissionId;
+    TMap<int32, FIntVector> MappoEmergencyGhostGoalCellsByMappoMissionId;
+    TMap<int32, int32> MappoEmergencyGhostUeMissionByMappoMissionId;
+    TMap<int32, TArray<FString>> MappoEmergencyActionQueueByMappoMissionId;
+    int32 MappoEmergencyGhostStepCount = 0;
+    int32 MappoEmergencyGhostBufferedActionVersion = 0;
+    int32 MappoEmergencyGhostAppliedActionVersion = 0;
+    bool bMappoEmergencyGhostFinalSummaryLogged = false;
 
     void MaybeTriggerMappoEmergencyRequest();
     bool BuildMappoEmergencyRequestJson(FString& OutJson, TArray<int32>& OutMissionIds) const;
     void HandleMappoEmergencyResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful);
+    void InitializeMappoEmergencyLogFiles();
+    void ResetMappoEmergencyLogging();
+    void ResetMappoEmergencySummaryCounters();
+    void AccumulateMappoEmergencySummary(const TSharedPtr<FJsonObject>& ResponseRoot, double RoundTripMs);
+    void MaybeLogMappoEmergencySummary(bool bForce);
+    void InitializeMappoEmergencyGhostState(const TArray<int32>& SelectedMissionIds);
+    void UpdateMappoEmergencyActionBuffer(const TSharedPtr<FJsonObject>& ResponseRoot);
+    void ApplyMappoEmergencyGhostStep();
+    void DrawMappoEmergencyGhostState() const;
+    void MaybeLogMappoEmergencyGhostFinalSummary(int32 ReachedGhostCount, int32 TotalGhostCount, int32 RemainingQueuedActions);
+    FIntVector GetMappoDeltaFromActionName(const FString& ActionName) const;
+    bool IsMappoGhostCellAllowed(const FIntVector& Cell) const;
+    void AppendMappoEmergencyStructuredLogs(const TSharedPtr<FJsonObject>& ResponseRoot, int32 ResponseCode, double RoundTripMs);
+    FString GetMappoEmergencyLogDirectory() const;
     FString GetMappoActionNameFromDelta(const FIntVector& Delta) const;
 
 public:
@@ -750,6 +800,45 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "0"))
     int32 MappoEmergencyMaxBlockedCells = 5000;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    bool bMappoEmergencyContinuousShadowMode = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "1"))
+    int32 MappoEmergencyShadowRequestCount = 30;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "1"))
+    int32 MappoEmergencyRequestIntervalSteps = 1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    bool bMappoEmergencyWriteStructuredLogs = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    FString MappoEmergencyLogSubdirectory = TEXT("MappoEmergency");
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    bool bMappoEmergencyEnableGhostExecution = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    bool bMappoEmergencyGhostRollInMode = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    bool bMappoEmergencyHoldReachedGhostAtGoal = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    bool bMappoEmergencyDrawGhostExecution = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "0.01"))
+    float MappoEmergencyGhostDrawTime = 0.5f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "1.0"))
+    float MappoEmergencyGhostSphereRadius = 24.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    FVector MappoEmergencyGhostWorldOffset = FVector(0.f, 0.f, 120.f);
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "1", ClampMax = "30"))
+    int32 MappoEmergencyActionHorizon = 5;
 
     // 无人机数量+序号配置
     // 如果不使用 MissionConfigs，则从场景里手动配置 Start_i / Goal_i 来指定任务数量和起终点
