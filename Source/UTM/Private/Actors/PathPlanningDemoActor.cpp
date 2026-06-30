@@ -525,9 +525,50 @@ void APathPlanningDemoActor::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    if (!bExecutionRunning || !IsMultiAgentPlannerType() || !bUseCentralizedExecution)
+    if (!IsMultiAgentPlannerType() || !bUseCentralizedExecution)
     {
         return;
+    }
+
+    auto HasQueuedMappoGhostActions = [this]() -> bool
+    {
+        if (!bMappoEmergencyEnableGhostExecution || bMappoEmergencyGhostFinalSummaryLogged || MappoEmergencyGhostCellsByMappoMissionId.Num() <= 0)
+        {
+            return false;
+        }
+        for (const TPair<int32, TArray<FString>>& KVP : MappoEmergencyActionQueueByMappoMissionId)
+        {
+            if (KVP.Value.Num() > 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto GetMappoGhostReachCounts = [this](int32& OutReachedCount, int32& OutTotalCount)
+    {
+        OutReachedCount = 0;
+        OutTotalCount = MappoEmergencyGhostCellsByMappoMissionId.Num();
+        for (const TPair<int32, FIntVector>& KVP : MappoEmergencyGhostCellsByMappoMissionId)
+        {
+            const FIntVector* GoalCell = MappoEmergencyGhostGoalCellsByMappoMissionId.Find(KVP.Key);
+            if (GoalCell && KVP.Value == *GoalCell)
+            {
+                OutReachedCount++;
+            }
+        }
+    };
+
+    if (!bExecutionRunning && !HasQueuedMappoGhostActions())
+    {
+        int32 ReachedGhostCount = 0;
+        int32 TotalGhostCount = 0;
+        GetMappoGhostReachCounts(ReachedGhostCount, TotalGhostCount);
+        const bool bHasActiveGhostRollout = bMappoEmergencyTriggered && bMappoEmergencyEnableGhostExecution && TotalGhostCount > 0 && !bMappoEmergencyGhostFinalSummaryLogged;
+        if (!bHasActiveGhostRollout)
+        {
+            return;
+        }
     }
 
     ExecutionAccumulator += DeltaTime;
@@ -540,8 +581,31 @@ void APathPlanningDemoActor::Tick(float DeltaTime)
         ApplyMappoEmergencyGhostStep();
     }
 
+    while (!bExecutionRunning && HasQueuedMappoGhostActions() && ExecutionAccumulator >= CBSStepDuration)
+    {
+        ExecutionAccumulator -= CBSStepDuration;
+        ApplyMappoEmergencyGhostStep();
+    }
+
     if (!bExecutionRunning)
     {
+        if (bMappoEmergencyTriggered && bMappoEmergencyEnableGhostExecution && !bMappoEmergencyGhostFinalSummaryLogged && !HasQueuedMappoGhostActions() && !bMappoEmergencyRequestInFlight)
+        {
+            int32 ReachedGhostCount = 0;
+            int32 TotalGhostCount = 0;
+            GetMappoGhostReachCounts(ReachedGhostCount, TotalGhostCount);
+            const bool bAllGhostReached = TotalGhostCount > 0 && ReachedGhostCount == TotalGhostCount;
+            const int32 TargetRequestCount = bMappoEmergencyContinuousShadowMode ? FMath::Max(1, MappoEmergencyShadowRequestCount) : 1;
+            const bool bCanRequestMore = bMappoEmergencyContinuousShadowMode && MappoEmergencySentRequestCount < TargetRequestCount;
+            if (!bAllGhostReached && bCanRequestMore)
+            {
+                TriggerMappoEmergencySnapshot();
+            }
+            else
+            {
+                MaybeLogMappoEmergencySummary(true);
+            }
+        }
         return;
     }
 
@@ -688,7 +752,10 @@ void APathPlanningDemoActor::TriggerMappoEmergencySnapshot()
         const int32 MappoMissionId = Index + 1;
         if (const FExecutionAgentState* State = ExecutionStates.Find(SelectedMissionIds[Index]))
         {
-            MappoEmergencyPendingCurrentCellsByMappoMissionId.Add(MappoMissionId, GetObservedExecutionCell(*State));
+            const FIntVector PendingCurrentCell = (bMappoEmergencyGhostRollInMode && MappoEmergencyGhostCellsByMappoMissionId.Contains(MappoMissionId))
+                ? MappoEmergencyGhostCellsByMappoMissionId.FindRef(MappoMissionId)
+                : GetObservedExecutionCell(*State);
+            MappoEmergencyPendingCurrentCellsByMappoMissionId.Add(MappoMissionId, PendingCurrentCell);
             MappoEmergencyPendingGoalCellsByMappoMissionId.Add(MappoMissionId, State->GoalCell);
         }
     }
@@ -765,9 +832,13 @@ bool APathPlanningDemoActor::BuildMappoEmergencyRequestJson(FString& OutJson, TA
     {
         SelectedMissionIdSet.Add(MissionId);
     }
+    const int32 MappoRequestTimeStep = (!bExecutionRunning && bMappoEmergencyGhostRollInMode && MappoEmergencyGhostCellsByMappoMissionId.Num() > 0)
+        ? CurrentExecutionTimeStep + MappoEmergencyGhostStepCount
+        : CurrentExecutionTimeStep;
+
     TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-    Root->SetStringField(TEXT("episode_id"), FString::Printf(TEXT("ue_emergency_%s_t%d"), *GetName(), CurrentExecutionTimeStep));
-    Root->SetNumberField(TEXT("time_step"), CurrentExecutionTimeStep);
+    Root->SetStringField(TEXT("episode_id"), FString::Printf(TEXT("ue_emergency_%s_t%d"), *GetName(), MappoRequestTimeStep));
+    Root->SetNumberField(TEXT("time_step"), MappoRequestTimeStep);
     Root->SetNumberField(TEXT("max_time_steps"), FMath::Max(1, MappoEmergencyMaxTimeSteps));
     Root->SetNumberField(TEXT("observation_radius"), FMath::Max(1, MappoEmergencyObservationRadius));
     Root->SetNumberField(TEXT("action_horizon"), FMath::Clamp(MappoEmergencyActionHorizon, 1, 30));
@@ -1289,6 +1360,24 @@ void APathPlanningDemoActor::MaybeLogMappoEmergencySummary(bool bForce)
         CompletedResponseCount >= MappoEmergencySentRequestCount &&
         !bMappoEmergencyRequestInFlight;
 
+    if (bForce && !bExecutionRunning && bMappoEmergencyEnableGhostExecution && MappoEmergencyGhostCellsByMappoMissionId.Num() > 0 && !bMappoEmergencyGhostFinalSummaryLogged)
+    {
+        int32 ReachedGhostCountForDefer = 0;
+        for (const TPair<int32, FIntVector>& KVP : MappoEmergencyGhostCellsByMappoMissionId)
+        {
+            const FIntVector* GoalCell = MappoEmergencyGhostGoalCellsByMappoMissionId.Find(KVP.Key);
+            if (GoalCell && KVP.Value == *GoalCell)
+            {
+                ReachedGhostCountForDefer++;
+            }
+        }
+        const bool bAllGhostReachedForDefer = ReachedGhostCountForDefer == MappoEmergencyGhostCellsByMappoMissionId.Num();
+        if (!bAllGhostReachedForDefer && MappoEmergencySentRequestCount < TargetRequestCount)
+        {
+            return;
+        }
+    }
+
     if (!bForce && !bRequestTargetComplete)
     {
         return;
@@ -1376,7 +1465,7 @@ void APathPlanningDemoActor::MaybeLogMappoEmergencySummary(bool bForce)
                 ReachedGhostCount++;
             }
         }
-        MaybeLogMappoEmergencyGhostFinalSummary(ReachedGhostCount, MappoMissionIds.Num(), RemainingQueuedActions, bForce);
+        MaybeLogMappoEmergencyGhostFinalSummary(ReachedGhostCount, MappoMissionIds.Num(), RemainingQueuedActions, false);
     }
 }
 
@@ -1416,9 +1505,26 @@ void APathPlanningDemoActor::InitializeMappoEmergencyGhostState(const TArray<int
 
 void APathPlanningDemoActor::UpdateMappoEmergencyActionBuffer(const TSharedPtr<FJsonObject>& ResponseRoot)
 {
-    if (!bMappoEmergencyEnableGhostExecution || !ResponseRoot.IsValid())
+    if (!bMappoEmergencyEnableGhostExecution || bMappoEmergencyGhostFinalSummaryLogged || !ResponseRoot.IsValid())
     {
         return;
+    }
+
+    if (MappoEmergencyGhostCellsByMappoMissionId.Num() > 0)
+    {
+        int32 ReachedGhostCount = 0;
+        for (const TPair<int32, FIntVector>& KVP : MappoEmergencyGhostCellsByMappoMissionId)
+        {
+            const FIntVector* GoalCell = MappoEmergencyGhostGoalCellsByMappoMissionId.Find(KVP.Key);
+            if (GoalCell && KVP.Value == *GoalCell)
+            {
+                ReachedGhostCount++;
+            }
+        }
+        if (ReachedGhostCount == MappoEmergencyGhostCellsByMappoMissionId.Num())
+        {
+            return;
+        }
     }
 
     TMap<int32, TArray<FString>> NewQueues;
@@ -1426,6 +1532,64 @@ void APathPlanningDemoActor::UpdateMappoEmergencyActionBuffer(const TSharedPtr<F
     {
         NewQueues.Add(KVP.Key, TArray<FString>());
     }
+
+    const TArray<FString> PolicyActionNames = {
+        TEXT("WAIT"),
+        TEXT("+X"),
+        TEXT("-X"),
+        TEXT("+Y"),
+        TEXT("-Y"),
+        TEXT("+Z"),
+        TEXT("-Z")
+    };
+    auto BuildMappoPolicyActionEntry = [&PolicyActionNames](const TSharedPtr<FJsonObject>& Action, const FString& SelectedAction) -> FString
+    {
+        TArray<TPair<FString, double>> ScoredActions;
+        const TSharedPtr<FJsonObject>* RawPolicyProbs = nullptr;
+        if (Action.IsValid() && Action->TryGetObjectField(TEXT("raw_policy_probs"), RawPolicyProbs) && RawPolicyProbs && RawPolicyProbs->IsValid())
+        {
+            for (int32 ActionIndex = 0; ActionIndex < PolicyActionNames.Num(); ++ActionIndex)
+            {
+                double Probability = 0.0;
+                if ((*RawPolicyProbs)->TryGetNumberField(PolicyActionNames[ActionIndex], Probability))
+                {
+                    ScoredActions.Add(TPair<FString, double>(PolicyActionNames[ActionIndex], Probability));
+                }
+            }
+        }
+
+        if (ScoredActions.Num() <= 0)
+        {
+            return SelectedAction;
+        }
+
+        ScoredActions.Sort([](const TPair<FString, double>& A, const TPair<FString, double>& B)
+        {
+            return A.Value > B.Value;
+        });
+
+        TArray<FString> OrderedActions;
+        for (const TPair<FString, double>& Item : ScoredActions)
+        {
+            if (!OrderedActions.Contains(Item.Key))
+            {
+                OrderedActions.Add(Item.Key);
+            }
+        }
+        if (!OrderedActions.Contains(SelectedAction))
+        {
+            OrderedActions.Insert(SelectedAction, 0);
+        }
+        if (SelectedAction != TEXT("WAIT") && OrderedActions.Remove(TEXT("WAIT")) > 0)
+        {
+            OrderedActions.Add(TEXT("WAIT"));
+        }
+        if (!OrderedActions.Contains(TEXT("WAIT")))
+        {
+            OrderedActions.Add(TEXT("WAIT"));
+        }
+        return FString::Join(OrderedActions, TEXT("|"));
+    };
 
     const TArray<TSharedPtr<FJsonValue>>* HorizonSteps = nullptr;
     if (ResponseRoot->TryGetArrayField(TEXT("action_horizon"), HorizonSteps) && HorizonSteps)
@@ -1463,7 +1627,7 @@ void APathPlanningDemoActor::UpdateMappoEmergencyActionBuffer(const TSharedPtr<F
                 const int32 MappoMissionId = FMath::RoundToInt(MissionIdNumber);
                 if (TArray<FString>* Queue = NewQueues.Find(MappoMissionId))
                 {
-                    Queue->Add(SelectedAction);
+                    Queue->Add(BuildMappoPolicyActionEntry(Action, SelectedAction));
                 }
             }
         }
@@ -1495,7 +1659,7 @@ void APathPlanningDemoActor::UpdateMappoEmergencyActionBuffer(const TSharedPtr<F
             const int32 MappoMissionId = FMath::RoundToInt(MissionIdNumber);
             if (TArray<FString>* Queue = NewQueues.Find(MappoMissionId))
             {
-                Queue->Add(SelectedAction);
+                Queue->Add(BuildMappoPolicyActionEntry(Action, SelectedAction));
             }
         }
     }
@@ -1550,16 +1714,15 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
     int32 RejectedGhostMoveCount = 0;
     int32 RepairedGhostMoveCount = 0;
     TArray<FString> GhostMoveDiagnostics;
-    const TArray<FString> RepairActionNames = {
-        TEXT("+X"),
-        TEXT("-X"),
-        TEXT("+Y"),
-        TEXT("-Y"),
-        TEXT("+Z"),
-        TEXT("-Z"),
-        TEXT("WAIT")
-    };
-    auto GetGhostRejectReason = [this](const FIntVector& Cell) -> FString
+
+    const TMap<int32, FIntVector> CurrentGhostCellsByMissionId = MappoEmergencyGhostCellsByMappoMissionId;
+    TMap<int32, FIntVector> CommittedGhostCellsByMissionId;
+
+    const int32 MappoGhostSafetyTimeStep = (!bExecutionRunning && bMappoEmergencyGhostRollInMode)
+        ? CurrentExecutionTimeStep + MappoEmergencyGhostStepCount
+        : CurrentExecutionTimeStep;
+
+    auto GetGhostRejectReason = [this, MappoGhostSafetyTimeStep](const FIntVector& Cell) -> FString
     {
         if (!GridMap.IsInside(Cell.X, Cell.Y, Cell.Z))
         {
@@ -1571,17 +1734,53 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
         }
         for (const FTemporalNoFlyZoneConfig& ZoneConfig : NoFlyZoneConfigs)
         {
-            if (IsCellInsideNoFlyZoneAtTime(Cell, CurrentExecutionTimeStep + 1, ZoneConfig))
+            if (IsCellInsideNoFlyZoneAtTime(Cell, MappoGhostSafetyTimeStep + 1, ZoneConfig))
             {
                 return TEXT("no_fly");
             }
         }
         return FString();
     };
-    auto GhostGoalDistance = [](const FIntVector& Cell, const FIntVector& Goal) -> int32
+    auto HasMappoDownwashConflict = [](const FIntVector& A, const FIntVector& B) -> bool
     {
-        return FMath::Abs(Cell.X - Goal.X) + FMath::Abs(Cell.Y - Goal.Y) + FMath::Abs(Cell.Z - Goal.Z);
+        return A.X == B.X && A.Y == B.Y && FMath::Abs(A.Z - B.Z) == 1;
     };
+    auto GetCandidateRejectReason = [&](int32 MappoMissionId, const FIntVector& PreviousCell, const FIntVector& CandidateCell) -> FString
+    {
+        const FString StaticReason = GetGhostRejectReason(CandidateCell);
+        if (!StaticReason.IsEmpty())
+        {
+            return StaticReason;
+        }
+
+        for (const TPair<int32, FIntVector>& OtherKVP : CurrentGhostCellsByMissionId)
+        {
+            const int32 OtherMissionId = OtherKVP.Key;
+            if (OtherMissionId == MappoMissionId)
+            {
+                continue;
+            }
+
+            const FIntVector OtherCurrentCell = OtherKVP.Value;
+            const FIntVector* OtherCommittedCell = CommittedGhostCellsByMissionId.Find(OtherMissionId);
+            const FIntVector OtherCandidateCell = OtherCommittedCell ? *OtherCommittedCell : OtherCurrentCell;
+
+            if (CandidateCell == OtherCandidateCell)
+            {
+                return TEXT("ghost_vertex");
+            }
+            if (CandidateCell == OtherCurrentCell && OtherCandidateCell == PreviousCell)
+            {
+                return TEXT("ghost_edge");
+            }
+            if (HasMappoDownwashConflict(CandidateCell, OtherCandidateCell))
+            {
+                return TEXT("ghost_downwash");
+            }
+        }
+        return FString();
+    };
+
     for (const int32 MappoMissionId : MappoMissionIds)
     {
         FIntVector* GhostCellPtr = MappoEmergencyGhostCellsByMappoMissionId.Find(MappoMissionId);
@@ -1591,9 +1790,16 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
             continue;
         }
 
-        const FString ActionName = (*ActionQueue)[0];
+        const FString QueuedActionEntry = (*ActionQueue)[0];
         ActionQueue->RemoveAt(0, 1, EAllowShrinking::No);
         ConsumedCount++;
+
+        TArray<FString> CandidateActionNames;
+        QueuedActionEntry.ParseIntoArray(CandidateActionNames, TEXT("|"), true);
+        if (CandidateActionNames.Num() <= 0)
+        {
+            CandidateActionNames.Add(QueuedActionEntry);
+        }
 
         const FIntVector PreviousGhostCell = *GhostCellPtr;
         const FIntVector* GoalCell = MappoEmergencyGhostGoalCellsByMappoMissionId.Find(MappoMissionId);
@@ -1604,102 +1810,82 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
         }
         else
         {
-            const FIntVector Delta = GetMappoDeltaFromActionName(ActionName);
-            const FIntVector CandidateCell = PreviousGhostCell + Delta;
-            if (Delta == FIntVector::ZeroValue)
-            {
-                WaitMoveCount++;
-                if (GhostMoveDiagnostics.Num() < 5)
-                {
-                    GhostMoveDiagnostics.Add(FString::Printf(
-                        TEXT("mission=%d action=%s from=%s candidate=%s reason=wait"),
-                        MappoMissionId,
-                        *ActionName,
-                        *FormatMappoCellForLog(PreviousGhostCell),
-                        *FormatMappoCellForLog(CandidateCell)));
-                }
-            }
-            else
-            {
-                const FString RejectReason = GetGhostRejectReason(CandidateCell);
+            const FString PrimaryActionName = CandidateActionNames[0];
+            const FIntVector PrimaryCandidateCell = PreviousGhostCell + GetMappoDeltaFromActionName(PrimaryActionName);
+            FString PrimaryRejectReason;
+            bool bAppliedCandidate = false;
 
-                if (RejectReason.IsEmpty())
+            for (int32 CandidateIndex = 0; CandidateIndex < CandidateActionNames.Num(); ++CandidateIndex)
+            {
+                const FString CandidateActionName = CandidateActionNames[CandidateIndex];
+                const FIntVector Delta = GetMappoDeltaFromActionName(CandidateActionName);
+                const FIntVector CandidateCell = PreviousGhostCell + Delta;
+                const FString RejectReason = GetCandidateRejectReason(MappoMissionId, PreviousGhostCell, CandidateCell);
+                if (CandidateIndex == 0)
+                {
+                    PrimaryRejectReason = RejectReason;
+                }
+                if (!RejectReason.IsEmpty())
+                {
+                    continue;
+                }
+
+                bAppliedCandidate = true;
+                if (Delta == FIntVector::ZeroValue)
+                {
+                    WaitMoveCount++;
+                }
+                else
                 {
                     MovedCount++;
                     *GhostCellPtr = CandidateCell;
                 }
-                else
+
+                if (CandidateIndex > 0)
                 {
-                    bool bRepaired = false;
-                    FString RepairActionName;
-                    FIntVector RepairCell = PreviousGhostCell;
-                    int32 BestRepairDistance = GoalCell ? GhostGoalDistance(PreviousGhostCell, *GoalCell) : MAX_int32;
+                    RepairedGhostMoveCount++;
+                    if (GhostMoveDiagnostics.Num() < 5)
+                    {
+                        GhostMoveDiagnostics.Add(FString::Printf(
+                            TEXT("mission=%d primary_action=%s selected_action=%s from=%s primary_candidate=%s reason=%s repair_rank=%d"),
+                            MappoMissionId,
+                            *PrimaryActionName,
+                            *CandidateActionName,
+                            *FormatMappoCellForLog(PreviousGhostCell),
+                            *FormatMappoCellForLog(PrimaryCandidateCell),
+                            PrimaryRejectReason.IsEmpty() ? TEXT("unknown") : *PrimaryRejectReason,
+                            CandidateIndex));
+                    }
+                }
+                else if (Delta == FIntVector::ZeroValue && GhostMoveDiagnostics.Num() < 5)
+                {
+                    GhostMoveDiagnostics.Add(FString::Printf(
+                        TEXT("mission=%d action=%s from=%s candidate=%s reason=wait"),
+                        MappoMissionId,
+                        *CandidateActionName,
+                        *FormatMappoCellForLog(PreviousGhostCell),
+                        *FormatMappoCellForLog(CandidateCell)));
+                }
+                break;
+            }
 
-                    if (GoalCell)
-                    {
-                        for (const FString& CandidateActionName : RepairActionNames)
-                        {
-                            if (CandidateActionName == ActionName)
-                            {
-                                continue;
-                            }
-                            const FIntVector RepairDelta = GetMappoDeltaFromActionName(CandidateActionName);
-                            if (RepairDelta == FIntVector::ZeroValue)
-                            {
-                                continue;
-                            }
-                            const FIntVector CandidateRepairCell = PreviousGhostCell + RepairDelta;
-                            if (!GetGhostRejectReason(CandidateRepairCell).IsEmpty())
-                            {
-                                continue;
-                            }
-                            const int32 RepairDistance = GhostGoalDistance(CandidateRepairCell, *GoalCell);
-                            if (RepairDistance < BestRepairDistance)
-                            {
-                                BestRepairDistance = RepairDistance;
-                                RepairActionName = CandidateActionName;
-                                RepairCell = CandidateRepairCell;
-                                bRepaired = true;
-                            }
-                        }
-                    }
-
-                    if (bRepaired)
-                    {
-                        MovedCount++;
-                        RepairedGhostMoveCount++;
-                        *GhostCellPtr = RepairCell;
-                        if (GhostMoveDiagnostics.Num() < 5)
-                        {
-                            GhostMoveDiagnostics.Add(FString::Printf(
-                                TEXT("mission=%d action=%s from=%s candidate=%s reason=%s repaired_action=%s repair_cell=%s"),
-                                MappoMissionId,
-                                *ActionName,
-                                *FormatMappoCellForLog(PreviousGhostCell),
-                                *FormatMappoCellForLog(CandidateCell),
-                                *RejectReason,
-                                *RepairActionName,
-                                *FormatMappoCellForLog(RepairCell)));
-                        }
-                    }
-                    else
-                    {
-                        RejectedGhostMoveCount++;
-                        if (GhostMoveDiagnostics.Num() < 5)
-                        {
-                            GhostMoveDiagnostics.Add(FString::Printf(
-                                TEXT("mission=%d action=%s from=%s candidate=%s reason=%s"),
-                                MappoMissionId,
-                                *ActionName,
-                                *FormatMappoCellForLog(PreviousGhostCell),
-                                *FormatMappoCellForLog(CandidateCell),
-                                *RejectReason));
-                        }
-                    }
+            if (!bAppliedCandidate)
+            {
+                RejectedGhostMoveCount++;
+                if (GhostMoveDiagnostics.Num() < 5)
+                {
+                    GhostMoveDiagnostics.Add(FString::Printf(
+                        TEXT("mission=%d primary_action=%s from=%s primary_candidate=%s reason=%s"),
+                        MappoMissionId,
+                        *PrimaryActionName,
+                        *FormatMappoCellForLog(PreviousGhostCell),
+                        *FormatMappoCellForLog(PrimaryCandidateCell),
+                        PrimaryRejectReason.IsEmpty() ? TEXT("no_safe_policy_candidate") : *PrimaryRejectReason));
                 }
             }
         }
 
+        CommittedGhostCellsByMissionId.Add(MappoMissionId, *GhostCellPtr);
         MappoEmergencyGhostPreviousCellsByMappoMissionId.Add(MappoMissionId, PreviousGhostCell);
         TArray<FIntVector>& RecentCells = MappoEmergencyGhostRecentCellsByMappoMissionId.FindOrAdd(MappoMissionId);
         RecentCells.Add(*GhostCellPtr);
@@ -1782,8 +1968,25 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
         }
     }
 
+    if (bAllGhostReached)
+    {
+        for (TPair<int32, TArray<FString>>& KVP : MappoEmergencyActionQueueByMappoMissionId)
+        {
+            KVP.Value.Reset();
+        }
+        RemainingQueuedActions = 0;
+        MappoEmergencyGhostAppliedActionVersion = MappoEmergencyGhostBufferedActionVersion;
+    }
+
     DrawMappoEmergencyGhostState();
-    MaybeLogMappoEmergencyGhostFinalSummary(ReachedGhostCount, TotalGhostCount, RemainingQueuedActions, false);
+    if (bAllGhostReached)
+    {
+        MaybeLogMappoEmergencySummary(true);
+    }
+    else
+    {
+        MaybeLogMappoEmergencyGhostFinalSummary(ReachedGhostCount, TotalGhostCount, RemainingQueuedActions, false);
+    }
 }
 
 void APathPlanningDemoActor::MaybeLogMappoEmergencyGhostFinalSummary(int32 ReachedGhostCount, int32 TotalGhostCount, int32 RemainingQueuedActions, bool bForce)
