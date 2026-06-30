@@ -388,29 +388,37 @@ Source/UTM/Private/Execution/
 - 接管重规划成功后旧路径与新路径的合并逻辑。
 - 后续需要支持保留已执行前缀、从当前 timestep 拼接、未受影响路径保持不变等策略。
 
-### Actor 中保留的 UE 适配层函数
+### Actor 中保留的执行入口
 
-在 `APathPlanningDemoActor` 中新增了三个占位函数：
+当前保留原来的稳定执行主流程：
 
-- `CaptureExecutionSnapshot()`
+```text
+AdvanceExecutionOneStep()
+UpdateExecutionVisuals()
+DrawExecutionDebugForState()
+TryExecutionReplan()
+```
+
+`APathPlanningDemoActor` 中保留 `CaptureExecutionSnapshot()`，它可以从现有 `ExecutionStates` 中生成纯数据快照，作为未来 Execution policy 接入时的状态采集入口。
+
+已移除以下空占位函数：
+
 - `ApplyExecutionCommands(...)`
 - `DrawExecutionDebug(...)`
 
-当前状态：
+移除原因：
 
-- `CaptureExecutionSnapshot()` 已经可以从现有 `ExecutionStates` 中生成纯数据快照。
-- `ApplyExecutionCommands(...)` 目前是占位函数，尚未接入主流程。
-- `DrawExecutionDebug(...)` 目前是占位函数，尚未接入主流程。
+- 两个函数尚未接入主流程，只是预留接口。
+- 当前阶段继续深拆 execution 状态机会带来较大工作量和实验指标变化风险。
+- 因此先保留已验证的旧主流程，把新 `Execution` 目录作为未来执行期算法模块骨架。
 
-设计边界：
+设计边界仍然是：
 
 ```text
 CaptureExecutionSnapshot()
-ApplyExecutionCommands()
-DrawExecutionDebug()
 ```
 
-保留 UE 依赖，例如读取 `ADroneActor` 状态、应用路径、绘制 debug。
+保留 UE 状态采集职责，例如读取 `ADroneActor` 状态并生成纯数据快照。
 
 ```text
 ExecutionAlignmentPolicy

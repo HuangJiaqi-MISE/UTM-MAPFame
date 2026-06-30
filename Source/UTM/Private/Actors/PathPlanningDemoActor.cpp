@@ -1114,16 +1114,6 @@ FExecutionSnapshot APathPlanningDemoActor::CaptureExecutionSnapshot() const
     return Snapshot;
 }
 
-void APathPlanningDemoActor::ApplyExecutionCommands(const TArray<FExecutionStepDecision>& Decisions)
-{
-    (void)Decisions;
-}
-
-void APathPlanningDemoActor::DrawExecutionDebug(const FExecutionSnapshot& Snapshot) const
-{
-    (void)Snapshot;
-}
-
 const FAgentDelayConfig* APathPlanningDemoActor::FindAgentDelayConfig(int32 MissionId) const
 {
     for (const FAgentDelayConfig& Config : AgentDelayConfigs)
