@@ -80,7 +80,7 @@ def is_inside(request: EmergencyStepRequest, cell: tuple[int, int, int]) -> bool
 
 
 def is_free_static(request: EmergencyStepRequest, cell: tuple[int, int, int]) -> bool:
-    return is_inside(request, cell) and cell not in set(request.blocked_cells)
+    return is_inside(request, cell) and cell not in request.blocked_cell_set
 
 
 def is_no_fly(
@@ -196,7 +196,7 @@ def _local_observation(
                 if not is_inside(request, cell):
                     grid[0, ix, iy, iz] = 1.0
                     continue
-                if cell in request.blocked_cells:
+                if cell in request.blocked_cell_set:
                     grid[0, ix, iy, iz] = 1.0
                 if is_no_fly(request, cell, request.time_step + 1):
                     grid[1, ix, iy, iz] = 1.0

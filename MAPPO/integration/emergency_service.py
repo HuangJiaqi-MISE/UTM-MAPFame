@@ -11,7 +11,12 @@ from typing import Any
 import numpy as np
 
 try:
-    from .observation_builder import build_env_for_model, build_observations
+    from .observation_builder import (
+        build_env_for_model,
+        build_observations,
+        is_free_static,
+        is_no_fly,
+    )
     from .safety_filter import (
         decisions_to_response_items,
         policy_action_rankings,
@@ -24,7 +29,12 @@ try:
     from utm_mappo.env import ACTION_DELTAS, UTMAction
     from utm_mappo.geometry import add_cell
 except ImportError:  # Allows `python integration/emergency_service.py`.
-    from integration.observation_builder import build_env_for_model, build_observations
+    from integration.observation_builder import (
+        build_env_for_model,
+        build_observations,
+        is_free_static,
+        is_no_fly,
+    )
     from integration.safety_filter import (
         decisions_to_response_items,
         policy_action_rankings,
@@ -110,6 +120,12 @@ class EmergencyRecoveryService:
             "time_step": request.time_step,
             "mode": self.mode,
             "action_horizon_length": action_horizon,
+            "request_stats": {
+                "blocked_cells": len(request.blocked_cells),
+                "critical_blocked_cells": int(
+                    payload.get("critical_blocked_cells_sent", -1)
+                ),
+            },
             "observation_shape": first_shape or [0, 0],
             "actions": first_actions or [],
             "action_horizon": horizon_steps,
@@ -266,25 +282,36 @@ def _advance_request(
             if decision is not None
             else int(UTMAction.WAIT)
         )
-        next_cell = add_cell(agent.current_cell, ACTION_DELTAS[action])
+        candidate_cell = add_cell(agent.current_cell, ACTION_DELTAS[action])
+        candidate_is_safe = is_free_static(request, candidate_cell) and not is_no_fly(
+            request,
+            candidate_cell,
+            request.time_step + 1,
+        )
+        next_cell = candidate_cell if candidate_is_safe else agent.current_cell
+        executed_action = action if candidate_is_safe else int(UTMAction.WAIT)
         recent_path = (*agent.recent_path, next_cell)
         if len(recent_path) > 8:
             recent_path = recent_path[-8:]
+        fallback_or_safety_hold = (
+            not candidate_is_safe
+            or (decision is not None and decision.fallback_used)
+        )
         next_agents.append(
             replace(
                 agent,
                 previous_cell=agent.current_cell,
                 current_cell=next_cell,
-                last_action=action,
+                last_action=executed_action,
                 recent_path=recent_path,
                 consecutive_wait_count=(
                     agent.consecutive_wait_count + 1
-                    if action == int(UTMAction.WAIT)
+                    if executed_action == int(UTMAction.WAIT)
                     else 0
                 ),
                 consecutive_filter_reject_count=(
                     agent.consecutive_filter_reject_count + 1
-                    if decision is not None and decision.fallback_used
+                    if fallback_or_safety_hold
                     else 0
                 ),
             )

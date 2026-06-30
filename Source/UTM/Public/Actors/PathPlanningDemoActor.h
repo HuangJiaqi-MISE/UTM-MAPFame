@@ -618,7 +618,7 @@ private:
     void UpdateMappoEmergencyActionBuffer(const TSharedPtr<FJsonObject>& ResponseRoot);
     void ApplyMappoEmergencyGhostStep();
     void DrawMappoEmergencyGhostState() const;
-    void MaybeLogMappoEmergencyGhostFinalSummary(int32 ReachedGhostCount, int32 TotalGhostCount, int32 RemainingQueuedActions);
+    void MaybeLogMappoEmergencyGhostFinalSummary(int32 ReachedGhostCount, int32 TotalGhostCount, int32 RemainingQueuedActions, bool bForce);
     FIntVector GetMappoDeltaFromActionName(const FString& ActionName) const;
     bool IsMappoGhostCellAllowed(const FIntVector& Cell) const;
     void AppendMappoEmergencyStructuredLogs(const TSharedPtr<FJsonObject>& ResponseRoot, int32 ResponseCode, double RoundTripMs);

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any
 
 from utm_mappo.config import Cell
@@ -57,6 +58,10 @@ class EmergencyStepRequest:
     rid_neighbors: tuple[RIDNeighborSnapshot, ...]
     blocked_cells: tuple[Cell, ...]
     no_fly_zones: tuple[NoFlyZoneSnapshot, ...]
+
+    @cached_property
+    def blocked_cell_set(self) -> frozenset[Cell]:
+        return frozenset(self.blocked_cells)
 
 
 def parse_request(data: dict[str, Any]) -> EmergencyStepRequest:
