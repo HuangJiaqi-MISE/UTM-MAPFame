@@ -248,7 +248,6 @@ EUW / Mission Marker
 
 优先级较高：
 
-- 在 JSON 中增加 scheduler assignment 明细，例如 agent mission id 分配到了哪个原始 goal mission id。
 - 用多个 `random_seed` 和 `execution_random_seed` 批量验证 `Nearest-First Scheduler` 的稳定性。
 - 将 Scheduler 输入从 `MissionConfigs` 扩展为更清晰的：
   - agent initial states
@@ -263,4 +262,184 @@ EUW / Mission Marker
   - Auction-based Scheduler
 - 将 execution coordinator 从 `APathPlanningDemoActor` 中继续抽出。
 - 将实验 JSON 生成逻辑抽成 reporter，减少 Actor 内职责。
+
+暂缓项：
+
+- 暂不在主 JSON 中增加完整 `scheduler_assignment` 明细，避免结构化日志过大。
+- 暂不增加 scheduler 自身统计指标，优先推进模块化拆分。
+
+## 2026-06-30 组件化重构二期：Execution 模块骨架
+
+### 背景
+
+在 Planner 和 Task/Mission Scheduler 初步模块化之后，`APathPlanningDemoActor` 中最复杂的剩余职责是执行期逻辑，包括执行期对齐、冲突预测、重规划触发、重规划任务构造、路径合并和 UE 场景应用。
+
+本阶段先建立独立 `Execution` 目录和 policy 类骨架，不迁移现有主流程，目标是降低后续拆分风险。
+
+### 新增目录
+
+新增独立执行期模块目录：
+
+```text
+Source/UTM/Public/Execution/
+Source/UTM/Private/Execution/
+```
+
+没有继续放入 `Planning` 目录，原因是：
+
+- `Planning` 负责初始路径生成。
+- `Scheduling` 负责任务分配。
+- `Execution` 负责执行过程中对齐、冲突预测、重规划和路径更新。
+
+### 新增文件
+
+公共头文件：
+
+- `Source/UTM/Public/Execution/ExecutionTypes.h`
+- `Source/UTM/Public/Execution/ExecutionAlignmentPolicy.h`
+- `Source/UTM/Public/Execution/ConflictPredictionPolicy.h`
+- `Source/UTM/Public/Execution/ExecutionReplanPolicy.h`
+- `Source/UTM/Public/Execution/ReplanMissionBuilder.h`
+- `Source/UTM/Public/Execution/PathMergePolicy.h`
+
+私有实现文件：
+
+- `Source/UTM/Private/Execution/ExecutionAlignmentPolicy.cpp`
+- `Source/UTM/Private/Execution/ConflictPredictionPolicy.cpp`
+- `Source/UTM/Private/Execution/ExecutionReplanPolicy.cpp`
+- `Source/UTM/Private/Execution/ReplanMissionBuilder.cpp`
+- `Source/UTM/Private/Execution/PathMergePolicy.cpp`
+
+### ExecutionTypes.h
+
+新增执行期纯数据结构和枚举：
+
+- `EExecutionPolicyAction`
+- `EExecutionPolicyReplanMode`
+- `EExecutionPredictedConflictType`
+- `FExecutionAgentSnapshot`
+- `FExecutionSnapshot`
+- `FExecutionStepDecision`
+- `FExecutionPredictedConflict`
+- `FExecutionReplanPolicySettings`
+- `FExecutionReplanRequest`
+
+这些类型不使用 `USTRUCT`、`UCLASS`、`UPROPERTY`，用于后续把执行期算法从 UE Actor 生命周期中分离出来。
+
+### ExecutionAlignmentPolicy
+
+当前作用：
+
+- 包装现有 `FDiscreteAlignmentManager`。
+- 输入 `FExecutionAgentSnapshot` 和 `FGridMap3D`。
+- 输出 `FExecutionStepDecision`。
+
+后续目标：
+
+- 将 `AdvanceExecutionOneStep()` 中的 alignment decision 逻辑逐步迁移到该 policy。
+
+### ConflictPredictionPolicy
+
+当前作用：
+
+- 根据多个 `FExecutionStepDecision` 预测下一步冲突。
+- 当前已支持：
+  - vertex conflict
+  - edge conflict
+
+后续目标：
+
+- 将 protection footprint 和 downwash conflict 预测逐步迁移进来。
+- 将当前 Actor 内部的 predicted conflict arbitration 逻辑拆分出来。
+
+### ExecutionReplanPolicy
+
+当前作用：
+
+- 根据执行快照、step decision 和 predicted conflicts 构造 `FExecutionReplanRequest`。
+- 支持模式：
+  - `Disabled`
+  - `LocalConflictSet`
+  - `GlobalUnfinished`
+
+后续目标：
+
+- 接管当前 `AdvanceExecutionOneStep()` 中关于是否触发执行期重规划的判断。
+
+### ReplanMissionBuilder
+
+当前作用：
+
+- 将 `FExecutionAgentSnapshot`、原始 `FDroneMissionConfig` 和 replan request 转换为 `ReplanMissions`。
+
+后续目标：
+
+- 接管 `TryExecutionReplan()` 中构造重规划任务的逻辑。
+- 后续需要补充 stationary anchor、局部重规划窗口和全局未完成任务语义。
+
+### PathMergePolicy
+
+当前作用：
+
+- 提供按 `MissionId` 替换路径的基础合并逻辑。
+
+后续目标：
+
+- 接管重规划成功后旧路径与新路径的合并逻辑。
+- 后续需要支持保留已执行前缀、从当前 timestep 拼接、未受影响路径保持不变等策略。
+
+### Actor 中保留的 UE 适配层函数
+
+在 `APathPlanningDemoActor` 中新增了三个占位函数：
+
+- `CaptureExecutionSnapshot()`
+- `ApplyExecutionCommands(...)`
+- `DrawExecutionDebug(...)`
+
+当前状态：
+
+- `CaptureExecutionSnapshot()` 已经可以从现有 `ExecutionStates` 中生成纯数据快照。
+- `ApplyExecutionCommands(...)` 目前是占位函数，尚未接入主流程。
+- `DrawExecutionDebug(...)` 目前是占位函数，尚未接入主流程。
+
+设计边界：
+
+```text
+CaptureExecutionSnapshot()
+ApplyExecutionCommands()
+DrawExecutionDebug()
+```
+
+保留 UE 依赖，例如读取 `ADroneActor` 状态、应用路径、绘制 debug。
+
+```text
+ExecutionAlignmentPolicy
+ConflictPredictionPolicy
+ExecutionReplanPolicy
+ReplanMissionBuilder
+PathMergePolicy
+```
+
+保持纯逻辑，不直接依赖 `UWorld`、`AActor`、`DrawDebug`、`UPROPERTY` 或 `UFUNCTION`。
+
+### 行为变化
+
+本阶段没有把新 Execution policy 接入现有执行主流程，因此实验行为理论上不应改变。
+
+这是刻意设计的：先建立可编译的模块边界，再逐步迁移内部逻辑，避免一次性大改导致执行期指标不可比。
+
+### 已验证结果
+
+已通过 Unreal 编译：
+
+```powershell
+& 'D:\Program Files\Epic Games\UE_5.5\Engine\Build\BatchFiles\Build.bat' UTMEditor Win64 Development '-Project=D:\UTM-MAPFame\UTM.uproject' -WaitMutex -FromMsBuild -architecture=x64
+```
+
+验证结论：
+
+- UHT 通过。
+- 新增 `Execution` 目录下的 cpp 文件已被 UBT 编译。
+- `UnrealEditor-UTM.dll` 链接通过。
+- 编译中仅保留既有 `PBSPlanner.cpp` 的 UE API deprecation warning。
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Execution/ExecutionTypes.h"
 #include "GameFramework/Actor.h"
 #include "Planning/GridMap3D.h"
 #include "Planning/DiscreteAlignmentManager.h"
@@ -438,6 +439,9 @@ private:
     void ResetExecutionCache();
     void InitializeExecutionStates();
     void AdvanceExecutionOneStep();
+    FExecutionSnapshot CaptureExecutionSnapshot() const;
+    void ApplyExecutionCommands(const TArray<FExecutionStepDecision>& Decisions);
+    void DrawExecutionDebug(const FExecutionSnapshot& Snapshot) const;
     void UpdateExecutionVisuals(float Alpha);
     bool ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep);
     void CacheExecutionMissionConfigs(const TArray<FDroneMissionConfig>& Missions);

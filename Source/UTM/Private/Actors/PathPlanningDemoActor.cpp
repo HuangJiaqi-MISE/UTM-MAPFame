@@ -1083,6 +1083,47 @@ void APathPlanningDemoActor::InitializeExecutionStates()
     }
 }
 
+FExecutionSnapshot APathPlanningDemoActor::CaptureExecutionSnapshot() const
+{
+    FExecutionSnapshot Snapshot;
+    Snapshot.TimeStep = CurrentExecutionTimeStep;
+    Snapshot.TotalReplanCount = TotalExecutionReplanCount;
+    Snapshot.Agents.Reserve(ExecutionStates.Num());
+
+    for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
+    {
+        const FExecutionAgentState& State = KVP.Value;
+        const FIntVector ObservedCell = GetObservedExecutionCell(State);
+
+        FExecutionAgentSnapshot AgentSnapshot;
+        AgentSnapshot.MissionId = State.MissionId;
+        AgentSnapshot.bFinished = State.bFinished;
+        AgentSnapshot.ObservedCell = ObservedCell;
+        AgentSnapshot.ObservedWorld = GridMap.CellToWorld(ObservedCell);
+        AgentSnapshot.GoalCell = State.GoalCell;
+        AgentSnapshot.GoalWorld = State.GoalWorld;
+        AgentSnapshot.TimeStep = CurrentExecutionTimeStep;
+        AgentSnapshot.ExecutedPlanIndex = State.ExecutedPlanIndex;
+        AgentSnapshot.ConsecutiveConflictHoldCount = State.ConsecutiveConflictHoldCount;
+        AgentSnapshot.ConsecutiveSafetyGateHoldCount = State.ConsecutiveSafetyGateHoldCount;
+        AgentSnapshot.PlannedCells = State.PlannedCells;
+
+        Snapshot.Agents.Add(AgentSnapshot);
+    }
+
+    return Snapshot;
+}
+
+void APathPlanningDemoActor::ApplyExecutionCommands(const TArray<FExecutionStepDecision>& Decisions)
+{
+    (void)Decisions;
+}
+
+void APathPlanningDemoActor::DrawExecutionDebug(const FExecutionSnapshot& Snapshot) const
+{
+    (void)Snapshot;
+}
+
 const FAgentDelayConfig* APathPlanningDemoActor::FindAgentDelayConfig(int32 MissionId) const
 {
     for (const FAgentDelayConfig& Config : AgentDelayConfigs)
