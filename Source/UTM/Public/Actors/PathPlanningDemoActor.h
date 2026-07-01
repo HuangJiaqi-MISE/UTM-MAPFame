@@ -614,6 +614,14 @@ private:
     int32 MappoEmergencyGhostBufferedActionVersion = 0;
     int32 MappoEmergencyGhostAppliedActionVersion = 0;
     bool bMappoEmergencyGhostFinalSummaryLogged = false;
+    int32 MappoEmergencyGhostVertexConflictCount = 0;
+    int32 MappoEmergencyGhostEdgeConflictCount = 0;
+    int32 MappoEmergencyGhostDownwashConflictCount = 0;
+    int32 MappoEmergencyGhostBlockedCellViolationCount = 0;
+    int32 MappoEmergencyGhostNoFlyViolationCount = 0;
+    int32 MappoEmergencyGhostOutOfGridViolationCount = 0;
+    int32 MappoEmergencyGhostTotalViolationCount = 0;
+    double MappoEmergencyGhostMinimumSeparationCells = -1.0;
 
     void MaybeTriggerMappoEmergencyRequest();
     bool BuildMappoEmergencyRequestJson(FString& OutJson, TArray<int32>& OutMissionIds) const;

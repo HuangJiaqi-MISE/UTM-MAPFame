@@ -62,6 +62,14 @@ RUN_FIELDS = [
     "ghost_repaired_moves",
     "ghost_rejected_moves",
     "ghost_wait_moves",
+    "ghost_minimum_separation_cells",
+    "ghost_vertex_conflict_count",
+    "ghost_edge_conflict_count",
+    "ghost_downwash_conflict_count",
+    "ghost_blocked_cell_violation_count",
+    "ghost_no_fly_violation_count",
+    "ghost_out_of_grid_violation_count",
+    "ghost_total_violation_count",
     "first_error",
     "jsonl_path",
     "csv_path",
@@ -80,6 +88,14 @@ BENCHMARK_FIELDS = [
     "mean_repaired_moves",
     "mean_rejected_moves",
     "mean_wait_moves",
+    "mean_minimum_separation_cells",
+    "mean_vertex_conflicts",
+    "mean_edge_conflicts",
+    "mean_downwash_conflicts",
+    "mean_blocked_cell_violations",
+    "mean_no_fly_violations",
+    "mean_out_of_grid_violations",
+    "mean_total_violations",
     "mean_fallback_actions",
     "failed_request_rate",
 ]
@@ -211,6 +227,11 @@ def summarize_run(jsonl_path: Path) -> dict[str, Any] | None:
     ghost_repaired = sum(int(step.get("repaired_ghost_moves", 0) or 0) for step in ghost_steps)
     ghost_rejected = sum(int(step.get("rejected_ghost_moves", 0) or 0) for step in ghost_steps)
     ghost_wait = sum(int(step.get("wait_moves", 0) or 0) for step in ghost_steps)
+    ghost_step_min_separations = [
+        to_float(step.get("minimum_separation_cells"))
+        for step in ghost_steps
+        if step.get("minimum_separation_cells") not in (None, "")
+    ]
 
     filename_info = parse_filename(jsonl_path)
     csv_path = jsonl_path.with_suffix(".csv")
@@ -284,6 +305,48 @@ def summarize_run(jsonl_path: Path) -> dict[str, Any] | None:
         "ghost_repaired_moves": ghost_repaired,
         "ghost_rejected_moves": ghost_rejected,
         "ghost_wait_moves": ghost_wait,
+        "ghost_minimum_separation_cells": fmt(
+            first_non_empty(
+                final.get("minimum_separation_cells"),
+                summary.get("ghost_minimum_separation_cells"),
+                min_or_zero(ghost_step_min_separations),
+            )
+        ),
+        "ghost_vertex_conflict_count": first_non_empty(
+            final.get("vertex_conflict_count"),
+            summary.get("ghost_vertex_conflict_count"),
+            sum_event_int(ghost_steps, "vertex_conflict_count"),
+        ),
+        "ghost_edge_conflict_count": first_non_empty(
+            final.get("edge_conflict_count"),
+            summary.get("ghost_edge_conflict_count"),
+            sum_event_int(ghost_steps, "edge_conflict_count"),
+        ),
+        "ghost_downwash_conflict_count": first_non_empty(
+            final.get("downwash_conflict_count"),
+            summary.get("ghost_downwash_conflict_count"),
+            sum_event_int(ghost_steps, "downwash_conflict_count"),
+        ),
+        "ghost_blocked_cell_violation_count": first_non_empty(
+            final.get("blocked_cell_violation_count"),
+            summary.get("ghost_blocked_cell_violation_count"),
+            sum_event_int(ghost_steps, "blocked_cell_violation_count"),
+        ),
+        "ghost_no_fly_violation_count": first_non_empty(
+            final.get("no_fly_violation_count"),
+            summary.get("ghost_no_fly_violation_count"),
+            sum_event_int(ghost_steps, "no_fly_violation_count"),
+        ),
+        "ghost_out_of_grid_violation_count": first_non_empty(
+            final.get("out_of_grid_violation_count"),
+            summary.get("ghost_out_of_grid_violation_count"),
+            sum_event_int(ghost_steps, "out_of_grid_violation_count"),
+        ),
+        "ghost_total_violation_count": first_non_empty(
+            final.get("total_violation_count"),
+            summary.get("ghost_total_violation_count"),
+            sum_event_int(ghost_steps, "total_violation_count"),
+        ),
         "first_error": first_error,
         "jsonl_path": str(jsonl_path),
         "csv_path": str(csv_path) if csv_path.exists() else "",
@@ -340,6 +403,14 @@ def aggregate_benchmark(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "mean_repaired_moves": fmt(mean_value(group, "ghost_repaired_moves")),
                 "mean_rejected_moves": fmt(mean_value(group, "ghost_rejected_moves")),
                 "mean_wait_moves": fmt(mean_value(group, "ghost_wait_moves")),
+                "mean_minimum_separation_cells": fmt(mean_value(group, "ghost_minimum_separation_cells")),
+                "mean_vertex_conflicts": fmt(mean_value(group, "ghost_vertex_conflict_count")),
+                "mean_edge_conflicts": fmt(mean_value(group, "ghost_edge_conflict_count")),
+                "mean_downwash_conflicts": fmt(mean_value(group, "ghost_downwash_conflict_count")),
+                "mean_blocked_cell_violations": fmt(mean_value(group, "ghost_blocked_cell_violation_count")),
+                "mean_no_fly_violations": fmt(mean_value(group, "ghost_no_fly_violation_count")),
+                "mean_out_of_grid_violations": fmt(mean_value(group, "ghost_out_of_grid_violation_count")),
+                "mean_total_violations": fmt(mean_value(group, "ghost_total_violation_count")),
                 "mean_fallback_actions": fmt(mean_value(group, "fallback_action_count")),
                 "failed_request_rate": fmt(failed_requests / sent_requests if sent_requests else 0.0),
             }
@@ -352,6 +423,10 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> 
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def sum_event_int(events: list[dict[str, Any]], key: str) -> int:
+    return int(sum(to_float(event.get(key)) for event in events))
 
 
 def first_non_empty(*values: Any) -> Any:

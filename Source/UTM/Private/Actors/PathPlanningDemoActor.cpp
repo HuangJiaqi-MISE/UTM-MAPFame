@@ -1355,6 +1355,14 @@ void APathPlanningDemoActor::ResetMappoEmergencyLogging()
     MappoEmergencyGhostBufferedActionVersion = 0;
     MappoEmergencyGhostAppliedActionVersion = 0;
     bMappoEmergencyGhostFinalSummaryLogged = false;
+    MappoEmergencyGhostVertexConflictCount = 0;
+    MappoEmergencyGhostEdgeConflictCount = 0;
+    MappoEmergencyGhostDownwashConflictCount = 0;
+    MappoEmergencyGhostBlockedCellViolationCount = 0;
+    MappoEmergencyGhostNoFlyViolationCount = 0;
+    MappoEmergencyGhostOutOfGridViolationCount = 0;
+    MappoEmergencyGhostTotalViolationCount = 0;
+    MappoEmergencyGhostMinimumSeparationCells = -1.0;
 }
 
 
@@ -1548,6 +1556,14 @@ void APathPlanningDemoActor::MaybeLogMappoEmergencySummary(bool bForce)
             Summary->SetNumberField(TEXT("accepted_action_count"), MappoEmergencyAcceptedActionCount);
             Summary->SetNumberField(TEXT("substituted_action_count"), MappoEmergencySubstitutedActionCount);
             Summary->SetNumberField(TEXT("fallback_action_count"), MappoEmergencyFallbackActionCount);
+            Summary->SetNumberField(TEXT("ghost_minimum_separation_cells"), MappoEmergencyGhostMinimumSeparationCells < 0.0 ? 0.0 : MappoEmergencyGhostMinimumSeparationCells);
+            Summary->SetNumberField(TEXT("ghost_vertex_conflict_count"), MappoEmergencyGhostVertexConflictCount);
+            Summary->SetNumberField(TEXT("ghost_edge_conflict_count"), MappoEmergencyGhostEdgeConflictCount);
+            Summary->SetNumberField(TEXT("ghost_downwash_conflict_count"), MappoEmergencyGhostDownwashConflictCount);
+            Summary->SetNumberField(TEXT("ghost_blocked_cell_violation_count"), MappoEmergencyGhostBlockedCellViolationCount);
+            Summary->SetNumberField(TEXT("ghost_no_fly_violation_count"), MappoEmergencyGhostNoFlyViolationCount);
+            Summary->SetNumberField(TEXT("ghost_out_of_grid_violation_count"), MappoEmergencyGhostOutOfGridViolationCount);
+            Summary->SetNumberField(TEXT("ghost_total_violation_count"), MappoEmergencyGhostTotalViolationCount);
 
             FString JsonLine;
             TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
@@ -1609,7 +1625,14 @@ void APathPlanningDemoActor::InitializeMappoEmergencyGhostState(const TArray<int
     MappoEmergencyGhostStepCount = 0;
     MappoEmergencyGhostBufferedActionVersion = 0;
     MappoEmergencyGhostAppliedActionVersion = 0;
-
+    MappoEmergencyGhostVertexConflictCount = 0;
+    MappoEmergencyGhostEdgeConflictCount = 0;
+    MappoEmergencyGhostDownwashConflictCount = 0;
+    MappoEmergencyGhostBlockedCellViolationCount = 0;
+    MappoEmergencyGhostNoFlyViolationCount = 0;
+    MappoEmergencyGhostOutOfGridViolationCount = 0;
+    MappoEmergencyGhostTotalViolationCount = 0;
+    MappoEmergencyGhostMinimumSeparationCells = -1.0;
     UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] ghost execution initialized agents=%d"), MappoEmergencyGhostCellsByMappoMissionId.Num());
     DrawMappoEmergencyGhostState();
 }
@@ -2043,6 +2066,106 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
         }
     }
     const int32 TotalGhostCount = MappoMissionIds.Num();
+    int32 StepGhostVertexConflictCount = 0;
+    int32 StepGhostEdgeConflictCount = 0;
+    int32 StepGhostDownwashConflictCount = 0;
+    int32 StepGhostBlockedCellViolationCount = 0;
+    int32 StepGhostNoFlyViolationCount = 0;
+    int32 StepGhostOutOfGridViolationCount = 0;
+    double StepMinimumSeparationCells = -1.0;
+
+    for (const int32 MappoMissionId : MappoMissionIds)
+    {
+        const FIntVector* GhostCell = MappoEmergencyGhostCellsByMappoMissionId.Find(MappoMissionId);
+        if (!GhostCell)
+        {
+            continue;
+        }
+
+        if (!GridMap.IsInside(GhostCell->X, GhostCell->Y, GhostCell->Z))
+        {
+            StepGhostOutOfGridViolationCount++;
+            continue;
+        }
+        if (GridMap.IsBlocked(GhostCell->X, GhostCell->Y, GhostCell->Z))
+        {
+            StepGhostBlockedCellViolationCount++;
+        }
+        for (const FTemporalNoFlyZoneConfig& ZoneConfig : NoFlyZoneConfigs)
+        {
+            if (IsCellInsideNoFlyZoneAtTime(*GhostCell, MappoGhostSafetyTimeStep + 1, ZoneConfig))
+            {
+                StepGhostNoFlyViolationCount++;
+                break;
+            }
+        }
+    }
+
+    for (int32 I = 0; I < MappoMissionIds.Num(); ++I)
+    {
+        const int32 MissionA = MappoMissionIds[I];
+        const FIntVector* CurrentA = MappoEmergencyGhostCellsByMappoMissionId.Find(MissionA);
+        const FIntVector* PreviousA = CurrentGhostCellsByMissionId.Find(MissionA);
+        if (!CurrentA)
+        {
+            continue;
+        }
+
+        for (int32 J = I + 1; J < MappoMissionIds.Num(); ++J)
+        {
+            const int32 MissionB = MappoMissionIds[J];
+            const FIntVector* CurrentB = MappoEmergencyGhostCellsByMappoMissionId.Find(MissionB);
+            const FIntVector* PreviousB = CurrentGhostCellsByMissionId.Find(MissionB);
+            if (!CurrentB)
+            {
+                continue;
+            }
+
+            const int64 DX = static_cast<int64>(CurrentA->X) - static_cast<int64>(CurrentB->X);
+            const int64 DY = static_cast<int64>(CurrentA->Y) - static_cast<int64>(CurrentB->Y);
+            const int64 DZ = static_cast<int64>(CurrentA->Z) - static_cast<int64>(CurrentB->Z);
+            const double SeparationCells = FMath::Sqrt(static_cast<double>(DX * DX + DY * DY + DZ * DZ));
+            StepMinimumSeparationCells = (StepMinimumSeparationCells < 0.0)
+                ? SeparationCells
+                : FMath::Min(StepMinimumSeparationCells, SeparationCells);
+
+            if (*CurrentA == *CurrentB)
+            {
+                StepGhostVertexConflictCount++;
+            }
+            if (PreviousA && PreviousB && *CurrentA == *PreviousB && *CurrentB == *PreviousA)
+            {
+                StepGhostEdgeConflictCount++;
+            }
+            if (HasMappoDownwashConflict(*CurrentA, *CurrentB))
+            {
+                StepGhostDownwashConflictCount++;
+            }
+        }
+    }
+
+    if (StepMinimumSeparationCells < 0.0)
+    {
+        StepMinimumSeparationCells = 0.0;
+    }
+
+    const int32 StepGhostTotalViolationCount = StepGhostVertexConflictCount
+        + StepGhostEdgeConflictCount
+        + StepGhostDownwashConflictCount
+        + StepGhostBlockedCellViolationCount
+        + StepGhostNoFlyViolationCount
+        + StepGhostOutOfGridViolationCount;
+
+    MappoEmergencyGhostVertexConflictCount += StepGhostVertexConflictCount;
+    MappoEmergencyGhostEdgeConflictCount += StepGhostEdgeConflictCount;
+    MappoEmergencyGhostDownwashConflictCount += StepGhostDownwashConflictCount;
+    MappoEmergencyGhostBlockedCellViolationCount += StepGhostBlockedCellViolationCount;
+    MappoEmergencyGhostNoFlyViolationCount += StepGhostNoFlyViolationCount;
+    MappoEmergencyGhostOutOfGridViolationCount += StepGhostOutOfGridViolationCount;
+    MappoEmergencyGhostTotalViolationCount += StepGhostTotalViolationCount;
+    MappoEmergencyGhostMinimumSeparationCells = (MappoEmergencyGhostMinimumSeparationCells < 0.0)
+        ? StepMinimumSeparationCells
+        : FMath::Min(MappoEmergencyGhostMinimumSeparationCells, StepMinimumSeparationCells);
     const bool bAllGhostReached = TotalGhostCount > 0 && ReachedGhostCount == TotalGhostCount;
 
     MappoEmergencyGhostStepCount++;
@@ -2055,7 +2178,7 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
         ? FString::Join(GhostMoveDiagnostics, TEXT("; "))
         : FString(TEXT("none"));
 
-    UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] ghost step=%d action_version=%d consumed=%d moved=%d wait_moves=%d held_at_goal=%d repaired_ghost_moves=%d rejected_ghost_moves=%d remaining_queue=%d reached=%d/%d all_reached=%s diagnostics=%s"),
+    UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] ghost step=%d action_version=%d consumed=%d moved=%d wait_moves=%d held_at_goal=%d repaired_ghost_moves=%d rejected_ghost_moves=%d remaining_queue=%d reached=%d/%d all_reached=%s min_sep=%.3f vertex=%d edge=%d downwash=%d blocked=%d no_fly=%d out_of_grid=%d diagnostics=%s"),
         MappoEmergencyGhostStepCount,
         MappoEmergencyGhostBufferedActionVersion,
         ConsumedCount,
@@ -2068,6 +2191,13 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
         ReachedGhostCount,
         TotalGhostCount,
         bAllGhostReached ? TEXT("true") : TEXT("false"),
+        StepMinimumSeparationCells,
+        StepGhostVertexConflictCount,
+        StepGhostEdgeConflictCount,
+        StepGhostDownwashConflictCount,
+        StepGhostBlockedCellViolationCount,
+        StepGhostNoFlyViolationCount,
+        StepGhostOutOfGridViolationCount,
         *DiagnosticText);
 
     if (bMappoEmergencyWriteStructuredLogs && !MappoEmergencyJsonlLogPath.IsEmpty())
@@ -2088,6 +2218,14 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
         Event->SetNumberField(TEXT("reached"), ReachedGhostCount);
         Event->SetNumberField(TEXT("total"), TotalGhostCount);
         Event->SetBoolField(TEXT("all_reached"), bAllGhostReached);
+        Event->SetNumberField(TEXT("minimum_separation_cells"), StepMinimumSeparationCells);
+        Event->SetNumberField(TEXT("vertex_conflict_count"), StepGhostVertexConflictCount);
+        Event->SetNumberField(TEXT("edge_conflict_count"), StepGhostEdgeConflictCount);
+        Event->SetNumberField(TEXT("downwash_conflict_count"), StepGhostDownwashConflictCount);
+        Event->SetNumberField(TEXT("blocked_cell_violation_count"), StepGhostBlockedCellViolationCount);
+        Event->SetNumberField(TEXT("no_fly_violation_count"), StepGhostNoFlyViolationCount);
+        Event->SetNumberField(TEXT("out_of_grid_violation_count"), StepGhostOutOfGridViolationCount);
+        Event->SetNumberField(TEXT("total_violation_count"), StepGhostTotalViolationCount);
         TArray<TSharedPtr<FJsonValue>> DiagnosticValues;
         for (const FString& Diagnostic : GhostMoveDiagnostics)
         {
@@ -2167,6 +2305,14 @@ void APathPlanningDemoActor::MaybeLogMappoEmergencyGhostFinalSummary(int32 Reach
     Event->SetNumberField(TEXT("action_version"), MappoEmergencyGhostBufferedActionVersion);
     Event->SetNumberField(TEXT("sent_requests"), MappoEmergencySentRequestCount);
     Event->SetNumberField(TEXT("responses"), MappoEmergencyResponseCount);
+    Event->SetNumberField(TEXT("minimum_separation_cells"), MappoEmergencyGhostMinimumSeparationCells < 0.0 ? 0.0 : MappoEmergencyGhostMinimumSeparationCells);
+    Event->SetNumberField(TEXT("vertex_conflict_count"), MappoEmergencyGhostVertexConflictCount);
+    Event->SetNumberField(TEXT("edge_conflict_count"), MappoEmergencyGhostEdgeConflictCount);
+    Event->SetNumberField(TEXT("downwash_conflict_count"), MappoEmergencyGhostDownwashConflictCount);
+    Event->SetNumberField(TEXT("blocked_cell_violation_count"), MappoEmergencyGhostBlockedCellViolationCount);
+    Event->SetNumberField(TEXT("no_fly_violation_count"), MappoEmergencyGhostNoFlyViolationCount);
+    Event->SetNumberField(TEXT("out_of_grid_violation_count"), MappoEmergencyGhostOutOfGridViolationCount);
+    Event->SetNumberField(TEXT("total_violation_count"), MappoEmergencyGhostTotalViolationCount);
 
     FString JsonLine;
     TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
