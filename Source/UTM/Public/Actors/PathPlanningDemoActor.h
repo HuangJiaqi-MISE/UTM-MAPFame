@@ -56,6 +56,15 @@ enum class EExecutionReplanMode : uint8
 };
 
 UENUM(BlueprintType)
+enum class EMappoEmergencyRecoveryMode : uint8
+{
+    NoRecovery          UMETA(DisplayName = "No Emergency Recovery"),
+    RuleLocalAvoidance  UMETA(DisplayName = "Rule-Based Local Avoidance"),
+    MappoOnly           UMETA(DisplayName = "MAPPO Only"),
+    MappoShieldFallback UMETA(DisplayName = "MAPPO + Safety Filter + Degradation")
+};
+
+UENUM(BlueprintType)
 enum class ECityLayoutType : uint8
 {
     Manhattan,
@@ -625,6 +634,11 @@ private:
     FString GetMappoEmergencyLogDirectory() const;
     FString GetMappoActionNameFromDelta(const FIntVector& Delta) const;
 
+    FString GetMappoEmergencyRecoveryModeName() const;
+    FString GetMappoEmergencyServiceModeName() const;
+    bool ShouldUseMappoEmergencyHttpService() const;
+    bool ShouldUseMappoEmergencyGhostSafetyFilter() const;
+
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Spawn")
     TSubclassOf<ADroneActor> DroneClass;
@@ -779,6 +793,9 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
     bool bEnableMappoEmergencyClient = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
+    EMappoEmergencyRecoveryMode MappoEmergencyRecoveryMode = EMappoEmergencyRecoveryMode::MappoShieldFallback;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
     FString MappoEmergencyServiceUrl = TEXT("http://127.0.0.1:8765/step");

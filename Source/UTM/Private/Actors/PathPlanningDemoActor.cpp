@@ -658,6 +658,50 @@ namespace
     }
 }
 
+FString APathPlanningDemoActor::GetMappoEmergencyRecoveryModeName() const
+{
+    switch (MappoEmergencyRecoveryMode)
+    {
+    case EMappoEmergencyRecoveryMode::NoRecovery:
+        return TEXT("no_recovery");
+    case EMappoEmergencyRecoveryMode::RuleLocalAvoidance:
+        return TEXT("rule_local_avoidance");
+    case EMappoEmergencyRecoveryMode::MappoOnly:
+        return TEXT("mappo_only");
+    case EMappoEmergencyRecoveryMode::MappoShieldFallback:
+        return TEXT("mappo_shield_fallback");
+    default:
+        return TEXT("unknown");
+    }
+}
+
+FString APathPlanningDemoActor::GetMappoEmergencyServiceModeName() const
+{
+    switch (MappoEmergencyRecoveryMode)
+    {
+    case EMappoEmergencyRecoveryMode::NoRecovery:
+        return TEXT("no_recovery");
+    case EMappoEmergencyRecoveryMode::RuleLocalAvoidance:
+        return TEXT("rule");
+    case EMappoEmergencyRecoveryMode::MappoOnly:
+        return TEXT("mappo");
+    case EMappoEmergencyRecoveryMode::MappoShieldFallback:
+        return TEXT("mappo_shield");
+    default:
+        return TEXT("mappo_shield");
+    }
+}
+
+bool APathPlanningDemoActor::ShouldUseMappoEmergencyHttpService() const
+{
+    return MappoEmergencyRecoveryMode != EMappoEmergencyRecoveryMode::NoRecovery;
+}
+
+bool APathPlanningDemoActor::ShouldUseMappoEmergencyGhostSafetyFilter() const
+{
+    return MappoEmergencyRecoveryMode == EMappoEmergencyRecoveryMode::MappoShieldFallback;
+}
+
 void APathPlanningDemoActor::MaybeTriggerMappoEmergencyRequest()
 {
     if (!bEnableMappoEmergencyClient || bMappoEmergencySummaryLogged)
@@ -676,10 +720,18 @@ void APathPlanningDemoActor::MaybeTriggerMappoEmergencyRequest()
         MappoEmergencySentRequestCount = 0;
         MappoEmergencySkippedInFlightCount = 0;
         InitializeMappoEmergencyLogFiles();
-        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] shadow trigger opened at UE time_step=%d, continuous=%s, max_requests=%d"),
+        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] shadow trigger opened at UE time_step=%d, recovery_mode=%s, service_mode=%s, continuous=%s, max_requests=%d"),
             CurrentExecutionTimeStep,
+            *GetMappoEmergencyRecoveryModeName(),
+            *GetMappoEmergencyServiceModeName(),
             bMappoEmergencyContinuousShadowMode ? TEXT("true") : TEXT("false"),
             bMappoEmergencyContinuousShadowMode ? FMath::Max(1, MappoEmergencyShadowRequestCount) : 1);
+    }
+    if (!ShouldUseMappoEmergencyHttpService())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] recovery_mode=%s does not send service requests"), *GetMappoEmergencyRecoveryModeName());
+        MaybeLogMappoEmergencySummary(true);
+        return;
     }
 
     if (!bMappoEmergencyContinuousShadowMode && MappoEmergencySentRequestCount >= 1)
@@ -718,6 +770,12 @@ void APathPlanningDemoActor::TriggerMappoEmergencySnapshot()
     {
         MappoEmergencySkippedInFlightCount++;
         UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] request already in flight; skipping trigger. skipped_in_flight=%d"), MappoEmergencySkippedInFlightCount);
+        return;
+    }
+    if (!ShouldUseMappoEmergencyHttpService())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] recovery_mode=%s does not send service requests"), *GetMappoEmergencyRecoveryModeName());
+        MaybeLogMappoEmergencySummary(true);
         return;
     }
 
@@ -771,8 +829,10 @@ void APathPlanningDemoActor::TriggerMappoEmergencySnapshot()
     bMappoEmergencyRequestInFlight = true;
     MappoEmergencyRequestStartSeconds = FPlatformTime::Seconds();
 
-    UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] sending snapshot request_id=%d to %s at UE time_step=%d, bytes=%d, sent=%d/%d"),
+    UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] sending snapshot request_id=%d mode=%s service_mode=%s to %s at UE time_step=%d, bytes=%d, sent=%d/%d"),
         RequestId,
+        *GetMappoEmergencyRecoveryModeName(),
+        *GetMappoEmergencyServiceModeName(),
         *MappoEmergencyServiceUrl,
         CurrentExecutionTimeStep,
         RequestJson.Len(),
@@ -838,6 +898,8 @@ bool APathPlanningDemoActor::BuildMappoEmergencyRequestJson(FString& OutJson, TA
 
     TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
     Root->SetStringField(TEXT("episode_id"), FString::Printf(TEXT("ue_emergency_%s_t%d"), *GetName(), MappoRequestTimeStep));
+    Root->SetStringField(TEXT("mode"), GetMappoEmergencyServiceModeName());
+    Root->SetStringField(TEXT("ue_recovery_mode"), GetMappoEmergencyRecoveryModeName());
     Root->SetNumberField(TEXT("time_step"), MappoRequestTimeStep);
     Root->SetNumberField(TEXT("max_time_steps"), FMath::Max(1, MappoEmergencyMaxTimeSteps));
     Root->SetNumberField(TEXT("observation_radius"), FMath::Max(1, MappoEmergencyObservationRadius));
@@ -1077,7 +1139,7 @@ void APathPlanningDemoActor::HandleMappoEmergencyResponse(FHttpRequestPtr Reques
     {
         if (bMappoEmergencySummaryPendingAfterInFlight)
         {
-    bMappoEmergencySummaryPendingAfterInFlight = false;
+            bMappoEmergencySummaryPendingAfterInFlight = false;
             MaybeLogMappoEmergencySummary(true);
         }
         else
@@ -1117,6 +1179,43 @@ void APathPlanningDemoActor::HandleMappoEmergencyResponse(FHttpRequestPtr Reques
         *Mode,
         MappoEmergencyPendingRequestId,
         MappoEmergencySkippedInFlightCount);
+
+    FString ErrorMessage;
+    const bool bErrorResponse = ResponseCode < 200 || ResponseCode >= 300 || Root->TryGetStringField(TEXT("error"), ErrorMessage);
+    if (bErrorResponse)
+    {
+        MappoEmergencyFailedResponseCount++;
+        MappoEmergencyRoundTripTotalMs += ElapsedMs;
+        MappoEmergencyRoundTripMinMs = (MappoEmergencyRoundTripMinMs <= 0.0) ? ElapsedMs : FMath::Min(MappoEmergencyRoundTripMinMs, ElapsedMs);
+        MappoEmergencyRoundTripMaxMs = FMath::Max(MappoEmergencyRoundTripMaxMs, ElapsedMs);
+        UE_LOG(LogTemp, Error, TEXT("[MAPPO Emergency] service error terminates ghost rollout: code=%d request_id=%d error=%s"),
+            ResponseCode,
+            MappoEmergencyPendingRequestId,
+            ErrorMessage.IsEmpty() ? TEXT("unknown") : *ErrorMessage);
+        AppendMappoEmergencyStructuredLogs(Root, ResponseCode, ElapsedMs);
+        for (TPair<int32, TArray<FString>>& KVP : MappoEmergencyActionQueueByMappoMissionId)
+        {
+            KVP.Value.Reset();
+        }
+        bMappoEmergencySummaryPendingAfterInFlight = false;
+        MaybeLogMappoEmergencySummary(true);
+        if (bMappoEmergencyEnableGhostExecution && MappoEmergencyGhostCellsByMappoMissionId.Num() > 0)
+        {
+            int32 ReachedGhostCount = 0;
+            int32 TotalGhostCount = 0;
+            for (const TPair<int32, FIntVector>& KVP : MappoEmergencyGhostCellsByMappoMissionId)
+            {
+                TotalGhostCount++;
+                const FIntVector* GoalCell = MappoEmergencyGhostGoalCellsByMappoMissionId.Find(KVP.Key);
+                if (GoalCell && KVP.Value == *GoalCell)
+                {
+                    ReachedGhostCount++;
+                }
+            }
+            MaybeLogMappoEmergencyGhostFinalSummary(ReachedGhostCount, TotalGhostCount, 0, true);
+        }
+        return;
+    }
 
     const TSharedPtr<FJsonObject>* TimingObject = nullptr;
     if (Root->TryGetObjectField(TEXT("timing_ms"), TimingObject) && TimingObject && TimingObject->IsValid())
@@ -1219,9 +1318,9 @@ void APathPlanningDemoActor::InitializeMappoEmergencyLogFiles()
     MappoEmergencyCsvLogPath = FPaths::Combine(LogDir, FString::Printf(TEXT("mappo_shadow_%s_%s.csv"), *SafeName, *Stamp));
     MappoEmergencyJsonlLogPath = FPaths::Combine(LogDir, FString::Printf(TEXT("mappo_shadow_%s_%s.jsonl"), *SafeName, *Stamp));
 
-    const FString Header = TEXT("request_id,ue_time_step,response_code,round_trip_ms,service_total_ms,service_policy_ms,service_model_forward_ms,service_observation_build_ms,service_safety_filter_ms,mode,mappo_mission_id,ue_mission_id,agent_id,current_x,current_y,current_z,goal_x,goal_y,goal_z,selected_action,raw_policy_action,safety_filter_status,fallback_used,reject_reason,skipped_in_flight_count\n");
+    const FString Header = TEXT("request_id,ue_time_step,response_code,round_trip_ms,service_total_ms,service_policy_ms,service_model_forward_ms,service_observation_build_ms,service_safety_filter_ms,mode,recovery_mode,mappo_mission_id,ue_mission_id,agent_id,current_x,current_y,current_z,goal_x,goal_y,goal_z,selected_action,raw_policy_action,safety_filter_status,fallback_used,reject_reason,skipped_in_flight_count\n");
     FFileHelper::SaveStringToFile(Header, *MappoEmergencyCsvLogPath, FFileHelper::EEncodingOptions::ForceUTF8);
-    FFileHelper::SaveStringToFile(TEXT(""), *MappoEmergencyJsonlLogPath, FFileHelper::EEncodingOptions::ForceUTF8);
+    FFileHelper::SaveStringToFile(TEXT(""), *MappoEmergencyJsonlLogPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
     bMappoEmergencyCsvHeaderWritten = true;
 
     UE_LOG(LogTemp, Warning, TEXT("[MAPPO Emergency] structured logs: csv=%s jsonl=%s"),
@@ -1421,6 +1520,8 @@ void APathPlanningDemoActor::MaybeLogMappoEmergencySummary(bool bForce)
         {
             TSharedRef<FJsonObject> Summary = MakeShared<FJsonObject>();
             Summary->SetStringField(TEXT("event"), TEXT("mappo_emergency_summary"));
+            Summary->SetStringField(TEXT("recovery_mode"), GetMappoEmergencyRecoveryModeName());
+            Summary->SetStringField(TEXT("service_mode"), GetMappoEmergencyServiceModeName());
             Summary->SetBoolField(TEXT("forced"), bForce);
             Summary->SetNumberField(TEXT("target_requests"), TargetRequestCount);
             Summary->SetNumberField(TEXT("sent_requests"), MappoEmergencySentRequestCount);
@@ -1444,7 +1545,7 @@ void APathPlanningDemoActor::MaybeLogMappoEmergencySummary(bool bForce)
             if (FJsonSerializer::Serialize(Summary, Writer))
             {
                 JsonLine += LINE_TERMINATOR;
-                FFileHelper::SaveStringToFile(JsonLine, *MappoEmergencyJsonlLogPath, FFileHelper::EEncodingOptions::ForceUTF8, &IFileManager::Get(), FILEWRITE_Append);
+                FFileHelper::SaveStringToFile(JsonLine, *MappoEmergencyJsonlLogPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append);
             }
         }
     }
@@ -1542,8 +1643,14 @@ void APathPlanningDemoActor::UpdateMappoEmergencyActionBuffer(const TSharedPtr<F
         TEXT("+Z"),
         TEXT("-Z")
     };
-    auto BuildMappoPolicyActionEntry = [&PolicyActionNames](const TSharedPtr<FJsonObject>& Action, const FString& SelectedAction) -> FString
+    const bool bUseGhostSafetyFilter = ShouldUseMappoEmergencyGhostSafetyFilter();
+    auto BuildMappoPolicyActionEntry = [&PolicyActionNames, bUseGhostSafetyFilter](const TSharedPtr<FJsonObject>& Action, const FString& SelectedAction) -> FString
     {
+        if (!bUseGhostSafetyFilter)
+        {
+            return SelectedAction;
+        }
+
         TArray<TPair<FString, double>> ScoredActions;
         const TSharedPtr<FJsonObject>* RawPolicyProbs = nullptr;
         if (Action.IsValid() && Action->TryGetObjectField(TEXT("raw_policy_probs"), RawPolicyProbs) && RawPolicyProbs && RawPolicyProbs->IsValid())
@@ -1810,27 +1917,11 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
         }
         else
         {
-            const FString PrimaryActionName = CandidateActionNames[0];
-            const FIntVector PrimaryCandidateCell = PreviousGhostCell + GetMappoDeltaFromActionName(PrimaryActionName);
-            FString PrimaryRejectReason;
-            bool bAppliedCandidate = false;
-
-            for (int32 CandidateIndex = 0; CandidateIndex < CandidateActionNames.Num(); ++CandidateIndex)
+            if (!ShouldUseMappoEmergencyGhostSafetyFilter())
             {
-                const FString CandidateActionName = CandidateActionNames[CandidateIndex];
-                const FIntVector Delta = GetMappoDeltaFromActionName(CandidateActionName);
+                const FString RawActionName = CandidateActionNames[0];
+                const FIntVector Delta = GetMappoDeltaFromActionName(RawActionName);
                 const FIntVector CandidateCell = PreviousGhostCell + Delta;
-                const FString RejectReason = GetCandidateRejectReason(MappoMissionId, PreviousGhostCell, CandidateCell);
-                if (CandidateIndex == 0)
-                {
-                    PrimaryRejectReason = RejectReason;
-                }
-                if (!RejectReason.IsEmpty())
-                {
-                    continue;
-                }
-
-                bAppliedCandidate = true;
                 if (Delta == FIntVector::ZeroValue)
                 {
                     WaitMoveCount++;
@@ -1840,47 +1931,81 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
                     MovedCount++;
                     *GhostCellPtr = CandidateCell;
                 }
+            }
+            else
+            {
+                const FString PrimaryActionName = CandidateActionNames[0];
+                const FIntVector PrimaryCandidateCell = PreviousGhostCell + GetMappoDeltaFromActionName(PrimaryActionName);
+                FString PrimaryRejectReason;
+                bool bAppliedCandidate = false;
 
-                if (CandidateIndex > 0)
+                for (int32 CandidateIndex = 0; CandidateIndex < CandidateActionNames.Num(); ++CandidateIndex)
                 {
-                    RepairedGhostMoveCount++;
+                    const FString CandidateActionName = CandidateActionNames[CandidateIndex];
+                    const FIntVector Delta = GetMappoDeltaFromActionName(CandidateActionName);
+                    const FIntVector CandidateCell = PreviousGhostCell + Delta;
+                    const FString RejectReason = GetCandidateRejectReason(MappoMissionId, PreviousGhostCell, CandidateCell);
+                    if (CandidateIndex == 0)
+                    {
+                        PrimaryRejectReason = RejectReason;
+                    }
+                    if (!RejectReason.IsEmpty())
+                    {
+                        continue;
+                    }
+
+                    bAppliedCandidate = true;
+                    if (Delta == FIntVector::ZeroValue)
+                    {
+                        WaitMoveCount++;
+                    }
+                    else
+                    {
+                        MovedCount++;
+                        *GhostCellPtr = CandidateCell;
+                    }
+
+                    if (CandidateIndex > 0)
+                    {
+                        RepairedGhostMoveCount++;
+                        if (GhostMoveDiagnostics.Num() < 5)
+                        {
+                            GhostMoveDiagnostics.Add(FString::Printf(
+                                TEXT("mission=%d primary_action=%s selected_action=%s from=%s primary_candidate=%s reason=%s repair_rank=%d"),
+                                MappoMissionId,
+                                *PrimaryActionName,
+                                *CandidateActionName,
+                                *FormatMappoCellForLog(PreviousGhostCell),
+                                *FormatMappoCellForLog(PrimaryCandidateCell),
+                                PrimaryRejectReason.IsEmpty() ? TEXT("unknown") : *PrimaryRejectReason,
+                                CandidateIndex));
+                        }
+                    }
+                    else if (Delta == FIntVector::ZeroValue && GhostMoveDiagnostics.Num() < 5)
+                    {
+                        GhostMoveDiagnostics.Add(FString::Printf(
+                            TEXT("mission=%d action=%s from=%s candidate=%s reason=wait"),
+                            MappoMissionId,
+                            *CandidateActionName,
+                            *FormatMappoCellForLog(PreviousGhostCell),
+                            *FormatMappoCellForLog(CandidateCell)));
+                    }
+                    break;
+                }
+
+                if (!bAppliedCandidate)
+                {
+                    RejectedGhostMoveCount++;
                     if (GhostMoveDiagnostics.Num() < 5)
                     {
                         GhostMoveDiagnostics.Add(FString::Printf(
-                            TEXT("mission=%d primary_action=%s selected_action=%s from=%s primary_candidate=%s reason=%s repair_rank=%d"),
+                            TEXT("mission=%d primary_action=%s from=%s primary_candidate=%s reason=%s"),
                             MappoMissionId,
                             *PrimaryActionName,
-                            *CandidateActionName,
                             *FormatMappoCellForLog(PreviousGhostCell),
                             *FormatMappoCellForLog(PrimaryCandidateCell),
-                            PrimaryRejectReason.IsEmpty() ? TEXT("unknown") : *PrimaryRejectReason,
-                            CandidateIndex));
+                            PrimaryRejectReason.IsEmpty() ? TEXT("no_safe_policy_candidate") : *PrimaryRejectReason));
                     }
-                }
-                else if (Delta == FIntVector::ZeroValue && GhostMoveDiagnostics.Num() < 5)
-                {
-                    GhostMoveDiagnostics.Add(FString::Printf(
-                        TEXT("mission=%d action=%s from=%s candidate=%s reason=wait"),
-                        MappoMissionId,
-                        *CandidateActionName,
-                        *FormatMappoCellForLog(PreviousGhostCell),
-                        *FormatMappoCellForLog(CandidateCell)));
-                }
-                break;
-            }
-
-            if (!bAppliedCandidate)
-            {
-                RejectedGhostMoveCount++;
-                if (GhostMoveDiagnostics.Num() < 5)
-                {
-                    GhostMoveDiagnostics.Add(FString::Printf(
-                        TEXT("mission=%d primary_action=%s from=%s primary_candidate=%s reason=%s"),
-                        MappoMissionId,
-                        *PrimaryActionName,
-                        *FormatMappoCellForLog(PreviousGhostCell),
-                        *FormatMappoCellForLog(PrimaryCandidateCell),
-                        PrimaryRejectReason.IsEmpty() ? TEXT("no_safe_policy_candidate") : *PrimaryRejectReason));
                 }
             }
         }
@@ -1939,6 +2064,8 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
     {
         TSharedRef<FJsonObject> Event = MakeShared<FJsonObject>();
         Event->SetStringField(TEXT("event"), TEXT("mappo_emergency_ghost_step"));
+        Event->SetStringField(TEXT("recovery_mode"), GetMappoEmergencyRecoveryModeName());
+        Event->SetStringField(TEXT("service_mode"), GetMappoEmergencyServiceModeName());
         Event->SetNumberField(TEXT("ghost_step"), MappoEmergencyGhostStepCount);
         Event->SetNumberField(TEXT("action_version"), MappoEmergencyGhostBufferedActionVersion);
         Event->SetNumberField(TEXT("consumed"), ConsumedCount);
@@ -1964,7 +2091,7 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
         if (FJsonSerializer::Serialize(Event, Writer))
         {
             JsonLine += LINE_TERMINATOR;
-            FFileHelper::SaveStringToFile(JsonLine, *MappoEmergencyJsonlLogPath, FFileHelper::EEncodingOptions::ForceUTF8, &IFileManager::Get(), FILEWRITE_Append);
+            FFileHelper::SaveStringToFile(JsonLine, *MappoEmergencyJsonlLogPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append);
         }
     }
 
@@ -2018,6 +2145,8 @@ void APathPlanningDemoActor::MaybeLogMappoEmergencyGhostFinalSummary(int32 Reach
 
     TSharedRef<FJsonObject> Event = MakeShared<FJsonObject>();
     Event->SetStringField(TEXT("event"), TEXT("mappo_emergency_ghost_final"));
+    Event->SetStringField(TEXT("recovery_mode"), GetMappoEmergencyRecoveryModeName());
+    Event->SetStringField(TEXT("service_mode"), GetMappoEmergencyServiceModeName());
     Event->SetNumberField(TEXT("reached"), ReachedGhostCount);
     Event->SetNumberField(TEXT("total"), TotalGhostCount);
     Event->SetBoolField(TEXT("all_reached"), bAllGhostReached);
@@ -2035,7 +2164,7 @@ void APathPlanningDemoActor::MaybeLogMappoEmergencyGhostFinalSummary(int32 Reach
     if (FJsonSerializer::Serialize(Event, Writer))
     {
         JsonLine += LINE_TERMINATOR;
-        FFileHelper::SaveStringToFile(JsonLine, *MappoEmergencyJsonlLogPath, FFileHelper::EEncodingOptions::ForceUTF8, &IFileManager::Get(), FILEWRITE_Append);
+        FFileHelper::SaveStringToFile(JsonLine, *MappoEmergencyJsonlLogPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append);
     }
 }
 void APathPlanningDemoActor::DrawMappoEmergencyGhostState() const
@@ -2203,6 +2332,7 @@ void APathPlanningDemoActor::AppendMappoEmergencyStructuredLogs(const TSharedPtr
             AddMappoCsvField(Fields, FString::Printf(TEXT("%.3f"), ServiceObservationMs));
             AddMappoCsvField(Fields, FString::Printf(TEXT("%.3f"), ServiceSafetyMs));
             AddMappoCsvField(Fields, Mode);
+            AddMappoCsvField(Fields, GetMappoEmergencyRecoveryModeName());
             AddMappoCsvField(Fields, FString::FromInt(MappoMissionId));
             AddMappoCsvField(Fields, FString::FromInt(UeMissionId));
             AddMappoCsvField(Fields, AgentId);
@@ -2224,7 +2354,7 @@ void APathPlanningDemoActor::AppendMappoEmergencyStructuredLogs(const TSharedPtr
 
         if (!CsvText.IsEmpty())
         {
-            FFileHelper::SaveStringToFile(CsvText, *MappoEmergencyCsvLogPath, FFileHelper::EEncodingOptions::ForceUTF8, &IFileManager::Get(), FILEWRITE_Append);
+            FFileHelper::SaveStringToFile(CsvText, *MappoEmergencyCsvLogPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append);
         }
     }
 
@@ -2232,6 +2362,8 @@ void APathPlanningDemoActor::AppendMappoEmergencyStructuredLogs(const TSharedPtr
     {
         TSharedRef<FJsonObject> Event = MakeShared<FJsonObject>();
         Event->SetStringField(TEXT("event"), TEXT("mappo_emergency_response"));
+        Event->SetStringField(TEXT("recovery_mode"), GetMappoEmergencyRecoveryModeName());
+        Event->SetStringField(TEXT("service_mode"), GetMappoEmergencyServiceModeName());
         Event->SetNumberField(TEXT("request_id"), MappoEmergencyPendingRequestId);
         Event->SetNumberField(TEXT("ue_time_step"), MappoEmergencyPendingTimeStep);
         Event->SetNumberField(TEXT("response_code"), ResponseCode);
@@ -2251,7 +2383,7 @@ void APathPlanningDemoActor::AppendMappoEmergencyStructuredLogs(const TSharedPtr
         if (FJsonSerializer::Serialize(Event, Writer))
         {
             JsonLine += LINE_TERMINATOR;
-            FFileHelper::SaveStringToFile(JsonLine, *MappoEmergencyJsonlLogPath, FFileHelper::EEncodingOptions::ForceUTF8, &IFileManager::Get(), FILEWRITE_Append);
+            FFileHelper::SaveStringToFile(JsonLine, *MappoEmergencyJsonlLogPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append);
         }
     }
 }

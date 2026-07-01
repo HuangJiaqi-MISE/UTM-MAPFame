@@ -70,6 +70,7 @@ class EmergencyRecoveryService:
 
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
+        mode = self._resolve_mode(payload)
         request = parse_request(payload)
         action_horizon = max(1, min(30, int(payload.get("action_horizon", 1))))
 
@@ -93,7 +94,7 @@ class EmergencyRecoveryService:
                 model_load_ms,
                 model_forward_ms,
                 filter_ms,
-            ) = self._decide_once(rollout_request)
+            ) = self._decide_once(rollout_request, mode=mode)
 
             actions = decisions_to_response_items(decisions, policy_probs)
             if first_actions is None:
@@ -118,7 +119,7 @@ class EmergencyRecoveryService:
         return {
             "episode_id": request.episode_id,
             "time_step": request.time_step,
-            "mode": self.mode,
+            "mode": mode,
             "action_horizon_length": action_horizon,
             "request_stats": {
                 "blocked_cells": len(request.blocked_cells),
@@ -139,9 +140,18 @@ class EmergencyRecoveryService:
             },
         }
 
+    def _resolve_mode(self, payload: dict[str, Any]) -> str:
+        mode = str(payload.get("mode") or self.mode)
+        if mode not in MODES:
+            raise ValueError(f"unsupported request mode {mode!r}; expected one of {MODES}")
+        if mode in ("mappo", "mappo_shield") and self.model_dir is None:
+            raise ValueError(f"model_dir is required for request mode {mode!r}")
+        return mode
+
     def _decide_once(
         self,
         request: EmergencyStepRequest,
+        mode: str,
     ) -> tuple[
         list[Any],
         dict[str, list[float]] | None,
@@ -161,7 +171,7 @@ class EmergencyRecoveryService:
         model_load_ms = 0.0
         model_forward_ms = 0.0
 
-        if self.mode in ("mappo", "mappo_shield"):
+        if mode in ("mappo", "mappo_shield"):
             inference_started = time.perf_counter()
             policy_probs, model_load_ms, model_forward_ms = self._predict(
                 request,
@@ -171,11 +181,11 @@ class EmergencyRecoveryService:
             inference_ms = _elapsed_ms(inference_started)
 
         filter_started = time.perf_counter()
-        if self.mode == "no_recovery":
+        if mode == "no_recovery":
             decisions = select_no_recovery_actions(request)
-        elif self.mode == "rule":
+        elif mode == "rule":
             decisions = select_rule_based_actions(request)
-        elif self.mode == "mappo":
+        elif mode == "mappo":
             assert policy_probs is not None
             decisions = select_raw_mappo_actions(request, policy_probs)
         else:
