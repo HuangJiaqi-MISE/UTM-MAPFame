@@ -813,19 +813,19 @@ public:
     int32 MappoEmergencyMaxTimeSteps = 240;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
-    bool bMappoEmergencyIncludeBlockedCells = false;
+    bool bMappoEmergencyIncludeBlockedCells = true;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "0"))
-    int32 MappoEmergencyMaxBlockedCells = 5000;
+    int32 MappoEmergencyMaxBlockedCells = 500;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
-    bool bMappoEmergencyContinuousShadowMode = false;
+    bool bMappoEmergencyContinuousShadowMode = true;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "1"))
     int32 MappoEmergencyShadowRequestCount = 30;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "1"))
-    int32 MappoEmergencyRequestIntervalSteps = 1;
+    int32 MappoEmergencyRequestIntervalSteps = 15;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency")
     bool bMappoEmergencyWriteStructuredLogs = true;
@@ -855,7 +855,7 @@ public:
     FVector MappoEmergencyGhostWorldOffset = FVector(0.f, 0.f, 120.f);
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MAPPO Emergency", meta = (ClampMin = "1", ClampMax = "30"))
-    int32 MappoEmergencyActionHorizon = 5;
+    int32 MappoEmergencyActionHorizon = 15;
 
     // 无人机数量+序号配置
     // 如果不使用 MissionConfigs，则从场景里手动配置 Start_i / Goal_i 来指定任务数量和起终点
@@ -882,7 +882,7 @@ private:
     TUniquePtr<IPathPlannerBase> CreatePlannerByType() const;
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planner")
-    EPlannerType PlannerType = EPlannerType::AStar;
+    EPlannerType PlannerType = EPlannerType::LaCAMUTM;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planner", meta = (ClampMin = "1.0"))
     float ECBSSuboptimalityBound = 1.5f;

@@ -1523,6 +1523,16 @@ void APathPlanningDemoActor::MaybeLogMappoEmergencySummary(bool bForce)
             Summary->SetStringField(TEXT("recovery_mode"), GetMappoEmergencyRecoveryModeName());
             Summary->SetStringField(TEXT("service_mode"), GetMappoEmergencyServiceModeName());
             Summary->SetBoolField(TEXT("forced"), bForce);
+            Summary->SetNumberField(TEXT("trigger_time_step"), MappoEmergencyTriggerTimeStep);
+            Summary->SetNumberField(TEXT("agent_count"), MappoEmergencyAgentCount);
+            Summary->SetNumberField(TEXT("observation_radius"), MappoEmergencyObservationRadius);
+            Summary->SetNumberField(TEXT("max_time_steps"), MappoEmergencyMaxTimeSteps);
+            Summary->SetNumberField(TEXT("action_horizon"), MappoEmergencyActionHorizon);
+            Summary->SetBoolField(TEXT("continuous_shadow_mode"), bMappoEmergencyContinuousShadowMode);
+            Summary->SetNumberField(TEXT("shadow_request_count"), MappoEmergencyShadowRequestCount);
+            Summary->SetNumberField(TEXT("request_interval_steps"), MappoEmergencyRequestIntervalSteps);
+            Summary->SetBoolField(TEXT("include_blocked_cells"), bMappoEmergencyIncludeBlockedCells);
+            Summary->SetNumberField(TEXT("max_blocked_cells"), MappoEmergencyMaxBlockedCells);
             Summary->SetNumberField(TEXT("target_requests"), TargetRequestCount);
             Summary->SetNumberField(TEXT("sent_requests"), MappoEmergencySentRequestCount);
             Summary->SetNumberField(TEXT("responses"), MappoEmergencyResponseCount);
@@ -4478,6 +4488,79 @@ void APathPlanningDemoActor::LogStructuredExperimentSummaryJson() const
     }
 
     UE_LOG(LogTemp, Warning, TEXT("[StructuredExperimentJSON] %s"), *JsonString);
+
+    if (!bMappoEmergencyWriteStructuredLogs || MappoEmergencyJsonlLogPath.IsEmpty())
+    {
+        return;
+    }
+
+    TSharedPtr<FJsonObject> StructuredSummary;
+    const TSharedRef<TJsonReader<TCHAR>> Reader = TJsonReaderFactory<TCHAR>::Create(JsonString);
+    if (!FJsonSerializer::Deserialize(Reader, StructuredSummary) || !StructuredSummary.IsValid())
+    {
+        return;
+    }
+
+    TSharedRef<FJsonObject> Event = MakeShared<FJsonObject>();
+    Event->SetStringField(TEXT("event"), TEXT("structured_experiment_summary"));
+    Event->SetStringField(TEXT("recovery_mode"), GetMappoEmergencyRecoveryModeName());
+    Event->SetStringField(TEXT("service_mode"), GetMappoEmergencyServiceModeName());
+
+    FString StringValue;
+    if (StructuredSummary->TryGetStringField(TEXT("run_id"), StringValue))
+    {
+        Event->SetStringField(TEXT("run_id"), StringValue);
+    }
+    if (StructuredSummary->TryGetStringField(TEXT("phase"), StringValue))
+    {
+        Event->SetStringField(TEXT("phase"), StringValue);
+    }
+    if (StructuredSummary->TryGetStringField(TEXT("group_id"), StringValue))
+    {
+        Event->SetStringField(TEXT("group_id"), StringValue);
+    }
+    if (StructuredSummary->TryGetStringField(TEXT("group_name"), StringValue))
+    {
+        Event->SetStringField(TEXT("group_name"), StringValue);
+    }
+    if (StructuredSummary->TryGetStringField(TEXT("scenario_name"), StringValue))
+    {
+        Event->SetStringField(TEXT("scenario_name"), StringValue);
+    }
+    if (StructuredSummary->TryGetStringField(TEXT("map_type"), StringValue))
+    {
+        Event->SetStringField(TEXT("map_type"), StringValue);
+    }
+
+    double NumberValue = 0.0;
+    if (StructuredSummary->TryGetNumberField(TEXT("city_seed"), NumberValue))
+    {
+        Event->SetNumberField(TEXT("city_seed"), NumberValue);
+    }
+    if (StructuredSummary->TryGetNumberField(TEXT("random_seed"), NumberValue))
+    {
+        Event->SetNumberField(TEXT("random_seed"), NumberValue);
+    }
+    if (StructuredSummary->TryGetNumberField(TEXT("execution_random_seed"), NumberValue))
+    {
+        Event->SetNumberField(TEXT("execution_random_seed"), NumberValue);
+        Event->SetNumberField(TEXT("mission_seed"), NumberValue);
+    }
+    if (StructuredSummary->TryGetNumberField(TEXT("agent_count"), NumberValue))
+    {
+        Event->SetNumberField(TEXT("agent_count"), NumberValue);
+    }
+
+    Event->SetObjectField(TEXT("summary"), StructuredSummary.ToSharedRef());
+
+    FString JsonLine;
+    TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+        TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&JsonLine);
+    if (FJsonSerializer::Serialize(Event, Writer))
+    {
+        JsonLine += LINE_TERMINATOR;
+        FFileHelper::SaveStringToFile(JsonLine, *MappoEmergencyJsonlLogPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM, &IFileManager::Get(), FILEWRITE_Append);
+    }
 }
 
 
