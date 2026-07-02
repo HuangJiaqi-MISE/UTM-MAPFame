@@ -15,19 +15,15 @@
 
 #include "Actors/MissionMarkerActor.h"
 #include "Engine/StaticMeshActor.h"
-#include "Dom/JsonObject.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/ScopeExit.h"
+#include "Reporting/ExperimentReporter.h"
 
 // 障碍物建筑构建
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 
 #include "HAL/PlatformTime.h"
-#include "Policies/CondensedJsonPrintPolicy.h"
-#include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
-
 namespace
 {
     constexpr int32 MaxLoggedPathPoints = 64;
@@ -2598,101 +2594,88 @@ FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
         ExecutionReplanTimingStats.LocalMaxTimeMs,
         ExecutionReplanTimingStats.GlobalMaxTimeMs);
 
-    TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-    Root->SetStringField(TEXT("run_id"), RunId);
-    Root->SetStringField(TEXT("phase"), Phase);
-    Root->SetStringField(TEXT("group_id"), GroupId);
-    Root->SetStringField(TEXT("group_name"), GroupName);
-    Root->SetStringField(TEXT("scenario_name"), ScenarioName);
-    Root->SetStringField(TEXT("map_type"), MapTypeName);
-    Root->SetStringField(TEXT("planner_name"), PlannerName);
-    Root->SetStringField(TEXT("planner_type"), PlannerName);
-    Root->SetStringField(TEXT("scheduler_type"), FMissionSchedulerRegistry::GetSchedulerTypeName(MissionSchedulerType));
-    Root->SetStringField(TEXT("delay_mode"), DelayModeName);
-    Root->SetStringField(TEXT("replan_mode"), ReplanModeName);
-    Root->SetStringField(TEXT("execution_replan_mode"), ReplanModeName);
-    Root->SetStringField(TEXT("notes"), ExperimentNotes);
+    FExperimentReportContext ReportContext;
+    ReportContext.RunId = RunId;
+    ReportContext.Phase = Phase;
+    ReportContext.GroupId = GroupId;
+    ReportContext.GroupName = GroupName;
+    ReportContext.ScenarioName = ScenarioName;
+    ReportContext.MapTypeName = MapTypeName;
+    ReportContext.PlannerName = PlannerName;
+    ReportContext.SchedulerTypeName = FMissionSchedulerRegistry::GetSchedulerTypeName(MissionSchedulerType);
+    ReportContext.DelayModeName = DelayModeName;
+    ReportContext.ReplanModeName = ReplanModeName;
+    ReportContext.Notes = ExperimentNotes;
 
-    Root->SetBoolField(TEXT("planning_success"), LastPlanningStats.bSuccess);
-    Root->SetBoolField(TEXT("planning_multi_agent"), LastPlanningStats.bMultiAgent);
-    Root->SetBoolField(TEXT("execution_summary_available"), bHasExecutionSummary);
-    Root->SetBoolField(TEXT("alignment_enabled"), bEnableDiscreteAlignment);
-    Root->SetBoolField(TEXT("b_enable_discrete_alignment"), bEnableDiscreteAlignment);
-    Root->SetBoolField(TEXT("conflict_aware_alignment"), bEnableConflictAwareAlignment);
-    Root->SetBoolField(TEXT("b_enable_conflict_aware_alignment"), bEnableConflictAwareAlignment);
-    Root->SetBoolField(TEXT("b_alignment_allow_recovery_moves"), bAlignmentAllowRecoveryMoves);
-    Root->SetBoolField(TEXT("b_alignment_hold_position_on_failure"), bAlignmentHoldPositionOnFailure);
-    Root->SetBoolField(TEXT("b_validate_paths_against_no_fly_zones"), bValidatePathsAgainstNoFlyZones);
-    Root->SetBoolField(TEXT("no_fly_validation_clear"), bNoFlyValidationClear);
+    ReportContext.bPlanningSuccess = LastPlanningStats.bSuccess;
+    ReportContext.bPlanningMultiAgent = LastPlanningStats.bMultiAgent;
+    ReportContext.bExecutionSummaryAvailable = bHasExecutionSummary;
+    ReportContext.bAlignmentEnabled = bEnableDiscreteAlignment;
+    ReportContext.bConflictAwareAlignment = bEnableConflictAwareAlignment;
+    ReportContext.bAlignmentAllowRecoveryMoves = bAlignmentAllowRecoveryMoves;
+    ReportContext.bAlignmentHoldPositionOnFailure = bAlignmentHoldPositionOnFailure;
+    ReportContext.bValidatePathsAgainstNoFlyZones = bValidatePathsAgainstNoFlyZones;
+    ReportContext.bNoFlyValidationClear = bNoFlyValidationClear;
 
-    Root->SetNumberField(TEXT("mission_count"), LastPlanningStats.MissionCount);
-    Root->SetNumberField(TEXT("agent_count"), EffectiveAgentCount);
-    Root->SetNumberField(TEXT("city_seed"), CitySeed);
-    Root->SetNumberField(TEXT("random_seed"), RandomSeed);
-    Root->SetNumberField(TEXT("execution_random_seed"), ExecutionRandomSeed);
-    Root->SetNumberField(TEXT("step_delay_probability"), StepDelayProbability);
-    Root->SetNumberField(TEXT("alignment_search_radius_steps"), AlignmentSearchRadiusSteps);
-    Root->SetNumberField(TEXT("alignment_max_spatial_error_cells"), AlignmentMaxSpatialErrorCells);
-    Root->SetNumberField(TEXT("alignment_max_snap_ahead_steps"), AlignmentMaxSnapAheadSteps);
-    Root->SetNumberField(TEXT("alignment_conflict_resolution_passes"), AlignmentConflictResolutionPasses);
-    Root->SetNumberField(TEXT("alignment_conflict_hold_threshold_for_replan"), AlignmentConflictHoldThresholdForReplan);
-    Root->SetNumberField(TEXT("max_execution_replans"), MaxExecutionReplanCount);
+    ReportContext.MissionCount = LastPlanningStats.MissionCount;
+    ReportContext.AgentCount = EffectiveAgentCount;
+    ReportContext.CitySeed = CitySeed;
+    ReportContext.RandomSeed = RandomSeed;
+    ReportContext.ExecutionRandomSeed = ExecutionRandomSeed;
+    ReportContext.StepDelayProbability = StepDelayProbability;
+    ReportContext.AlignmentSearchRadiusSteps = AlignmentSearchRadiusSteps;
+    ReportContext.AlignmentMaxSpatialErrorCells = AlignmentMaxSpatialErrorCells;
+    ReportContext.AlignmentMaxSnapAheadSteps = AlignmentMaxSnapAheadSteps;
+    ReportContext.AlignmentConflictResolutionPasses = AlignmentConflictResolutionPasses;
+    ReportContext.AlignmentConflictHoldThresholdForReplan = AlignmentConflictHoldThresholdForReplan;
+    ReportContext.MaxExecutionReplans = MaxExecutionReplanCount;
 
-    Root->SetNumberField(TEXT("planning_build_grid_time_ms"), LastPlanningStats.BuildGridTimeMs);
-    Root->SetNumberField(TEXT("planning_input_preparation_time_ms"), LastPlanningStats.InputPreparationTimeMs);
-    Root->SetNumberField(TEXT("planning_solve_time_ms"), LastPlanningStats.SolveTimeMs);
-    Root->SetNumberField(TEXT("planning_post_process_time_ms"), LastPlanningStats.PostProcessTimeMs);
-    Root->SetNumberField(TEXT("initial_planning_wall_time_ms"), LastPlanningStats.TotalTimeMs);
+    ReportContext.PlanningBuildGridTimeMs = LastPlanningStats.BuildGridTimeMs;
+    ReportContext.PlanningInputPreparationTimeMs = LastPlanningStats.InputPreparationTimeMs;
+    ReportContext.PlanningSolveTimeMs = LastPlanningStats.SolveTimeMs;
+    ReportContext.PlanningPostProcessTimeMs = LastPlanningStats.PostProcessTimeMs;
+    ReportContext.InitialPlanningWallTimeMs = LastPlanningStats.TotalTimeMs;
 
-    Root->SetNumberField(TEXT("no_fly_enabled_zone_count"), GetEnabledNoFlyZoneCount());
-    Root->SetNumberField(TEXT("no_fly_checked_mission_count"), LastNoFlyZonePathValidation.CheckedMissionCount);
-    Root->SetNumberField(TEXT("no_fly_checked_point_count"), LastNoFlyZonePathValidation.CheckedPointCount);
-    Root->SetNumberField(TEXT("no_fly_violating_mission_count"), LastNoFlyZonePathValidation.ViolatingMissionCount);
-    Root->SetNumberField(TEXT("no_fly_total_violation_count"), LastNoFlyZonePathValidation.TotalViolationCount);
+    ReportContext.NoFlyEnabledZoneCount = GetEnabledNoFlyZoneCount();
+    ReportContext.NoFlyCheckedMissionCount = LastNoFlyZonePathValidation.CheckedMissionCount;
+    ReportContext.NoFlyCheckedPointCount = LastNoFlyZonePathValidation.CheckedPointCount;
+    ReportContext.NoFlyViolatingMissionCount = LastNoFlyZonePathValidation.ViolatingMissionCount;
+    ReportContext.NoFlyTotalViolationCount = LastNoFlyZonePathValidation.TotalViolationCount;
 
-    Root->SetNumberField(TEXT("completed_agent_count"), LastExecutionSummary.CompletedAgentCount);
-    Root->SetNumberField(TEXT("planned_makespan"), LastExecutionSummary.PlannedMakespan);
-    Root->SetNumberField(TEXT("actual_makespan"), LastExecutionSummary.ActualMakespan);
-    Root->SetNumberField(TEXT("expansion"), Expansion);
-    Root->SetNumberField(TEXT("total_delay_steps"), LastExecutionSummary.TotalDelaySteps);
+    ReportContext.CompletedAgentCount = LastExecutionSummary.CompletedAgentCount;
+    ReportContext.PlannedMakespan = LastExecutionSummary.PlannedMakespan;
+    ReportContext.ActualMakespan = LastExecutionSummary.ActualMakespan;
+    ReportContext.Expansion = Expansion;
+    ReportContext.TotalDelaySteps = LastExecutionSummary.TotalDelaySteps;
 
-    Root->SetNumberField(TEXT("vertex_conflict_count"), LastExecutionSummary.VertexConflictCount);
-    Root->SetNumberField(TEXT("edge_conflict_count"), LastExecutionSummary.EdgeConflictCount);
-    Root->SetNumberField(TEXT("first_conflict_time"), LastExecutionSummary.FirstConflictTime);
+    ReportContext.VertexConflictCount = LastExecutionSummary.VertexConflictCount;
+    ReportContext.EdgeConflictCount = LastExecutionSummary.EdgeConflictCount;
+    ReportContext.FirstConflictTime = LastExecutionSummary.FirstConflictTime;
 
-    //utm_static_conflict_count = utm_protection_conflict_count + utm_downwash_conflict_count
-    Root->SetNumberField(TEXT("utm_static_conflict_count"), LastExecutionSummary.UTMStaticConflictCount);
-    Root->SetNumberField(TEXT("utm_protection_conflict_count"), LastExecutionSummary.UTMProtectionConflictCount);
-    Root->SetNumberField(TEXT("utm_downwash_conflict_count"), LastExecutionSummary.UTMDownwashConflictCount);
-    Root->SetNumberField(TEXT("first_utm_conflict_time"), LastExecutionSummary.FirstUTMConflictTime);
+    ReportContext.UTMStaticConflictCount = LastExecutionSummary.UTMStaticConflictCount;
+    ReportContext.UTMProtectionConflictCount = LastExecutionSummary.UTMProtectionConflictCount;
+    ReportContext.UTMDownwashConflictCount = LastExecutionSummary.UTMDownwashConflictCount;
+    ReportContext.FirstUTMConflictTime = LastExecutionSummary.FirstUTMConflictTime;
 
-    Root->SetNumberField(TEXT("alignment_correction_count"), LastExecutionSummary.AlignmentCorrectionCount);
-    Root->SetNumberField(TEXT("alignment_hold_count"), LastExecutionSummary.AlignmentHoldCount);
-    Root->SetNumberField(TEXT("alignment_conflict_hold_count"), LastExecutionSummary.AlignmentConflictHoldCount);
-    Root->SetNumberField(TEXT("alignment_snap_count"), LastExecutionSummary.AlignmentSnapCount);
-    Root->SetNumberField(TEXT("alignment_replan_request_count"), LastExecutionSummary.AlignmentReplanRequestCount);
-    Root->SetNumberField(TEXT("alignment_successful_replan_count"), LastExecutionSummary.AlignmentSuccessfulReplanCount);
-    Root->SetNumberField(TEXT("applied_execution_replans"), TotalExecutionReplanCount);
-    Root->SetNumberField(TEXT("execution_replan_attempt_count"), ExecutionReplanAttemptCount);
-    Root->SetNumberField(TEXT("execution_replan_total_time_ms"), ExecutionReplanTotalTimeMs);
-    Root->SetNumberField(TEXT("execution_replan_max_time_ms"), ExecutionReplanMaxTimeMs);
-    Root->SetNumberField(TEXT("execution_replan_local_attempt_count"), ExecutionReplanTimingStats.LocalAttemptCount);
-    Root->SetNumberField(TEXT("execution_replan_local_total_time_ms"), ExecutionReplanTimingStats.LocalTotalTimeMs);
-    Root->SetNumberField(TEXT("execution_replan_local_max_time_ms"), ExecutionReplanTimingStats.LocalMaxTimeMs);
-    Root->SetNumberField(TEXT("execution_replan_global_attempt_count"), ExecutionReplanTimingStats.GlobalAttemptCount);
-    Root->SetNumberField(TEXT("execution_replan_global_total_time_ms"), ExecutionReplanTimingStats.GlobalTotalTimeMs);
-    Root->SetNumberField(TEXT("execution_replan_global_max_time_ms"), ExecutionReplanTimingStats.GlobalMaxTimeMs);
+    ReportContext.AlignmentCorrectionCount = LastExecutionSummary.AlignmentCorrectionCount;
+    ReportContext.AlignmentHoldCount = LastExecutionSummary.AlignmentHoldCount;
+    ReportContext.AlignmentConflictHoldCount = LastExecutionSummary.AlignmentConflictHoldCount;
+    ReportContext.AlignmentSnapCount = LastExecutionSummary.AlignmentSnapCount;
+    ReportContext.AlignmentReplanRequestCount = LastExecutionSummary.AlignmentReplanRequestCount;
+    ReportContext.AlignmentSuccessfulReplanCount = LastExecutionSummary.AlignmentSuccessfulReplanCount;
 
-    FString JsonString;
-    const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
-        TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&JsonString);
+    ReportContext.AppliedExecutionReplans = TotalExecutionReplanCount;
+    ReportContext.ExecutionReplanAttemptCount = ExecutionReplanAttemptCount;
+    ReportContext.ExecutionReplanTotalTimeMs = ExecutionReplanTotalTimeMs;
+    ReportContext.ExecutionReplanMaxTimeMs = ExecutionReplanMaxTimeMs;
+    ReportContext.ExecutionReplanLocalAttemptCount = ExecutionReplanTimingStats.LocalAttemptCount;
+    ReportContext.ExecutionReplanLocalTotalTimeMs = ExecutionReplanTimingStats.LocalTotalTimeMs;
+    ReportContext.ExecutionReplanLocalMaxTimeMs = ExecutionReplanTimingStats.LocalMaxTimeMs;
+    ReportContext.ExecutionReplanGlobalAttemptCount = ExecutionReplanTimingStats.GlobalAttemptCount;
+    ReportContext.ExecutionReplanGlobalTotalTimeMs = ExecutionReplanTimingStats.GlobalTotalTimeMs;
+    ReportContext.ExecutionReplanGlobalMaxTimeMs = ExecutionReplanTimingStats.GlobalMaxTimeMs;
 
-    if (!FJsonSerializer::Serialize(Root, Writer))
-    {
-        return FString();
-    }
-
-    return JsonString;
+    return FExperimentReporter::BuildStructuredSummaryJson(ReportContext);
 }
 
 void APathPlanningDemoActor::LogStructuredExperimentSummaryJson() const

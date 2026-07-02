@@ -510,3 +510,37 @@ Scene Start_i / Goal_i Actors
 - 没有修改 Scheduler 下拉框和 JSON 中的 `scheduler_type`。
 - 没有修改具体 Planner 算法。
 - 单智能体 Start/Goal 模式也通过同一个 Mission Source 转换入口，但保留无效任务的失败统计。
+
+## 2026-07-03 Experiment Reporter 抽象
+
+### 背景
+
+结构化实验 JSON 字段已经很多，继续把字段组装和 JSON 序列化留在 `APathPlanningDemoActor` 中会让 Actor 更难维护。为了让后续实验日志字段、CSV/JSONL 输出、文件保存或批量实验汇总更容易扩展，本阶段先抽出一个独立的 Experiment Reporter。
+
+### 新增文件
+
+- `Source/UTM/Public/Reporting/ExperimentReportTypes.h`
+- `Source/UTM/Public/Reporting/ExperimentReporter.h`
+- `Source/UTM/Private/Reporting/ExperimentReporter.cpp`
+
+### 当前职责划分
+
+`APathPlanningDemoActor` 仍然负责收集 UE 运行时状态和实验上下文：
+
+- 解析或推断 `run_id`、`phase`、`group_id`、`group_name`、`scenario_name`。
+- 读取 Planner、Scheduler、地图、随机种子、执行期参数。
+- 读取规划统计、执行统计、禁飞区校验统计、重规划耗时统计。
+- 调用 `UE_LOG` 输出 `[StructuredExperimentJSON]`。
+
+`FExperimentReporter` 负责报告序列化：
+
+- 接收 `FExperimentReportContext`。
+- 按既有字段名生成结构化 JSON。
+- 使用 condensed JSON 输出，保持日志仍为单行 JSON。
+
+### 保守性说明
+
+- 没有删除或重命名现有 JSON 字段。
+- 没有修改 `scheduler_type`、`planner_type`、`execution_replan_total_time_ms` 等已有字段含义。
+- 没有把实验元数据推断规则一次性搬走，降低对现有实验命名和分组逻辑的影响。
+- `APathPlanningDemoActor::BuildStructuredExperimentSummaryJson()` 仍作为兼容入口保留，但内部改为构造 `FExperimentReportContext` 并调用 Reporter。
