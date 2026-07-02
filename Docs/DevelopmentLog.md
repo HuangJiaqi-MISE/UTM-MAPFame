@@ -451,3 +451,62 @@ PathMergePolicy
 - `UnrealEditor-UTM.dll` 链接通过。
 - 编译中仅保留既有 `PBSPlanner.cpp` 的 UE API deprecation warning。
 
+## 2026-07-03 Mission Source 抽象
+
+### 背景
+
+继续推进模块化拆分时，我们把任务来源层从 `APathPlanningDemoActor` 中进一步分离。此前系统已经有 Planner Registry 和 Mission Scheduler Registry，但任务进入 Scheduler 之前仍然分散在 Actor 里：
+
+- `MissionConfigs` 模式直接使用 Details / EUW 写入的数组。
+- Start/Goal Actor 模式扫描场景里的 `Start_i` / `Goal_i`，再在 Actor 中手动拼成 `FDroneMissionConfig`。
+
+这一步的目标是先建立统一的 Mission Source 边界，让后续新增任务来源时不需要继续扩大 `APathPlanningDemoActor`。
+
+### 新增文件
+
+- `Source/UTM/Public/Missions/MissionSourceTypes.h`
+- `Source/UTM/Public/Missions/MissionSourceBuilder.h`
+- `Source/UTM/Private/Missions/MissionSourceBuilder.cpp`
+
+### 当前职责划分
+
+`APathPlanningDemoActor` 仍然负责 UE 依赖部分：
+
+- 扫描场景中的 Start/Goal Actor。
+- 读取 Actor 世界坐标。
+- 调用 `InputValidator` 结合当前 `GridMap` 做输入校验。
+- 构建障碍物忽略列表。
+- 继续调用 Scheduler、Planner、可视化和执行期流程。
+
+`FMissionSourceBuilder` 负责纯任务来源标准化：
+
+- `BuildFromMissionConfigs(...)`：把 Details / EUW 中已有的 `MissionConfigs` 作为 raw missions 传入后续流程。
+- `BuildFromStartGoalWorldPairs(...)`：把已经采集好的 mission id、起点坐标、终点坐标转换成统一的 `TArray<FDroneMissionConfig>`。
+
+### 当前数据流
+
+```text
+EUW / Details
+    -> MissionConfigs
+    -> Mission Source Builder
+    -> Mission Scheduler
+    -> Planner Registry
+    -> Concrete Planner
+
+Scene Start_i / Goal_i Actors
+    -> APathPlanningDemoActor scans UE world
+    -> APathPlanningDemoActor validates against GridMap
+    -> Mission Source Builder
+    -> Mission Scheduler
+    -> Planner Registry
+    -> Concrete Planner
+```
+
+### 保守性说明
+
+- 没有修改 `bUseMissionConfigs`。
+- 没有修改 `MissionConfigs` 的 UPROPERTY 暴露方式。
+- 没有修改 EUW 任务生成、Mission Marker 生成和读取流程。
+- 没有修改 Scheduler 下拉框和 JSON 中的 `scheduler_type`。
+- 没有修改具体 Planner 算法。
+- 单智能体 Start/Goal 模式也通过同一个 Mission Source 转换入口，但保留无效任务的失败统计。

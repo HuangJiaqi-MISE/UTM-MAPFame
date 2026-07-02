@@ -11,6 +11,7 @@
 #include "Planning/DiscreteAlignmentManager.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlannerRegistry.h"
+#include "Missions/MissionSourceBuilder.h"
 
 #include "Actors/MissionMarkerActor.h"
 #include "Engine/StaticMeshActor.h"
@@ -640,6 +641,80 @@ void APathPlanningDemoActor::CollectStartGoalPairs(
     }
 
     OutIds.Sort();
+}
+
+bool APathPlanningDemoActor::BuildMissionsFromStartGoalPairs(
+    const TArray<int32>& Ids,
+    const TMap<int32, TObjectPtr<AActor>>& Starts,
+    const TMap<int32, TObjectPtr<AActor>>& Goals,
+    TArray<FDroneMissionConfig>& OutMissions,
+    TArray<int32>* OutSkippedMissionIds) const
+{
+    OutMissions.Reset();
+    if (OutSkippedMissionIds)
+    {
+        OutSkippedMissionIds->Reset();
+    }
+
+    TMap<int32, FVector> StartWorldsByMissionId;
+    TMap<int32, FVector> GoalWorldsByMissionId;
+    TSet<int32> SkippedMissionIds;
+    StartWorldsByMissionId.Reserve(Ids.Num());
+    GoalWorldsByMissionId.Reserve(Ids.Num());
+
+    for (const int32 Id : Ids)
+    {
+        AActor* StartActor = Starts.FindRef(Id);
+        AActor* GoalActor = Goals.FindRef(Id);
+
+        if (!StartActor || !GoalActor)
+        {
+            UE_LOG(LogTemp, Error, TEXT("Pair %d invalid actor reference"), Id);
+            SkippedMissionIds.Add(Id);
+            continue;
+        }
+
+        const FVector StartWorld = StartActor->GetActorLocation();
+        const FVector GoalWorld = GoalActor->GetActorLocation();
+
+        if (!InputValidator.ValidateStartGoalPair(
+            GridMap,
+            StartWorld,
+            GoalWorld,
+            Id,
+            StartActor,
+            GoalActor))
+        {
+            UE_LOG(LogTemp, Error, TEXT("Pair %d invalid input. Skip %s planning."), Id, *GetPlannerTypeName());
+            SkippedMissionIds.Add(Id);
+            continue;
+        }
+
+        StartWorldsByMissionId.Add(Id, StartWorld);
+        GoalWorldsByMissionId.Add(Id, GoalWorld);
+    }
+
+    const FMissionSourceBuildResult SourceResult =
+        FMissionSourceBuilder::BuildFromStartGoalWorldPairs(Ids, StartWorldsByMissionId, GoalWorldsByMissionId);
+
+    for (const int32 SkippedMissionId : SourceResult.SkippedMissionIds)
+    {
+        SkippedMissionIds.Add(SkippedMissionId);
+    }
+
+    if (OutSkippedMissionIds)
+    {
+        for (const int32 Id : Ids)
+        {
+            if (SkippedMissionIds.Contains(Id))
+            {
+                OutSkippedMissionIds->Add(Id);
+            }
+        }
+    }
+
+    OutMissions = SourceResult.Missions;
+    return SourceResult.bSuccess;
 }
 
 FColor APathPlanningDemoActor::GetDebugColorById(int32 Id) const
@@ -2923,8 +2998,16 @@ bool APathPlanningDemoActor::ProcessMissionConfigs()
 {
     UE_LOG(LogTemp, Warning, TEXT("Using MissionConfigs mode. Mission count = %d"), MissionConfigs.Num());
 
+    const FMissionSourceBuildResult SourceResult =
+        FMissionSourceBuilder::BuildFromMissionConfigs(MissionConfigs);
+    if (!SourceResult.bSuccess)
+    {
+        UE_LOG(LogTemp, Error, TEXT("MissionConfigs source failed: %s"), *SourceResult.ErrorMessage);
+        return false;
+    }
+
     TArray<FDroneMissionConfig> ScheduledMissions;
-    if (!BuildScheduledMissionConfigs(MissionConfigs, ScheduledMissions))
+    if (!BuildScheduledMissionConfigs(SourceResult.Missions, ScheduledMissions))
     {
         return false;
     }
@@ -3034,40 +3117,7 @@ bool APathPlanningDemoActor::ProcessStartGoalPairsMultiAgent()
         Ids.Num());
 
     TArray<FDroneMissionConfig> Missions;
-    Missions.Reserve(Ids.Num());
-
-    for (const int32 Id : Ids)
-    {
-        AActor* StartActor = Starts.FindRef(Id);
-        AActor* GoalActor = Goals.FindRef(Id);
-
-        if (!StartActor || !GoalActor)
-        {
-            UE_LOG(LogTemp, Error, TEXT("Pair %d invalid actor reference"), Id);
-            continue;
-        }
-
-        const FVector StartWorld = StartActor->GetActorLocation();
-        const FVector GoalWorld = GoalActor->GetActorLocation();
-
-        if (!InputValidator.ValidateStartGoalPair(
-            GridMap,
-            StartWorld,
-            GoalWorld,
-            Id,
-            StartActor,
-            GoalActor))
-        {
-            UE_LOG(LogTemp, Error, TEXT("Pair %d invalid input. Skip %s planning."), Id, *GetPlannerTypeName());
-            continue;
-        }
-
-        FDroneMissionConfig Mission;
-        Mission.MissionId = Id;
-        Mission.StartWorld = StartWorld;
-        Mission.GoalWorld = GoalWorld;
-        Missions.Add(Mission);
-    }
+    BuildMissionsFromStartGoalPairs(Ids, Starts, Goals, Missions);
 
     if (Missions.Num() <= 0)
     {
@@ -3155,8 +3205,16 @@ bool APathPlanningDemoActor::ProcessMissionConfigsMultiAgent()
         *GetPlannerTypeName(),
         MissionConfigs.Num());
 
+    const FMissionSourceBuildResult SourceResult =
+        FMissionSourceBuilder::BuildFromMissionConfigs(MissionConfigs);
+    if (!SourceResult.bSuccess)
+    {
+        UE_LOG(LogTemp, Error, TEXT("MissionConfigs source failed: %s"), *SourceResult.ErrorMessage);
+        return false;
+    }
+
     TArray<FDroneMissionConfig> ScheduledMissions;
-    if (!BuildScheduledMissionConfigs(MissionConfigs, ScheduledMissions))
+    if (!BuildScheduledMissionConfigs(SourceResult.Missions, ScheduledMissions))
     {
         return false;
     }
@@ -5053,36 +5111,26 @@ bool APathPlanningDemoActor::ProcessStartGoalPairsSingleAgent(
 {
     bool bAnySuccess = false;
 
+    TArray<FDroneMissionConfig> Missions;
+    TArray<int32> SkippedMissionIds;
+    BuildMissionsFromStartGoalPairs(Ids, Starts, Goals, Missions, &SkippedMissionIds);
+
+    TMap<int32, FDroneMissionConfig> MissionById;
+    MissionById.Reserve(Missions.Num());
+    for (const FDroneMissionConfig& Mission : Missions)
+    {
+        MissionById.Add(Mission.MissionId, Mission);
+    }
+
     for (int32 Id : Ids)
     {
-        AActor* StartActor = Starts.FindRef(Id);
-        AActor* GoalActor = Goals.FindRef(Id);
-
-        if (!StartActor || !GoalActor)
+        const FDroneMissionConfig* Mission = MissionById.Find(Id);
+        if (!Mission)
         {
-            UE_LOG(LogTemp, Error, TEXT("Pair %d invalid actor reference"), Id);
-
-            FSingleMissionTimingStats Item;
-            Item.MissionId = Id;
-            Item.bSuccess = false;
-            Item.PathPointCount = 0;
-            Item.SolveTimeMs = 0.0;
-            LastPlanningStats.MissionStats.Add(Item);
-            continue;
-        }
-
-        const FVector StartWorld = StartActor->GetActorLocation();
-        const FVector GoalWorld = GoalActor->GetActorLocation();
-
-        if (!InputValidator.ValidateStartGoalPair(
-            GridMap,
-            StartWorld,
-            GoalWorld,
-            Id,
-            StartActor,
-            GoalActor))
-        {
-            UE_LOG(LogTemp, Error, TEXT("Pair %d invalid input. Skip planning."), Id);
+            if (!SkippedMissionIds.Contains(Id))
+            {
+                UE_LOG(LogTemp, Error, TEXT("Pair %d missing from mission source. Skip planning."), Id);
+            }
 
             FSingleMissionTimingStats Item;
             Item.MissionId = Id;
@@ -5110,7 +5158,7 @@ bool APathPlanningDemoActor::ProcessStartGoalPairsSingleAgent(
         TArray<FVector> PathPoints;
 
         const double SolveStart = FPlatformTime::Seconds();
-        const bool bFound = Planner->Plan(GridMap, StartWorld, GoalWorld, PathPoints);
+        const bool bFound = Planner->Plan(GridMap, Mission->StartWorld, Mission->GoalWorld, PathPoints);
         const double SolveMs = (FPlatformTime::Seconds() - SolveStart) * 1000.0;
 
         LastPlanningStats.SolveTimeMs += SolveMs;

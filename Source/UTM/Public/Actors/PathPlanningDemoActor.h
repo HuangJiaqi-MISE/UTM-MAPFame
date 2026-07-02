@@ -423,6 +423,13 @@ private:
         TMap<int32, TObjectPtr<AActor>>& OutStarts,
         TMap<int32, TObjectPtr<AActor>>& OutGoals) const;
 
+    bool BuildMissionsFromStartGoalPairs(
+        const TArray<int32>& Ids,
+        const TMap<int32, TObjectPtr<AActor>>& Starts,
+        const TMap<int32, TObjectPtr<AActor>>& Goals,
+        TArray<FDroneMissionConfig>& OutMissions,
+        TArray<int32>* OutSkippedMissionIds = nullptr) const;
+
     void LogPathCoordinates(const TArray<FVector>& InPath, int32 Id, const TCHAR* Label) const;
     void DrawPathDebug(const TArray<FVector>& InPath, const FColor& Color) const;
     FColor GetDebugColorById(int32 Id) const;
