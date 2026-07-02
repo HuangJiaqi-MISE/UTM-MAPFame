@@ -252,9 +252,9 @@ def summarize_run(jsonl_path: Path) -> dict[str, Any] | None:
         "actor_name": filename_info.get("actor_name", ""),
         "map_type": structured_value("map_type", experiment, experiment_detail, events),
         "mission_seed": first_non_empty(
+            structured_value("random_seed", experiment, experiment_detail, events),
             structured_value("mission_seed", experiment, experiment_detail, events),
             structured_value("execution_random_seed", experiment, experiment_detail, events),
-            structured_value("random_seed", experiment, experiment_detail, events),
         ),
         "city_seed": structured_value("city_seed", experiment, experiment_detail, events),
         "random_seed": structured_value("random_seed", experiment, experiment_detail, events),

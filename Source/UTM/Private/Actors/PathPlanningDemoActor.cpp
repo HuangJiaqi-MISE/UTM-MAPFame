@@ -1921,6 +1921,108 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
         return FString();
     };
 
+    auto GetMappoGoalDistance = [](const FIntVector& Cell, const FIntVector& Goal) -> int32
+    {
+        return FMath::Abs(Cell.X - Goal.X) + FMath::Abs(Cell.Y - Goal.Y) + FMath::Abs(Cell.Z - Goal.Z);
+    };
+    auto TryFindMappoLocalRepairAction = [&](int32 MappoMissionId, const FIntVector& StartCell, const FIntVector& GoalCell, FString& OutActionName) -> bool
+    {
+        struct FLocalRepairNode
+        {
+            FIntVector Cell = FIntVector::ZeroValue;
+            FString FirstAction;
+            int32 Depth = 0;
+        };
+
+        constexpr int32 MaxLocalRepairDepth = 18;
+        constexpr int32 MaxLocalRepairNodes = 1024;
+        constexpr int32 MaxLocalRepairRadius = 18;
+
+        TArray<FString> LocalActionNames;
+        LocalActionNames.Add(TEXT("+X"));
+        LocalActionNames.Add(TEXT("-X"));
+        LocalActionNames.Add(TEXT("+Y"));
+        LocalActionNames.Add(TEXT("-Y"));
+        LocalActionNames.Add(TEXT("+Z"));
+        LocalActionNames.Add(TEXT("-Z"));
+
+        TArray<FLocalRepairNode> Nodes;
+        TArray<FIntVector> VisitedCells;
+        FLocalRepairNode RootNode;
+        RootNode.Cell = StartCell;
+        Nodes.Add(RootNode);
+        VisitedCells.Add(StartCell);
+
+        const int32 StartDistance = GetMappoGoalDistance(StartCell, GoalCell);
+        int32 BestDistance = StartDistance;
+        int32 BestNodeIndex = INDEX_NONE;
+        int32 ReadIndex = 0;
+
+        while (ReadIndex < Nodes.Num() && Nodes.Num() < MaxLocalRepairNodes)
+        {
+            const FLocalRepairNode CurrentNode = Nodes[ReadIndex++];
+            if (CurrentNode.Depth >= MaxLocalRepairDepth)
+            {
+                continue;
+            }
+
+            TArray<FString> OrderedActionNames = LocalActionNames;
+            OrderedActionNames.Sort([&](const FString& LeftAction, const FString& RightAction)
+            {
+                const FIntVector LeftCell = CurrentNode.Cell + GetMappoDeltaFromActionName(LeftAction);
+                const FIntVector RightCell = CurrentNode.Cell + GetMappoDeltaFromActionName(RightAction);
+                return GetMappoGoalDistance(LeftCell, GoalCell) < GetMappoGoalDistance(RightCell, GoalCell);
+            });
+
+            for (const FString& ActionName : OrderedActionNames)
+            {
+                const FIntVector NextCell = CurrentNode.Cell + GetMappoDeltaFromActionName(ActionName);
+                if (FMath::Abs(NextCell.X - StartCell.X) > MaxLocalRepairRadius
+                    || FMath::Abs(NextCell.Y - StartCell.Y) > MaxLocalRepairRadius
+                    || FMath::Abs(NextCell.Z - StartCell.Z) > MaxLocalRepairRadius)
+                {
+                    continue;
+                }
+                if (VisitedCells.Contains(NextCell) || !GetGhostRejectReason(NextCell).IsEmpty())
+                {
+                    continue;
+                }
+
+                const FString FirstActionName = CurrentNode.Depth == 0 ? ActionName : CurrentNode.FirstAction;
+                const FIntVector FirstStepCell = StartCell + GetMappoDeltaFromActionName(FirstActionName);
+                if (!GetCandidateRejectReason(MappoMissionId, StartCell, FirstStepCell).IsEmpty())
+                {
+                    continue;
+                }
+
+                FLocalRepairNode NextNode;
+                NextNode.Cell = NextCell;
+                NextNode.FirstAction = FirstActionName;
+                NextNode.Depth = CurrentNode.Depth + 1;
+                const int32 NextNodeIndex = Nodes.Add(NextNode);
+                VisitedCells.Add(NextCell);
+
+                const int32 NextDistance = GetMappoGoalDistance(NextCell, GoalCell);
+                if (NextDistance < BestDistance)
+                {
+                    BestDistance = NextDistance;
+                    BestNodeIndex = NextNodeIndex;
+                    if (NextCell == GoalCell)
+                    {
+                        OutActionName = FirstActionName;
+                        return true;
+                    }
+                }
+            }
+        }
+
+        if (BestNodeIndex != INDEX_NONE)
+        {
+            OutActionName = Nodes[BestNodeIndex].FirstAction;
+            return !OutActionName.IsEmpty();
+        }
+        return false;
+    };
     for (const int32 MappoMissionId : MappoMissionIds)
     {
         FIntVector* GhostCellPtr = MappoEmergencyGhostCellsByMappoMissionId.Find(MappoMissionId);
@@ -1944,6 +2046,13 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
         const FIntVector PreviousGhostCell = *GhostCellPtr;
         const FIntVector* GoalCell = MappoEmergencyGhostGoalCellsByMappoMissionId.Find(MappoMissionId);
         const bool bHoldAtGoal = bMappoEmergencyHoldReachedGhostAtGoal && GoalCell && PreviousGhostCell == *GoalCell;
+        if (!bHoldAtGoal && ShouldUseMappoEmergencyGhostSafetyFilter() && CandidateActionNames.Num() > 1)
+        {
+            if (CandidateActionNames.Remove(TEXT("WAIT")) > 0)
+            {
+                CandidateActionNames.Add(TEXT("WAIT"));
+            }
+        }
         if (bHoldAtGoal)
         {
             HeldAtGoalCount++;
@@ -1969,19 +2078,26 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
             {
                 const FString PrimaryActionName = CandidateActionNames[0];
                 const FIntVector PrimaryCandidateCell = PreviousGhostCell + GetMappoDeltaFromActionName(PrimaryActionName);
-                FString PrimaryRejectReason;
-                bool bAppliedCandidate = false;
+                FString PrimaryRejectReason = GetCandidateRejectReason(MappoMissionId, PreviousGhostCell, PrimaryCandidateCell);
+                FString LocalRepairActionName;
+                bool bLocalRepairActionInserted = false;
+                const bool bPrimaryStaticBlocked = PrimaryRejectReason == TEXT("blocked_cell")
+                    || PrimaryRejectReason == TEXT("out_of_grid")
+                    || PrimaryRejectReason == TEXT("no_fly");
+                if (GoalCell && bPrimaryStaticBlocked && TryFindMappoLocalRepairAction(MappoMissionId, PreviousGhostCell, *GoalCell, LocalRepairActionName))
+                {
+                    CandidateActionNames.Remove(LocalRepairActionName);
+                    CandidateActionNames.Insert(LocalRepairActionName, 0);
+                    bLocalRepairActionInserted = true;
+                }
 
+                bool bAppliedCandidate = false;
                 for (int32 CandidateIndex = 0; CandidateIndex < CandidateActionNames.Num(); ++CandidateIndex)
                 {
                     const FString CandidateActionName = CandidateActionNames[CandidateIndex];
                     const FIntVector Delta = GetMappoDeltaFromActionName(CandidateActionName);
                     const FIntVector CandidateCell = PreviousGhostCell + Delta;
                     const FString RejectReason = GetCandidateRejectReason(MappoMissionId, PreviousGhostCell, CandidateCell);
-                    if (CandidateIndex == 0)
-                    {
-                        PrimaryRejectReason = RejectReason;
-                    }
                     if (!RejectReason.IsEmpty())
                     {
                         continue;
@@ -1998,20 +2114,22 @@ void APathPlanningDemoActor::ApplyMappoEmergencyGhostStep()
                         *GhostCellPtr = CandidateCell;
                     }
 
-                    if (CandidateIndex > 0)
+                    const bool bUsedLocalRepairAction = bLocalRepairActionInserted && CandidateIndex == 0 && CandidateActionName == LocalRepairActionName;
+                    if (CandidateIndex > 0 || bUsedLocalRepairAction)
                     {
                         RepairedGhostMoveCount++;
                         if (GhostMoveDiagnostics.Num() < 5)
                         {
                             GhostMoveDiagnostics.Add(FString::Printf(
-                                TEXT("mission=%d primary_action=%s selected_action=%s from=%s primary_candidate=%s reason=%s repair_rank=%d"),
+                                TEXT("mission=%d primary_action=%s selected_action=%s from=%s primary_candidate=%s reason=%s repair_rank=%d repair_type=%s"),
                                 MappoMissionId,
                                 *PrimaryActionName,
                                 *CandidateActionName,
                                 *FormatMappoCellForLog(PreviousGhostCell),
                                 *FormatMappoCellForLog(PrimaryCandidateCell),
                                 PrimaryRejectReason.IsEmpty() ? TEXT("unknown") : *PrimaryRejectReason,
-                                CandidateIndex));
+                                bUsedLocalRepairAction ? -1 : CandidateIndex,
+                                bUsedLocalRepairAction ? TEXT("local_search") : TEXT("policy_order")));
                         }
                     }
                     else if (Delta == FIntVector::ZeroValue && GhostMoveDiagnostics.Num() < 5)
@@ -4686,11 +4804,11 @@ void APathPlanningDemoActor::LogStructuredExperimentSummaryJson() const
     if (StructuredSummary->TryGetNumberField(TEXT("random_seed"), NumberValue))
     {
         Event->SetNumberField(TEXT("random_seed"), NumberValue);
+        Event->SetNumberField(TEXT("mission_seed"), NumberValue);
     }
     if (StructuredSummary->TryGetNumberField(TEXT("execution_random_seed"), NumberValue))
     {
         Event->SetNumberField(TEXT("execution_random_seed"), NumberValue);
-        Event->SetNumberField(TEXT("mission_seed"), NumberValue);
     }
     if (StructuredSummary->TryGetNumberField(TEXT("agent_count"), NumberValue))
     {
