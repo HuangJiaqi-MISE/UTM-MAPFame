@@ -544,3 +544,70 @@ Scene Start_i / Goal_i Actors
 - 没有修改 `scheduler_type`、`planner_type`、`execution_replan_total_time_ms` 等已有字段含义。
 - 没有把实验元数据推断规则一次性搬走，降低对现有实验命名和分组逻辑的影响。
 - `APathPlanningDemoActor::BuildStructuredExperimentSummaryJson()` 仍作为兼容入口保留，但内部改为构造 `FExperimentReportContext` 并调用 Reporter。
+
+## 2026-07-12 多智能体 Planning Pipeline 抽象
+
+### 背景
+
+在 Mission Source、Mission Scheduler、Planner Registry 已经拆分后，`APathPlanningDemoActor` 里仍然直接串联多智能体规划流程。尤其是 `ProcessStartGoalPairsMultiAgent()` 和 `ProcessMissionConfigsMultiAgent()` 中存在重复逻辑：调用 Scheduler、调用多智能体 Planner、统计 solve time、生成每个 mission 的规划统计。
+
+本阶段只抽多智能体 Planning Pipeline，暂不统一单智能体规划流程，降低对旧流程和 EUW 使用方式的影响。
+
+### 新增文件
+
+- `Source/UTM/Public/Planning/PlanningStatsTypes.h`
+- `Source/UTM/Public/Planning/PlanningPipelineTypes.h`
+- `Source/UTM/Public/Planning/PlanningPipeline.h`
+- `Source/UTM/Private/Planning/PlanningPipeline.cpp`
+
+### 当前职责划分
+
+`FPlanningPipeline::RunMultiAgent(...)` 负责：
+
+- 接收 raw missions。
+- 调用 `FMissionSchedulerRegistry` 生成 scheduled missions。
+- 调用 `FPlannerRegistry::PlanMultiAgentMissions(...)`。
+- 记录多智能体规划 solve time。
+- 使用 `FSingleMissionTimingStats` 为每个 scheduled mission 生成路径统计。
+- 返回 `FMultiAgentPlanningPipelineResult`，包含 scheduled missions、paths、mission stats 和失败阶段。
+
+`PlanningStatsTypes.h` 负责：
+
+- 从 `APathPlanningDemoActor.h` 中移出 `FSingleMissionTimingStats`。
+- 从 `APathPlanningDemoActor.h` 中移出 `FPlanningTimingStats`。
+- 让 Actor、Planning Pipeline 和后续实验报告逻辑共享同一套规划统计类型。
+
+`APathPlanningDemoActor` 仍然负责 UE 相关后处理：
+
+- 从 EUW / Details 或 Start/Goal Actor 得到 raw missions。
+- 构建 `GridMap`。
+- 把 Pipeline 结果写回 `LastPlanningStats`。
+- `CachePlannedPath(...)`。
+- `DrawPathDebug(...)`。
+- `SpawnDroneForPath(...)`。
+- `CacheExecutionMissionConfigs(...)`。
+
+同时新增 Actor 内部辅助函数：
+
+- `ApplyMultiAgentPlanningResult(...)`
+
+该函数只负责把 `FMultiAgentPlanningPipelineResult` 应用回 UE 场景和 Actor 状态，包括：
+
+- 写回 `LastPlanningStats`。
+- 处理 Pipeline 失败日志。
+- 缓存执行期任务配置。
+- 遍历每个 mission 的路径。
+- 缓存路径、绘制路径、生成无人机。
+- 累加 post-process time。
+
+它仍然保留在 `APathPlanningDemoActor` 中，没有放进 `PlanningPipeline`，因为这些步骤依赖 Actor 状态、Debug 绘制和无人机生成，不属于纯规划流程。
+
+### 保守性说明
+
+- `ProcessMissionConfigs()` 单智能体 MissionConfigs 流程没有统一进 Pipeline。
+- `ProcessStartGoalPairsSingleAgent()` 单智能体 Start/Goal 流程没有统一进 Pipeline。
+- `PlanMultiAgentMissionsOnGrid(...)` 保留，因为执行期重规划仍然需要基于指定 grid 调用多智能体规划器。
+- 移除了无调用的 `PlanMultiAgentMissions(...)` Actor wrapper。
+- Pipeline 不接触 `UWorld`、`AActor`、无人机生成、Debug 绘制和执行期状态。
+- `FSingleMissionTimingStats` 和 `FPlanningTimingStats` 字段名与类型保持不变，只移动定义位置。
+- `ApplyMultiAgentPlanningResult(...)` 只是 Actor 内部去重，不改变多智能体规划、Scheduler 或执行期行为。

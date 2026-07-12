@@ -10,6 +10,7 @@
 
 #include "Planning/DiscreteAlignmentManager.h"
 #include "Planning/MissionSchedulerRegistry.h"
+#include "Planning/PlanningPipeline.h"
 #include "Planning/PlannerRegistry.h"
 #include "Missions/MissionSourceBuilder.h"
 
@@ -3085,6 +3086,99 @@ bool APathPlanningDemoActor::ProcessMissionConfigs()
     return bAnySuccess;
 }
 
+bool APathPlanningDemoActor::ApplyMultiAgentPlanningResult(
+    const FMultiAgentPlanningPipelineResult& PipelineResult,
+    EMultiAgentPlanningResultLogMode LogMode)
+{
+    LastPlanningStats.MissionCount = PipelineResult.ScheduledMissions.Num();
+    LastPlanningStats.SolveTimeMs += PipelineResult.SolveTimeMs;
+    for (const FSingleMissionTimingStats& MissionStats : PipelineResult.MissionStats)
+    {
+        LastPlanningStats.MissionStats.Add(MissionStats);
+    }
+
+    if (!PipelineResult.bSuccess)
+    {
+        if (PipelineResult.FailureStage == EPlanningPipelineFailureStage::EmptySchedule)
+        {
+            if (LogMode == EMultiAgentPlanningResultLogMode::StartGoalPair)
+            {
+                UE_LOG(LogTemp, Warning, TEXT("%s start/goal pair scheduler produced no missions to plan"), *GetPlannerTypeName());
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("%s mission scheduler produced no missions to plan"), *GetPlannerTypeName());
+            }
+        }
+        else if (PipelineResult.FailureStage == EPlanningPipelineFailureStage::Planner)
+        {
+            if (LogMode == EMultiAgentPlanningResultLogMode::StartGoalPair)
+            {
+                UE_LOG(LogTemp, Warning, TEXT("%s failed or conflict unresolved in start/goal pair mode."), *GetPlannerTypeName());
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("%s failed or conflict unresolved in current stage."), *GetPlannerTypeName());
+            }
+        }
+        return false;
+    }
+
+    CacheExecutionMissionConfigs(PipelineResult.ScheduledMissions);
+
+    bool bAnyPath = false;
+
+    for (const FDroneMissionConfig& Mission : PipelineResult.ScheduledMissions)
+    {
+        const TArray<FVector>* PathPoints = PipelineResult.PathsByMissionId.Find(Mission.MissionId);
+        if (!PathPoints || PathPoints->Num() <= 0)
+        {
+            if (LogMode == EMultiAgentPlanningResultLogMode::StartGoalPair)
+            {
+                UE_LOG(LogTemp, Warning, TEXT("%s returned no path for pair %d"),
+                    *GetPlannerTypeName(),
+                    Mission.MissionId);
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("%s returned no path for Mission %d"),
+                    *GetPlannerTypeName(),
+                    Mission.MissionId);
+            }
+            continue;
+        }
+
+        bAnyPath = true;
+        CachePlannedPath(Mission.MissionId, *PathPoints);
+
+        const double PostStart = FPlatformTime::Seconds();
+
+        if (LogMode == EMultiAgentPlanningResultLogMode::StartGoalPair)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("%s pair %d: path found, points=%d"),
+                *GetPlannerTypeName(),
+                Mission.MissionId,
+                PathPoints->Num());
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning, TEXT("%s Mission %d: path found, points=%d"),
+                *GetPlannerTypeName(),
+                Mission.MissionId,
+                PathPoints->Num());
+        }
+
+        LogPathCoordinates(*PathPoints, Mission.MissionId, *GetPlannerTypeName());
+        DrawPathDebug(*PathPoints, GetDebugColorById(Mission.MissionId));
+        SpawnDroneForPath(*PathPoints, Mission.MissionId);
+
+        LastPlanningStats.PostProcessTimeMs +=
+            (FPlatformTime::Seconds() - PostStart) * 1000.0;
+    }
+
+    return bAnyPath;
+}
+
 // 把场景里收集到的 Start_i / Goal_i 配对转换成 FDroneMissionConfig 数组，
 // 做输入校验，然后统一调用多智能体规划器。
 bool APathPlanningDemoActor::ProcessStartGoalPairsMultiAgent()
@@ -3108,78 +3202,20 @@ bool APathPlanningDemoActor::ProcessStartGoalPairsMultiAgent()
         return false;
     }
 
-    TArray<FDroneMissionConfig> ScheduledMissions;
-    if (!BuildScheduledMissionConfigs(Missions, ScheduledMissions))
-    {
-        return false;
-    }
+    FMultiAgentPlanningPipelineRequest PipelineRequest;
+    PipelineRequest.GridMap = &GridMap;
+    PipelineRequest.RawMissions = Missions;
+    PipelineRequest.SchedulerType = MissionSchedulerType;
+    PipelineRequest.PlannerType = PlannerType;
+    PipelineRequest.PlannerConfig = BuildPlannerRuntimeConfig();
+    PipelineRequest.PlannerName = GetPlannerTypeName();
 
-    LastPlanningStats.MissionCount = ScheduledMissions.Num();
+    const FMultiAgentPlanningPipelineResult PipelineResult =
+        FPlanningPipeline::RunMultiAgent(PipelineRequest);
 
-    if (ScheduledMissions.Num() <= 0)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("%s start/goal pair scheduler produced no missions to plan"), *GetPlannerTypeName());
-        return false;
-    }
-
-    TMap<int32, TArray<FVector>> OutPaths;
-
-    const double SolveStart = FPlatformTime::Seconds();
-    const bool bSuccess = PlanMultiAgentMissions(ScheduledMissions, OutPaths);
-    LastPlanningStats.SolveTimeMs += (FPlatformTime::Seconds() - SolveStart) * 1000.0;
-
-    for (const FDroneMissionConfig& Mission : ScheduledMissions)
-    {
-        const TArray<FVector>* PathPoints = OutPaths.Find(Mission.MissionId);
-
-        FSingleMissionTimingStats Item;
-        Item.MissionId = Mission.MissionId;
-        Item.bSuccess = (PathPoints != nullptr && PathPoints->Num() > 0);
-        Item.PathPointCount = PathPoints ? PathPoints->Num() : 0;
-        Item.SolveTimeMs = 0.0;
-        LastPlanningStats.MissionStats.Add(Item);
-    }
-
-    if (!bSuccess)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("%s failed or conflict unresolved in start/goal pair mode."), *GetPlannerTypeName());
-        return false;
-    }
-
-    CacheExecutionMissionConfigs(ScheduledMissions);
-
-    bool bAnyPath = false;
-
-    for (const FDroneMissionConfig& Mission : ScheduledMissions)
-    {
-        const TArray<FVector>* PathPoints = OutPaths.Find(Mission.MissionId);
-        if (!PathPoints || PathPoints->Num() <= 0)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("%s returned no path for pair %d"),
-                *GetPlannerTypeName(),
-                Mission.MissionId);
-            continue;
-        }
-
-        bAnyPath = true;
-        CachePlannedPath(Mission.MissionId, *PathPoints);
-
-        const double PostStart = FPlatformTime::Seconds();
-
-        UE_LOG(LogTemp, Warning, TEXT("%s pair %d: path found, points=%d"),
-            *GetPlannerTypeName(),
-            Mission.MissionId,
-            PathPoints->Num());
-
-        LogPathCoordinates(*PathPoints, Mission.MissionId, *GetPlannerTypeName());
-        DrawPathDebug(*PathPoints, GetDebugColorById(Mission.MissionId));
-        SpawnDroneForPath(*PathPoints, Mission.MissionId);
-
-        LastPlanningStats.PostProcessTimeMs +=
-            (FPlatformTime::Seconds() - PostStart) * 1000.0;
-    }
-
-    return bAnyPath;
+    return ApplyMultiAgentPlanningResult(
+        PipelineResult,
+        EMultiAgentPlanningResultLogMode::StartGoalPair);
 }
 
 bool APathPlanningDemoActor::ProcessMissionConfigsMultiAgent()
@@ -3196,85 +3232,20 @@ bool APathPlanningDemoActor::ProcessMissionConfigsMultiAgent()
         return false;
     }
 
-    TArray<FDroneMissionConfig> ScheduledMissions;
-    if (!BuildScheduledMissionConfigs(SourceResult.Missions, ScheduledMissions))
-    {
-        return false;
-    }
+    FMultiAgentPlanningPipelineRequest PipelineRequest;
+    PipelineRequest.GridMap = &GridMap;
+    PipelineRequest.RawMissions = SourceResult.Missions;
+    PipelineRequest.SchedulerType = MissionSchedulerType;
+    PipelineRequest.PlannerType = PlannerType;
+    PipelineRequest.PlannerConfig = BuildPlannerRuntimeConfig();
+    PipelineRequest.PlannerName = GetPlannerTypeName();
 
-    LastPlanningStats.MissionCount = ScheduledMissions.Num();
+    const FMultiAgentPlanningPipelineResult PipelineResult =
+        FPlanningPipeline::RunMultiAgent(PipelineRequest);
 
-    if (ScheduledMissions.Num() <= 0)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("%s mission scheduler produced no missions to plan"), *GetPlannerTypeName());
-        return false;
-    }
-
-    TMap<int32, TArray<FVector>> OutPaths;
-
-    const double SolveStart = FPlatformTime::Seconds();
-    const bool bSuccess = PlanMultiAgentMissions(ScheduledMissions, OutPaths);
-    LastPlanningStats.SolveTimeMs += (FPlatformTime::Seconds() - SolveStart) * 1000.0;
-
-    for (const FDroneMissionConfig& Mission : ScheduledMissions)
-    {
-        const TArray<FVector>* PathPoints = OutPaths.Find(Mission.MissionId);
-
-        FSingleMissionTimingStats Item;
-        Item.MissionId = Mission.MissionId;
-        Item.bSuccess = (PathPoints != nullptr && PathPoints->Num() > 0);
-        Item.PathPointCount = PathPoints ? PathPoints->Num() : 0;
-        Item.SolveTimeMs = 0.0;
-        LastPlanningStats.MissionStats.Add(Item);
-    }
-
-    if (!bSuccess)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("%s failed or conflict unresolved in current stage."), *GetPlannerTypeName());
-        return false;
-    }
-
-    CacheExecutionMissionConfigs(ScheduledMissions);
-
-    bool bAnyPath = false;
-
-    for (const FDroneMissionConfig& Mission : ScheduledMissions)
-    {
-        const TArray<FVector>* PathPoints = OutPaths.Find(Mission.MissionId);
-        if (!PathPoints || PathPoints->Num() <= 0)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("%s returned no path for Mission %d"),
-                *GetPlannerTypeName(),
-                Mission.MissionId);
-            continue;
-        }
-
-        bAnyPath = true;
-        CachePlannedPath(Mission.MissionId, *PathPoints);
-
-        const double PostStart = FPlatformTime::Seconds();
-
-        UE_LOG(LogTemp, Warning, TEXT("%s Mission %d: path found, points=%d"),
-            *GetPlannerTypeName(),
-            Mission.MissionId,
-            PathPoints->Num());
-
-        LogPathCoordinates(*PathPoints, Mission.MissionId, *GetPlannerTypeName());
-        DrawPathDebug(*PathPoints, GetDebugColorById(Mission.MissionId));
-        SpawnDroneForPath(*PathPoints, Mission.MissionId);
-
-        LastPlanningStats.PostProcessTimeMs +=
-            (FPlatformTime::Seconds() - PostStart) * 1000.0;
-    }
-
-    return bAnyPath;
-}
-
-bool APathPlanningDemoActor::PlanMultiAgentMissions(
-    const TArray<FDroneMissionConfig>& Missions,
-    TMap<int32, TArray<FVector>>& OutPaths) const
-{
-    return PlanMultiAgentMissionsOnGrid(GridMap, Missions, OutPaths);
+    return ApplyMultiAgentPlanningResult(
+        PipelineResult,
+        EMultiAgentPlanningResultLogMode::MissionConfig);
 }
 
 bool APathPlanningDemoActor::PlanMultiAgentMissionsOnGrid(
