@@ -406,20 +406,9 @@ private:
     void BuildExecutionSummary();
     void LogExecutionSummary() const;
 
-	// 外部日志JSON格式规划结果用的接口
+    // 外部日志JSON格式规划结果用的接口
     void LogStructuredExperimentSummaryJson() const;
     FString BuildStructuredExperimentSummaryJson() const;
-    void ResolveExperimentMetadata(
-        FString& OutRunId,
-        FString& OutPhase,
-        FString& OutGroupId,
-        FString& OutGroupName,
-        FString& OutScenarioName) const;
-    FString BuildFallbackExperimentRunId(
-        const FString& InPhase,
-        const FString& InGroupId,
-        const FString& InScenarioName) const;
-    FString GetEffectiveExperimentScenarioName() const;
     int32 GetEnabledNoFlyZoneCount() const;
 
     enum class EMultiAgentPlanningResultLogMode : uint8

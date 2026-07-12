@@ -18,6 +18,7 @@
 #include "Engine/StaticMeshActor.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/ScopeExit.h"
+#include "Reporting/ExperimentMetadataResolver.h"
 #include "Reporting/ExperimentReporter.h"
 
 // 障碍物建筑构建
@@ -93,22 +94,6 @@ namespace
         }
 
         return TEXT("Unknown");
-    }
-
-    FString SanitizeExperimentToken(const FString& Input)
-    {
-        FString Result;
-        Result.Reserve(Input.Len());
-
-        for (const TCHAR Char : Input)
-        {
-            if (FChar::IsAlnum(Char))
-            {
-                Result.AppendChar(Char);
-            }
-        }
-
-        return Result.IsEmpty() ? TEXT("Unknown") : Result;
     }
 
     struct FMissionFootprintBox
@@ -214,67 +199,6 @@ namespace
             != EStaticUTMConflictType::None;
     }
 
-    FString GetDefaultExperimentGroupNameById(const FString& GroupId)
-    {
-        if (GroupId == TEXT("G1"))
-        {
-            return TEXT("ExecutionOnly");
-        }
-        if (GroupId == TEXT("G2"))
-        {
-            return TEXT("AlignmentV1");
-        }
-        if (GroupId == TEXT("G3"))
-        {
-            return TEXT("AlignmentV2Global");
-        }
-        if (GroupId == TEXT("R1"))
-        {
-            return TEXT("V2NoReplan");
-        }
-        if (GroupId == TEXT("R2"))
-        {
-            return TEXT("V2Local");
-        }
-        if (GroupId == TEXT("R3"))
-        {
-            return TEXT("V2Global");
-        }
-
-        return FString();
-    }
-
-    bool IsKnownExperimentGroupId(const FString& GroupId)
-    {
-        return
-            GroupId == TEXT("G1") ||
-            GroupId == TEXT("G2") ||
-            GroupId == TEXT("G3") ||
-            GroupId == TEXT("R1") ||
-            GroupId == TEXT("R2") ||
-            GroupId == TEXT("R3");
-    }
-
-    bool IsKnownExperimentPhase(const FString& Phase)
-    {
-        return Phase == TEXT("PhaseA") || Phase == TEXT("PhaseB");
-    }
-
-    FString GetDefaultExperimentPhaseByGroupId(const FString& GroupId)
-    {
-        if (GroupId.StartsWith(TEXT("G")))
-        {
-            return TEXT("PhaseA");
-        }
-
-        if (GroupId.StartsWith(TEXT("R")))
-        {
-            return TEXT("PhaseB");
-        }
-
-        return FString();
-    }
-
     TArray<FVector> BuildDebugPreviewPath(const TArray<FVector>& InPath)
     {
         if (InPath.Num() <= MaxDebugDrawPathPoints)
@@ -309,20 +233,19 @@ namespace
 
         return Preview;
     }
-}
 
-namespace
-{
-    FString GetExperimentPhaseBySeed(const int32 Seed)
+    EExperimentMetadataReplanMode ToExperimentMetadataReplanMode(EExecutionReplanMode ReplanMode)
     {
-        switch (Seed)
+        switch (ReplanMode)
         {
-        case 1:
-            return TEXT("PhaseA");
-        case 3:
-            return TEXT("PhaseB");
+        case EExecutionReplanMode::Disabled:
+            return EExperimentMetadataReplanMode::Disabled;
+        case EExecutionReplanMode::LocalConflictSet:
+            return EExperimentMetadataReplanMode::LocalConflictSet;
+        case EExecutionReplanMode::GlobalUnfinished:
+            return EExperimentMetadataReplanMode::GlobalUnfinished;
         default:
-            return FString();
+            return EExperimentMetadataReplanMode::Disabled;
         }
     }
 }
@@ -2406,168 +2329,8 @@ int32 APathPlanningDemoActor::GetEnabledNoFlyZoneCount() const
     return EnabledZoneCount;
 }
 
-FString APathPlanningDemoActor::GetEffectiveExperimentScenarioName() const
-{
-    const FString TrimmedScenarioName = ExperimentScenarioName.TrimStartAndEnd();
-    return TrimmedScenarioName.IsEmpty() ? GetCityLayoutTypeName() : TrimmedScenarioName;
-}
-
-FString APathPlanningDemoActor::BuildFallbackExperimentRunId(
-    const FString& InPhase,
-    const FString& InGroupId,
-    const FString& InScenarioName) const
-{
-    const int32 EffectiveAgentCount =
-        LastExecutionSummary.AgentCount > 0 ? LastExecutionSummary.AgentCount : LastPlanningStats.MissionCount;
-    const int32 DelayPercent = FMath::Clamp(FMath::RoundToInt(StepDelayProbability * 100.0f), 0, 999);
-    const FString SafePhase = InPhase.IsEmpty() ? TEXT("PhaseA") : InPhase;
-    const FString SafeGroupId = InGroupId.IsEmpty() ? TEXT("G1") : InGroupId;
-    const FString SafeScenarioName = InScenarioName.IsEmpty() ? GetEffectiveExperimentScenarioName() : InScenarioName;
-
-    return FString::Printf(
-        TEXT("%s_%s_%s_%s_N%d_P%03d_S%02d"),
-        *SanitizeExperimentToken(SafePhase),
-        *SanitizeExperimentToken(SafeGroupId),
-        *SanitizeExperimentToken(SafeScenarioName),
-        *SanitizeExperimentToken(GetPlannerTypeName()),
-        EffectiveAgentCount,
-        DelayPercent,
-        ExecutionRandomSeed);
-}
-
-
-void APathPlanningDemoActor::ResolveExperimentMetadata(
-    FString& OutRunId,
-    FString& OutPhase,
-    FString& OutGroupId,
-    FString& OutGroupName,
-    FString& OutScenarioName) const
-{
-    OutRunId = ExperimentRunId.TrimStartAndEnd();
-    OutPhase = ExperimentPhase.TrimStartAndEnd();
-    OutGroupId = ExperimentGroupId.TrimStartAndEnd();
-    OutGroupName = ExperimentGroupName.TrimStartAndEnd();
-    OutScenarioName = GetEffectiveExperimentScenarioName();
-
-    TArray<FString> Tokens;
-    if (!OutRunId.IsEmpty())
-    {
-        OutRunId.ParseIntoArray(Tokens, TEXT("_"), true);
-    }
-
-	// 1. 优先从 run_id 解析显式信息，一般为空或不规范，但如果符合约定格式则优先使用
-    if ((OutPhase.IsEmpty() || !IsKnownExperimentPhase(OutPhase)) &&
-        Tokens.Num() > 0 &&
-        IsKnownExperimentPhase(Tokens[0]))
-    {
-        OutPhase = Tokens[0];
-    }
-
-    if ((OutGroupId.IsEmpty() || !IsKnownExperimentGroupId(OutGroupId)) &&
-        Tokens.Num() > 1 &&
-        IsKnownExperimentGroupId(Tokens[1]))
-    {
-        OutGroupId = Tokens[1];
-    }
-
-    // 2. 如果 phase 还不明确，先用 seed 决定 phase
-    // 当前实验协议约定：
-    //   seed == 1 -> PhaseA
-    //   seed == 3 -> PhaseB
-    if (OutPhase.IsEmpty() || !IsKnownExperimentPhase(OutPhase))
-    {
-        const FString SeedPhase = GetExperimentPhaseBySeed(ExecutionRandomSeed);
-        if (!SeedPhase.IsEmpty())
-        {
-            OutPhase = SeedPhase;
-        }
-    }
-
-    // 3. phase 确定后，再根据配置推 group_id
-    if (OutGroupId.IsEmpty() || !IsKnownExperimentGroupId(OutGroupId))
-    {
-        if (!bEnableDiscreteAlignment && !bEnableConflictAwareAlignment)
-        {
-            OutGroupId = TEXT("G1");
-        }
-        else if (bEnableDiscreteAlignment && !bEnableConflictAwareAlignment)
-        {
-            OutGroupId = TEXT("G2");
-        }
-        else if (bEnableDiscreteAlignment && bEnableConflictAwareAlignment)
-        {
-            switch (ExecutionReplanMode)
-            {
-            case EExecutionReplanMode::Disabled:
-                OutGroupId = TEXT("R1");
-                break;
-
-            case EExecutionReplanMode::LocalConflictSet:
-                OutGroupId = TEXT("R2");
-                break;
-
-            case EExecutionReplanMode::GlobalUnfinished:
-                OutGroupId = (OutPhase == TEXT("PhaseB")) ? TEXT("R3") : TEXT("G3");
-                break;
-
-            default:
-                break;
-            }
-        }
-    }
-
-    // 4. 如果 phase 还没定下来，再根据 group_id 兜底
-    if (OutPhase.IsEmpty() || !IsKnownExperimentPhase(OutPhase))
-    {
-        OutPhase = GetDefaultExperimentPhaseByGroupId(OutGroupId);
-    }
-
-    // 5. 归一化 G3 / R3 与 phase 的对应关系
-    if (OutGroupId == TEXT("G3") && OutPhase == TEXT("PhaseB"))
-    {
-        OutGroupId = TEXT("R3");
-    }
-    else if (OutGroupId == TEXT("R3") && OutPhase == TEXT("PhaseA"))
-    {
-        OutGroupId = TEXT("G3");
-    }
-
-    // 6. group_name 按 group_id 统一生成
-    if (OutGroupName.IsEmpty() || GetDefaultExperimentGroupNameById(OutGroupId) != OutGroupName)
-    {
-        OutGroupName = GetDefaultExperimentGroupNameById(OutGroupId);
-    }
-
-    // 7. 如果 run_id 为空，自动生成
-    if (OutRunId.IsEmpty())
-    {
-        OutRunId = BuildFallbackExperimentRunId(OutPhase, OutGroupId, OutScenarioName);
-    }
-
-    // 8. 可选的一致性告警
-    if (OutPhase == TEXT("PhaseA") && ExecutionRandomSeed != 1)
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Experiment metadata mismatch: PhaseA usually expects execution_random_seed=1, got %d"),
-            ExecutionRandomSeed);
-    }
-    else if (OutPhase == TEXT("PhaseB") && ExecutionRandomSeed != 3)
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Experiment metadata mismatch: PhaseB usually expects execution_random_seed=3, got %d"),
-            ExecutionRandomSeed);
-    }
-}
-
 FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
 {
-    FString RunId;
-    FString Phase;
-    FString GroupId;
-    FString GroupName;
-    FString ScenarioName;
-    ResolveExperimentMetadata(RunId, Phase, GroupId, GroupName, ScenarioName);
-
     const bool bHasExecutionSummary =
         LastExecutionSummary.AgentCount > 0 ||
         LastExecutionSummary.AgentSummaries.Num() > 0 ||
@@ -2578,6 +2341,8 @@ FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
 
     const int32 EffectiveAgentCount =
         bHasExecutionSummary ? LastExecutionSummary.AgentCount : LastPlanningStats.MissionCount;
+    const int32 FallbackRunIdAgentCount =
+        LastExecutionSummary.AgentCount > 0 ? LastExecutionSummary.AgentCount : LastPlanningStats.MissionCount;
     const int32 Expansion =
         bHasExecutionSummary ? (LastExecutionSummary.ActualMakespan - LastExecutionSummary.PlannedMakespan) : 0;
     const FString PlannerName =
@@ -2595,12 +2360,29 @@ FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
         ExecutionReplanTimingStats.LocalMaxTimeMs,
         ExecutionReplanTimingStats.GlobalMaxTimeMs);
 
+    FExperimentMetadataResolverInput MetadataInput;
+    MetadataInput.RunId = ExperimentRunId;
+    MetadataInput.Phase = ExperimentPhase;
+    MetadataInput.GroupId = ExperimentGroupId;
+    MetadataInput.GroupName = ExperimentGroupName;
+    MetadataInput.ScenarioName = ExperimentScenarioName;
+    MetadataInput.FallbackScenarioName = MapTypeName;
+    MetadataInput.PlannerName = GetPlannerTypeName();
+    MetadataInput.EffectiveAgentCount = FallbackRunIdAgentCount;
+    MetadataInput.StepDelayProbability = StepDelayProbability;
+    MetadataInput.ExecutionRandomSeed = ExecutionRandomSeed;
+    MetadataInput.bEnableDiscreteAlignment = bEnableDiscreteAlignment;
+    MetadataInput.bEnableConflictAwareAlignment = bEnableConflictAwareAlignment;
+    MetadataInput.ReplanMode = ToExperimentMetadataReplanMode(ExecutionReplanMode);
+
+    const FExperimentMetadata Metadata = FExperimentMetadataResolver::Resolve(MetadataInput);
+
     FExperimentReportContext ReportContext;
-    ReportContext.RunId = RunId;
-    ReportContext.Phase = Phase;
-    ReportContext.GroupId = GroupId;
-    ReportContext.GroupName = GroupName;
-    ReportContext.ScenarioName = ScenarioName;
+    ReportContext.RunId = Metadata.RunId;
+    ReportContext.Phase = Metadata.Phase;
+    ReportContext.GroupId = Metadata.GroupId;
+    ReportContext.GroupName = Metadata.GroupName;
+    ReportContext.ScenarioName = Metadata.ScenarioName;
     ReportContext.MapTypeName = MapTypeName;
     ReportContext.PlannerName = PlannerName;
     ReportContext.SchedulerTypeName = FMissionSchedulerRegistry::GetSchedulerTypeName(MissionSchedulerType);

@@ -611,3 +611,50 @@ Scene Start_i / Goal_i Actors
 - Pipeline 不接触 `UWorld`、`AActor`、无人机生成、Debug 绘制和执行期状态。
 - `FSingleMissionTimingStats` 和 `FPlanningTimingStats` 字段名与类型保持不变，只移动定义位置。
 - `ApplyMultiAgentPlanningResult(...)` 只是 Actor 内部去重，不改变多智能体规划、Scheduler 或执行期行为。
+
+## 2026-07-12 Experiment Metadata Resolver 抽象
+
+### 背景
+
+在 `Experiment Reporter` 抽象完成后，结构化实验 JSON 的字段序列化已经从 `APathPlanningDemoActor` 中移出，但 `run_id`、`phase`、`group_id`、`group_name`、`scenario_name` 的解析和兜底推断逻辑仍然留在 Actor 内部。
+
+这些逻辑本质上不是 UE 场景控制逻辑，而是实验命名和分组规则。继续留在 Actor 中会让 `BuildStructuredExperimentSummaryJson()` 同时承担运行状态收集、实验元数据推断和 JSON 报告组装三类职责。
+
+### 新增文件
+
+- `Source/UTM/Public/Reporting/ExperimentMetadataResolver.h`
+- `Source/UTM/Private/Reporting/ExperimentMetadataResolver.cpp`
+
+### 当前职责划分
+
+`FExperimentMetadataResolver` 负责：
+
+- 接收 `FExperimentMetadataResolverInput`。
+- 清理 Details 面板中手动填写的 `ExperimentRunId`、`ExperimentPhase`、`ExperimentGroupId`、`ExperimentGroupName`、`ExperimentScenarioName`。
+- 从已有 `run_id` 中解析 `phase` 和 `group_id`。
+- 在缺失字段时根据执行配置推断默认实验分组。
+- 根据 `ExecutionRandomSeed` 推断默认实验阶段。
+- 根据地图类型提供默认 `scenario_name`。
+- 在 `run_id` 缺失时生成兼容旧规则的 fallback run id。
+
+`APathPlanningDemoActor` 现在负责：
+
+- 收集 UE 运行时状态、规划统计、执行统计、地图类型、Planner 类型和执行期配置。
+- 构造 `FExperimentMetadataResolverInput`。
+- 调用 `FExperimentMetadataResolver::Resolve(...)` 获得标准化后的实验元数据。
+- 将解析结果填入 `FExperimentReportContext`，再交给 `FExperimentReporter` 生成 JSON。
+
+`FExperimentReporter` 继续负责：
+
+- 接收 `FExperimentReportContext`。
+- 按现有字段名生成结构化实验 JSON。
+- 保持 `[StructuredExperimentJSON]` 单行日志输出格式。
+
+### 保守性说明
+
+- 没有新增、删除或重命名 JSON 字段。
+- 没有修改 `scheduler_type`、`planner_type`、`scenario_name`、`run_id`、`phase`、`group_id`、`group_name` 等字段含义。
+- 保留原有 PhaseA/PhaseB、G1/G2/G3、R1/R2/R3 的推断规则。
+- 保留原有随机种子与 Phase 不匹配时的 `UE_LOG` 警告。
+- `ExperimentMetadataResolver` 不接触 `UWorld`、`AActor`、无人机生成、Debug 绘制和执行期状态推进。
+- `APathPlanningDemoActor::BuildStructuredExperimentSummaryJson()` 仍然是实验报告入口，但内部不再直接维护实验元数据推断细节。
