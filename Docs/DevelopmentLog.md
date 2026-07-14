@@ -717,3 +717,47 @@ Scene Start_i / Goal_i Actors
 - 没有把 `FExecutionAgentState` 传入新模块，因为它包含 `TObjectPtr<ADroneActor>`。
 - `TryExecutionReplan(...)` 内部构造 replan snapshot 时显式使用 `LastObservedCell`，保持旧候选选择和 replan start 位置语义。
 - anchor/grid 构造、post-check 和状态写回暂时保留在 Actor，作为下一轮拆分对象。
+
+## 2026-07-14 Execution Replan 第二轮拆分
+
+### 背景
+
+第一轮拆分后，`APathPlanningDemoActor::TryExecutionReplan(...)` 已经不再直接维护 UTM 静态安全判断、局部候选任务扩展和 replan mission 构造，但 static anchor 选择和 `ReplanGrid` 构造仍然保留在 Actor 内部。
+
+这部分逻辑仍然属于执行期重规划算法：它根据当前执行快照、候选重规划集合、forced anchor 集合、UTM 安全约束、空间扩展半径和 lookahead window，构造真正交给 Planner 的重规划网格。因此本阶段将其继续抽入 Execution 模块。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionReplanGridBuilder.h`
+- `Source/UTM/Private/Execution/ExecutionReplanGridBuilder.cpp`
+
+### 当前职责划分
+
+`FExecutionReplanGridBuilder` 负责：
+
+- 接收 `FExecutionReplanGridBuildInput`。
+- 复制基础 `FGridMap3D`，生成本次 attempt 使用的 `ReplanGrid`。
+- 在 local replan 模式下，把未参与重规划的 active agent 当前 cell 标记为 blocked。
+- 在 LaCAM-UTM 场景下选择 static anchor mission。
+- 处理 post-check targeted retry 传入的 forced anchors。
+- 根据 `FUTMSafetyModel` 标记 static anchor footprint。
+- 返回 `AnchorMissionIds`、`AnchorMissionIdSet` 和 `StaticAnchorBlockedCellCount`，供 Actor 原有日志和后续路径处理继续使用。
+
+`APathPlanningDemoActor::TryExecutionReplan(...)` 现在仍然负责：
+
+- replan attempt 计时统计。
+- 调用 `FExecutionReplanGridBuilder::Build(...)`。
+- 调用 `FReplanMissionBuilder::Build(...)`。
+- 调用 `PlanMultiAgentMissionsOnGrid(...)`。
+- 将重规划世界路径转换为 cell path。
+- post-check 验证和 targeted retry 控制。
+- 将重规划结果写回执行状态。
+
+### 保守性说明
+
+- 没有修改 static anchor 的选择条件。
+- 没有修改 local replan 下非候选 active agent 的 blocking 规则。
+- 没有修改 `StaticAnchorBlockedCellCount` 的计数语义。
+- 没有修改 global/local replan 的日志字段。
+- `ExecutionReplanGridBuilder` 不接触 `AActor`、`ADroneActor`、`UWorld` 或 Debug 绘制。
+- post-check 验证和执行状态写回仍留在 Actor，作为下一轮可选拆分对象。

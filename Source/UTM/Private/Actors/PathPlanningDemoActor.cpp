@@ -9,6 +9,7 @@
 #include "Engine/World.h"
 
 #include "Execution/ExecutionReplanCandidateSelector.h"
+#include "Execution/ExecutionReplanGridBuilder.h"
 #include "Execution/ReplanMissionBuilder.h"
 #include "Planning/DiscreteAlignmentManager.h"
 #include "Planning/MissionSchedulerRegistry.h"
@@ -2983,42 +2984,6 @@ bool APathPlanningDemoActor::TryExecutionReplan(
             return State != nullptr && !State->bFinished;
         };
 
-    auto GetPredictedCellAtOffset = [&](const FExecutionAgentState& State, int32 Offset) -> FIntVector
-        {
-            if (Offset <= 0 || State.PlannedCells.Num() <= 0)
-            {
-                return State.LastObservedCell;
-            }
-
-            const int32 BaseIndex = FMath::Clamp(State.ExecutedPlanIndex, 0, State.PlannedCells.Num() - 1);
-            return GetCellAtTime(State.PlannedCells, BaseIndex + Offset);
-        };
-
-    auto GetCellDistance = [](const FIntVector& A, const FIntVector& B) -> int32
-        {
-            return FMath::Max3(
-                FMath::Abs(A.X - B.X),
-                FMath::Abs(A.Y - B.Y),
-                FMath::Abs(A.Z - B.Z));
-        };
-
-    auto HaveStaticUTMCoupling = [&](const FIntVector& CellA, int32 MissionIdA, const FIntVector& CellB, int32 MissionIdB) -> bool
-        {
-            if (PlannerType != EPlannerType::LaCAMUTM)
-            {
-                return false;
-            }
-
-            const FDroneMissionConfig* MissionConfigA = ExecutionMissionConfigsByMissionId.Find(MissionIdA);
-            const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(MissionIdB);
-            if (!MissionConfigA || !MissionConfigB)
-            {
-                return false;
-            }
-
-            return FUTMSafetyModel::HasStaticUTMConfigConflict(CellA, *MissionConfigA, CellB, *MissionConfigB);
-        };
-
     auto TryPlanCandidateSet = [&](TSet<int32> CandidateMissionIdSet, int32 AttemptIndex, int32 AttemptCount, int32 SpatialRadiusCells, int32 LookaheadSteps) -> bool
         {
             const double AttemptStartSeconds = FPlatformTime::Seconds();
@@ -3059,171 +3024,29 @@ bool APathPlanningDemoActor::TryExecutionReplan(
                 return false;
             }
 
-            const int32 AnchorLookaheadSteps = FMath::Max(0, LookaheadSteps);
-            const int32 AnchorSpatialRadiusCells = FMath::Max(0, SpatialRadiusCells);
+            FExecutionReplanGridBuildInput GridBuildInput;
+            GridBuildInput.BaseGrid = &GridMap;
+            GridBuildInput.Snapshot = ExecutionSnapshot;
+            GridBuildInput.MissionConfigsById = ExecutionMissionConfigsByMissionId;
+            GridBuildInput.CandidateMissionIds = CandidateMissionIdSet;
+            GridBuildInput.ForcedAnchorMissionIds = ForcedAnchorMissionIdSet;
+            GridBuildInput.bGlobalReplan = bGlobalReplan;
+            GridBuildInput.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
+            GridBuildInput.SpatialRadiusCells = SpatialRadiusCells;
+            GridBuildInput.LookaheadSteps = LookaheadSteps;
 
-            auto IsAnchorRelevantToCandidates = [&](const FExecutionAgentState& AnchorState, const FDroneMissionConfig& AnchorConfig) -> bool
-                {
-                    const FIntVector AnchorCell = AnchorState.LastObservedCell;
-                    const int32 AnchorInfluenceRadius = FUTMSafetyModel::GetMissionInfluenceRadiusCells(AnchorConfig);
-
-                    for (const int32 CandidateMissionId : CandidateMissionIds)
-                    {
-                        const FExecutionAgentState* CandidateState = ExecutionStates.Find(CandidateMissionId);
-                        const FDroneMissionConfig* CandidateConfig = ExecutionMissionConfigsByMissionId.Find(CandidateMissionId);
-                        if (!CandidateState || !CandidateConfig)
-                        {
-                            continue;
-                        }
-
-                        const int32 EffectiveRadiusCells = AnchorSpatialRadiusCells
-                            + AnchorInfluenceRadius
-                            + FUTMSafetyModel::GetMissionInfluenceRadiusCells(*CandidateConfig);
-
-                        auto IsCandidateCellRelevant = [&](const FIntVector& CandidateCell) -> bool
-                            {
-                                return CandidateCell == AnchorCell
-                                    || HaveStaticUTMCoupling(CandidateCell, CandidateMissionId, AnchorCell, AnchorState.MissionId)
-                                    || (EffectiveRadiusCells > 0 && GetCellDistance(CandidateCell, AnchorCell) <= EffectiveRadiusCells);
-                            };
-
-                        for (int32 Offset = 0; Offset <= AnchorLookaheadSteps; ++Offset)
-                        {
-                            if (IsCandidateCellRelevant(GetPredictedCellAtOffset(*CandidateState, Offset)))
-                            {
-                                return true;
-                            }
-                        }
-
-                        if (IsCandidateCellRelevant(CandidateState->GoalCell))
-                        {
-                            return true;
-                        }
-                    }
-
-                    return false;
-                };
-
-            TArray<int32> AnchorMissionIds;
-            TSet<int32> AnchorMissionIdSet;
-            if (PlannerType == EPlannerType::LaCAMUTM)
+            const FExecutionReplanGridBuildResult GridBuildResult =
+                FExecutionReplanGridBuilder::Build(GridBuildInput);
+            if (!GridBuildResult.bSuccess)
             {
-                AnchorMissionIds.Reserve(ExecutionStates.Num());
-                for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
-                {
-                    const FExecutionAgentState& State = KVP.Value;
-                    if (!State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
-                    {
-                        continue;
-                    }
-
-                    const FDroneMissionConfig* MissionConfig = ExecutionMissionConfigsByMissionId.Find(State.MissionId);
-                    const bool bForcedAnchor = ForcedAnchorMissionIdSet.Contains(State.MissionId);
-                    if (!MissionConfig || (!bForcedAnchor && !IsAnchorRelevantToCandidates(State, *MissionConfig)))
-                    {
-                        continue;
-                    }
-
-                    AnchorMissionIds.Add(State.MissionId);
-                    AnchorMissionIdSet.Add(State.MissionId);
-                }
+                UE_LOG(LogTemp, Warning, TEXT("[AlignmentReplan] %s"), *GridBuildResult.FailureReason);
+                return false;
             }
 
-            AnchorMissionIds.Sort();
-
-            FGridMap3D ReplanGrid = GridMap;
-
-            auto MarkBlockedCell = [&](const FIntVector& Cell)
-                {
-                    if (!ReplanGrid.IsInside(Cell.X, Cell.Y, Cell.Z) || ReplanGrid.Occupancy.Num() <= 0)
-                    {
-                        return;
-                    }
-
-                    const int32 Index = ReplanGrid.ToIndex(Cell.X, Cell.Y, Cell.Z);
-                    if (ReplanGrid.Occupancy.IsValidIndex(Index))
-                    {
-                        ReplanGrid.Occupancy[Index] = 1;
-                    }
-                };
-
-            if (!bGlobalReplan)
-            {
-                for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
-                {
-                    const FExecutionAgentState& State = KVP.Value;
-                    if (State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
-                    {
-                        continue;
-                    }
-
-                    MarkBlockedCell(State.LastObservedCell);
-                }
-            }
-
-            int32 StaticAnchorBlockedCellCount = 0;
-            TSet<FIntVector> StaticAnchorBlockedCells;
-            auto MarkStaticAnchorFootprint = [&](const FExecutionAgentState& AnchorState, const FDroneMissionConfig& AnchorConfig)
-                {
-                    const FIntVector AnchorCell = AnchorState.LastObservedCell;
-                    const int32 AnchorInfluenceRadius = FUTMSafetyModel::GetMissionInfluenceRadiusCells(AnchorConfig);
-
-                    for (const int32 CandidateMissionId : CandidateMissionIds)
-                    {
-                        const FDroneMissionConfig* CandidateConfig = ExecutionMissionConfigsByMissionId.Find(CandidateMissionId);
-                        if (!CandidateConfig)
-                        {
-                            continue;
-                        }
-
-                        const int32 SearchRadiusCells = FMath::Max(
-                            0,
-                            AnchorInfluenceRadius + FUTMSafetyModel::GetMissionInfluenceRadiusCells(*CandidateConfig));
-                        for (int32 Z = AnchorCell.Z - SearchRadiusCells; Z <= AnchorCell.Z + SearchRadiusCells; ++Z)
-                        {
-                            for (int32 Y = AnchorCell.Y - SearchRadiusCells; Y <= AnchorCell.Y + SearchRadiusCells; ++Y)
-                            {
-                                for (int32 X = AnchorCell.X - SearchRadiusCells; X <= AnchorCell.X + SearchRadiusCells; ++X)
-                                {
-                                    const FIntVector CandidateCell(X, Y, Z);
-                                    if (!ReplanGrid.IsInside(CandidateCell.X, CandidateCell.Y, CandidateCell.Z))
-                                    {
-                                        continue;
-                                    }
-
-                                    if (!FUTMSafetyModel::HasStaticUTMConfigConflict(CandidateCell, *CandidateConfig, AnchorCell, AnchorConfig))
-                                    {
-                                        continue;
-                                    }
-
-                                    if (!StaticAnchorBlockedCells.Contains(CandidateCell))
-                                    {
-                                        StaticAnchorBlockedCells.Add(CandidateCell);
-                                        StaticAnchorBlockedCellCount++;
-                                    }
-                                    MarkBlockedCell(CandidateCell);
-                                }
-                            }
-                        }
-                    }
-                };
-
-            for (const int32 AnchorMissionId : AnchorMissionIds)
-            {
-                const FExecutionAgentState* AnchorState = ExecutionStates.Find(AnchorMissionId);
-                const FDroneMissionConfig* AnchorConfig = ExecutionMissionConfigsByMissionId.Find(AnchorMissionId);
-                if (!AnchorState || !AnchorConfig)
-                {
-                    UE_LOG(
-                        LogTemp,
-                        Warning,
-                        TEXT("[AlignmentReplan] missing static-anchor state or mission config for Mission %d"),
-                        AnchorMissionId);
-                    return false;
-                }
-
-                MarkStaticAnchorFootprint(*AnchorState, *AnchorConfig);
-            }
+            const FGridMap3D& ReplanGrid = GridBuildResult.ReplanGrid;
+            const TArray<int32>& AnchorMissionIds = GridBuildResult.AnchorMissionIds;
+            const TSet<int32>& AnchorMissionIdSet = GridBuildResult.AnchorMissionIdSet;
+            const int32 StaticAnchorBlockedCellCount = GridBuildResult.StaticAnchorBlockedCellCount;
 
             FReplanMissionBuildInput ReplanMissionBuildInput;
             ReplanMissionBuildInput.Agents = ExecutionSnapshot.Agents;
