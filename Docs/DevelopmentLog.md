@@ -658,3 +658,62 @@ Scene Start_i / Goal_i Actors
 - 保留原有随机种子与 Phase 不匹配时的 `UE_LOG` 警告。
 - `ExperimentMetadataResolver` 不接触 `UWorld`、`AActor`、无人机生成、Debug 绘制和执行期状态推进。
 - `APathPlanningDemoActor::BuildStructuredExperimentSummaryJson()` 仍然是实验报告入口，但内部不再直接维护实验元数据推断细节。
+
+## 2026-07-14 Execution Replan 第一轮拆分
+
+### 背景
+
+`APathPlanningDemoActor::TryExecutionReplan(...)` 仍然承担了执行期重规划的大量算法职责，包括局部候选任务扩展、UTM 静态安全约束判断、replan mission 构造、replan grid / anchor 构造、Planner 调用、post-check 验证和执行状态写回。
+
+本阶段只做第一轮低风险拆分：先把可复用、无 UE Actor 指针依赖的逻辑移出 Actor，不改 post-check、anchor/grid 构造和执行状态写回。
+
+### 新增文件
+
+- `Source/UTM/Public/Planning/UTMSafetyModel.h`
+- `Source/UTM/Private/Planning/UTMSafetyModel.cpp`
+- `Source/UTM/Public/Execution/ExecutionReplanCandidateSelector.h`
+- `Source/UTM/Private/Execution/ExecutionReplanCandidateSelector.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+- `Source/UTM/Private/Execution/ReplanMissionBuilder.cpp`
+
+### 当前职责划分
+
+`FUTMSafetyModel` 负责：
+
+- 判断两个 mission 在指定 cell 上是否存在静态 UTM 冲突。
+- 区分 `ProtectionFootprint` 和 `Downwash`。
+- 计算 mission 的安全影响半径，供 anchor relevance 和 footprint blocking 复用。
+
+`FExecutionReplanCandidateSelector` 负责：
+
+- 根据 `FExecutionSnapshot`、mission config、请求重规划的 mission 集合、空间扩展半径和 lookahead window 选择本轮 replan 候选集合。
+- 支持 local conflict component 扩展。
+- 在 LaCAM-UTM 场景下复用 `FUTMSafetyModel` 判断静态 UTM 耦合。
+
+`FReplanMissionBuilder` 现在负责：
+
+- 根据执行快照和候选 mission id 构造 `ReplanMissions`。
+- 使用当前观测位置作为新的 `StartWorld`。
+- 保留原 mission config 中的 `GoalWorld` 和 UTM safety 参数。
+- 按 MissionId 排序输出，保持旧流程中 Planner 输入顺序稳定。
+
+`APathPlanningDemoActor::TryExecutionReplan(...)` 仍然负责：
+
+- 入口条件检查和 replan 计时统计。
+- static anchor 选择和 replan grid 构造。
+- 调用 `PlanMultiAgentMissionsOnGrid(...)`。
+- post-check 验证和 targeted retry 控制。
+- 将重规划结果写回 `ExecutionStates`、`PlannedCellPathsByMission` 和 `LastPlannedPathsByMission`。
+- 更新 `TotalExecutionReplanCount` 和日志。
+
+### 保守性说明
+
+- 没有修改 `ExecutionReplanMode`、`MaxExecutionReplanCount`、local/global replan 的外部配置。
+- 没有修改 post-check 冲突类型和检查窗口。
+- 没有修改 replan attempt 的计时范围。
+- 没有把 `FExecutionAgentState` 传入新模块，因为它包含 `TObjectPtr<ADroneActor>`。
+- `TryExecutionReplan(...)` 内部构造 replan snapshot 时显式使用 `LastObservedCell`，保持旧候选选择和 replan start 位置语义。
+- anchor/grid 构造、post-check 和状态写回暂时保留在 Actor，作为下一轮拆分对象。

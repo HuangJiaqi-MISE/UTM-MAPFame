@@ -4,6 +4,14 @@ FReplanMissionBuildResult FReplanMissionBuilder::Build(const FReplanMissionBuild
 {
     FReplanMissionBuildResult Result;
 
+    TMap<int32, const FExecutionAgentSnapshot*> AgentsByMissionId;
+    AgentsByMissionId.Reserve(Input.Agents.Num());
+    for (const FExecutionAgentSnapshot& Agent : Input.Agents)
+    {
+        AgentsByMissionId.Add(Agent.MissionId, &Agent);
+    }
+
+    TArray<int32> SelectedMissionIds;
     for (const FExecutionAgentSnapshot& Agent : Input.Agents)
     {
         const bool bIncludeMission =
@@ -16,16 +24,31 @@ FReplanMissionBuildResult FReplanMissionBuilder::Build(const FReplanMissionBuild
             continue;
         }
 
-        const FDroneMissionConfig* MissionConfig = Input.MissionConfigsById.Find(Agent.MissionId);
+        SelectedMissionIds.Add(Agent.MissionId);
+    }
+
+    SelectedMissionIds.Sort();
+    Result.ReplanMissions.Reserve(SelectedMissionIds.Num());
+
+    for (const int32 MissionId : SelectedMissionIds)
+    {
+        const FExecutionAgentSnapshot* const* Agent = AgentsByMissionId.Find(MissionId);
+        if (!Agent || !*Agent)
+        {
+            Result.FailureReason = FString::Printf(TEXT("missing execution snapshot for MissionId=%d"), MissionId);
+            return Result;
+        }
+
+        const FDroneMissionConfig* MissionConfig = Input.MissionConfigsById.Find(MissionId);
         if (!MissionConfig)
         {
-            Result.FailureReason = FString::Printf(TEXT("missing mission config for MissionId=%d"), Agent.MissionId);
+            Result.FailureReason = FString::Printf(TEXT("missing mission config for MissionId=%d"), MissionId);
             return Result;
         }
 
         FDroneMissionConfig ReplanMission = *MissionConfig;
-        ReplanMission.StartWorld = Agent.ObservedWorld;
-        ReplanMission.GoalWorld = Agent.GoalWorld;
+        ReplanMission.StartWorld = (*Agent)->ObservedWorld;
+        ReplanMission.bStationaryAnchor = false;
         Result.ReplanMissions.Add(ReplanMission);
     }
 

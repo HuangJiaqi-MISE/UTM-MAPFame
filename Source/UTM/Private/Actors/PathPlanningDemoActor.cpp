@@ -8,10 +8,13 @@
 #include "Actors/DroneActor.h"
 #include "Engine/World.h"
 
+#include "Execution/ExecutionReplanCandidateSelector.h"
+#include "Execution/ReplanMissionBuilder.h"
 #include "Planning/DiscreteAlignmentManager.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
 #include "Planning/PlannerRegistry.h"
+#include "Planning/UTMSafetyModel.h"
 #include "Missions/MissionSourceBuilder.h"
 
 #include "Actors/MissionMarkerActor.h"
@@ -94,109 +97,6 @@ namespace
         }
 
         return TEXT("Unknown");
-    }
-
-    struct FMissionFootprintBox
-    {
-        bool bValid = false;
-        FIntVector Min = FIntVector::ZeroValue;
-        FIntVector Max = FIntVector::ZeroValue;
-    };
-
-    FMissionFootprintBox MakeMissionProtectionBox(const FIntVector& CenterCell, const FDroneMissionConfig& Mission)
-    {
-        const int32 ProtectionXYRadiusCells = FMath::Max(0, Mission.ProtectionXYRadiusCells);
-        const int32 ProtectionZUpCells = FMath::Max(0, Mission.ProtectionZUpCells);
-        const int32 ProtectionZDownCells = FMath::Max(0, Mission.ProtectionZDownCells);
-
-        FMissionFootprintBox Result;
-        Result.bValid = true;
-        Result.Min = FIntVector(
-            CenterCell.X - ProtectionXYRadiusCells,
-            CenterCell.Y - ProtectionXYRadiusCells,
-            CenterCell.Z - ProtectionZDownCells);
-        Result.Max = FIntVector(
-            CenterCell.X + ProtectionXYRadiusCells,
-            CenterCell.Y + ProtectionXYRadiusCells,
-            CenterCell.Z + ProtectionZUpCells);
-        return Result;
-    }
-
-    FMissionFootprintBox MakeMissionDownwashBox(const FIntVector& CenterCell, const FDroneMissionConfig& Mission)
-    {
-        const int32 DownwashXYRadiusCells = FMath::Max(0, Mission.DownwashXYRadiusCells);
-        const int32 DownwashZBelowCells = FMath::Max(0, Mission.DownwashZBelowCells);
-
-        if (DownwashZBelowCells <= 0)
-        {
-            return FMissionFootprintBox();
-        }
-
-        FMissionFootprintBox Result;
-        Result.bValid = true;
-        Result.Min = FIntVector(
-            CenterCell.X - DownwashXYRadiusCells,
-            CenterCell.Y - DownwashXYRadiusCells,
-            CenterCell.Z - DownwashZBelowCells);
-        Result.Max = FIntVector(
-            CenterCell.X + DownwashXYRadiusCells,
-            CenterCell.Y + DownwashXYRadiusCells,
-            CenterCell.Z - 1);
-        return Result;
-    }
-
-    bool MissionBoxesOverlap(const FMissionFootprintBox& Left, const FMissionFootprintBox& Right)
-    {
-        return Left.bValid
-            && Right.bValid
-            && Left.Min.X <= Right.Max.X && Right.Min.X <= Left.Max.X
-            && Left.Min.Y <= Right.Max.Y && Right.Min.Y <= Left.Max.Y
-            && Left.Min.Z <= Right.Max.Z && Right.Min.Z <= Left.Max.Z;
-    }
-
-    enum class EStaticUTMConflictType : uint8
-    {
-        None,
-        ProtectionFootprint,
-        Downwash
-    };
-
-    EStaticUTMConflictType GetStaticUTMConfigConflictType(
-        const FIntVector& CellA,
-        const FDroneMissionConfig& MissionA,
-        const FIntVector& CellB,
-        const FDroneMissionConfig& MissionB)
-    {
-        const FMissionFootprintBox ProtectionA = MakeMissionProtectionBox(CellA, MissionA);
-        const FMissionFootprintBox ProtectionB = MakeMissionProtectionBox(CellB, MissionB);
-        if (MissionBoxesOverlap(ProtectionA, ProtectionB))
-        {
-            return EStaticUTMConflictType::ProtectionFootprint;
-        }
-
-        if (CellA.Z > CellB.Z
-            && MissionBoxesOverlap(MakeMissionDownwashBox(CellA, MissionA), ProtectionB))
-        {
-            return EStaticUTMConflictType::Downwash;
-        }
-
-        if (CellB.Z > CellA.Z
-            && MissionBoxesOverlap(MakeMissionDownwashBox(CellB, MissionB), ProtectionA))
-        {
-            return EStaticUTMConflictType::Downwash;
-        }
-
-        return EStaticUTMConflictType::None;
-    }
-
-    bool HasStaticUTMConfigConflict(
-        const FIntVector& CellA,
-        const FDroneMissionConfig& MissionA,
-        const FIntVector& CellB,
-        const FDroneMissionConfig& MissionB)
-    {
-        return GetStaticUTMConfigConflictType(CellA, MissionA, CellB, MissionB)
-            != EStaticUTMConflictType::None;
     }
 
     TArray<FVector> BuildDebugPreviewPath(const TArray<FVector>& InPath)
@@ -1330,7 +1230,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                         const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(ProposalB->MissionId);
                         if (MissionConfigA && MissionConfigB)
                         {
-                            const EStaticUTMConflictType UTMConflictType = GetStaticUTMConfigConflictType(
+                            const EStaticUTMConflictType UTMConflictType = FUTMSafetyModel::GetStaticUTMConfigConflictType(
                                 ProposalA->ProposedCell,
                                 *MissionConfigA,
                                 ProposalB->ProposedCell,
@@ -1591,7 +1491,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                     const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(ProposalB.MissionId);
                     if (MissionConfigA && MissionConfigB)
                     {
-                        const EStaticUTMConflictType UTMConflictType = GetStaticUTMConfigConflictType(
+                        const EStaticUTMConflictType UTMConflictType = FUTMSafetyModel::GetStaticUTMConfigConflictType(
                             ProposalA.ProposedCell,
                             *MissionConfigA,
                             ProposalB.ProposedCell,
@@ -2164,7 +2064,7 @@ void APathPlanningDemoActor::BuildExecutionSummary()
                 const FIntVector CellB = GetCellAtTime(StateB->ActualCells, TimeStep);
 
                 const EStaticUTMConflictType UTMConflictType =
-                    GetStaticUTMConfigConflictType(CellA, *ConfigA, CellB, *ConfigB);
+                    FUTMSafetyModel::GetStaticUTMConfigConflictType(CellA, *ConfigA, CellB, *ConfigB);
 
                 if (UTMConflictType == EStaticUTMConflictType::None)
                 {
@@ -3067,20 +2967,21 @@ bool APathPlanningDemoActor::TryExecutionReplan(
         return false;
     }
 
+    FExecutionSnapshot ExecutionSnapshot = CaptureExecutionSnapshot();
+    for (FExecutionAgentSnapshot& AgentSnapshot : ExecutionSnapshot.Agents)
+    {
+        if (const FExecutionAgentState* State = ExecutionStates.Find(AgentSnapshot.MissionId))
+        {
+            AgentSnapshot.ObservedCell = State->LastObservedCell;
+            AgentSnapshot.ObservedWorld = GridMap.CellToWorld(State->LastObservedCell);
+        }
+    }
+
     auto IsActiveMission = [&](int32 MissionId) -> bool
         {
             const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
             return State != nullptr && !State->bFinished;
         };
-
-    int32 ActiveRequestedMissionCount = 0;
-    for (const int32 MissionId : RequestedMissionIds)
-    {
-        if (IsActiveMission(MissionId))
-        {
-            ActiveRequestedMissionCount++;
-        }
-    }
 
     auto GetPredictedCellAtOffset = [&](const FExecutionAgentState& State, int32 Offset) -> FIntVector
         {
@@ -3115,139 +3016,7 @@ bool APathPlanningDemoActor::TryExecutionReplan(
                 return false;
             }
 
-            return HasStaticUTMConfigConflict(CellA, *MissionConfigA, CellB, *MissionConfigB);
-        };
-
-    auto AreCurrentStartsCoupled = [&](int32 MissionIdA, int32 MissionIdB) -> bool
-        {
-            if (MissionIdA == MissionIdB)
-            {
-                return false;
-            }
-
-            const FExecutionAgentState* StateA = ExecutionStates.Find(MissionIdA);
-            const FExecutionAgentState* StateB = ExecutionStates.Find(MissionIdB);
-            if (!StateA || !StateB || StateA->bFinished || StateB->bFinished)
-            {
-                return false;
-            }
-
-            return StateA->LastObservedCell == StateB->LastObservedCell
-                || HaveStaticUTMCoupling(StateA->LastObservedCell, MissionIdA, StateB->LastObservedCell, MissionIdB);
-        };
-
-    auto AreWithinSpatialExpansion = [&](int32 MissionIdA, int32 MissionIdB, int32 SpatialRadiusCells) -> bool
-        {
-            if (SpatialRadiusCells <= 0 || MissionIdA == MissionIdB)
-            {
-                return false;
-            }
-
-            const FExecutionAgentState* StateA = ExecutionStates.Find(MissionIdA);
-            const FExecutionAgentState* StateB = ExecutionStates.Find(MissionIdB);
-            if (!StateA || !StateB || StateA->bFinished || StateB->bFinished)
-            {
-                return false;
-            }
-
-            return GetCellDistance(StateA->LastObservedCell, StateB->LastObservedCell) <= SpatialRadiusCells;
-        };
-
-    auto HaveFutureWindowCoupling = [&](int32 MissionIdA, int32 MissionIdB, int32 LookaheadSteps) -> bool
-        {
-            if (LookaheadSteps <= 0 || MissionIdA == MissionIdB)
-            {
-                return false;
-            }
-
-            const FExecutionAgentState* StateA = ExecutionStates.Find(MissionIdA);
-            const FExecutionAgentState* StateB = ExecutionStates.Find(MissionIdB);
-            if (!StateA || !StateB || StateA->bFinished || StateB->bFinished)
-            {
-                return false;
-            }
-
-            for (int32 Offset = 0; Offset <= LookaheadSteps; ++Offset)
-            {
-                const FIntVector CellA = GetPredictedCellAtOffset(*StateA, Offset);
-                const FIntVector CellB = GetPredictedCellAtOffset(*StateB, Offset);
-
-                if (CellA == CellB || HaveStaticUTMCoupling(CellA, MissionIdA, CellB, MissionIdB))
-                {
-                    return true;
-                }
-
-                if (Offset > 0)
-                {
-                    const FIntVector PrevA = GetPredictedCellAtOffset(*StateA, Offset - 1);
-                    const FIntVector PrevB = GetPredictedCellAtOffset(*StateB, Offset - 1);
-                    if (PrevA == CellB && PrevB == CellA && CellA != CellB)
-                    {
-                        return true;
-                    }
-                }
-            }
-
-            return false;
-        };
-
-    auto BuildCandidateSet = [&](int32 SpatialRadiusCells, int32 LookaheadSteps) -> TSet<int32>
-        {
-            TSet<int32> CandidateMissionIdSet;
-
-            for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
-            {
-                const FExecutionAgentState& State = KVP.Value;
-                if (State.bFinished)
-                {
-                    continue;
-                }
-
-                if (bGlobalReplan || RequestedMissionIds.Contains(State.MissionId))
-                {
-                    CandidateMissionIdSet.Add(State.MissionId);
-                }
-            }
-
-            if (bGlobalReplan)
-            {
-                return CandidateMissionIdSet;
-            }
-
-            bool bExpandedLocalComponent = true;
-            while (bExpandedLocalComponent)
-            {
-                bExpandedLocalComponent = false;
-
-                for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
-                {
-                    const FExecutionAgentState& State = KVP.Value;
-                    if (State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
-                    {
-                        continue;
-                    }
-
-                    bool bCoupledWithCandidate = false;
-                    for (const int32 CandidateMissionId : CandidateMissionIdSet)
-                    {
-                        if (AreCurrentStartsCoupled(CandidateMissionId, State.MissionId)
-                            || AreWithinSpatialExpansion(CandidateMissionId, State.MissionId, SpatialRadiusCells)
-                            || HaveFutureWindowCoupling(CandidateMissionId, State.MissionId, LookaheadSteps))
-                        {
-                            bCoupledWithCandidate = true;
-                            break;
-                        }
-                    }
-
-                    if (bCoupledWithCandidate)
-                    {
-                        CandidateMissionIdSet.Add(State.MissionId);
-                        bExpandedLocalComponent = true;
-                    }
-                }
-            }
-
-            return CandidateMissionIdSet;
+            return FUTMSafetyModel::HasStaticUTMConfigConflict(CellA, *MissionConfigA, CellB, *MissionConfigB);
         };
 
     auto TryPlanCandidateSet = [&](TSet<int32> CandidateMissionIdSet, int32 AttemptIndex, int32 AttemptCount, int32 SpatialRadiusCells, int32 LookaheadSteps) -> bool
@@ -3293,18 +3062,10 @@ bool APathPlanningDemoActor::TryExecutionReplan(
             const int32 AnchorLookaheadSteps = FMath::Max(0, LookaheadSteps);
             const int32 AnchorSpatialRadiusCells = FMath::Max(0, SpatialRadiusCells);
 
-            auto GetMissionInfluenceRadiusCells = [](const FDroneMissionConfig& Mission) -> int32
-                {
-                    return FMath::Max3(
-                        FMath::Max(Mission.ProtectionXYRadiusCells, Mission.DownwashXYRadiusCells),
-                        FMath::Max(Mission.ProtectionZUpCells, Mission.ProtectionZDownCells),
-                        Mission.DownwashZBelowCells);
-                };
-
             auto IsAnchorRelevantToCandidates = [&](const FExecutionAgentState& AnchorState, const FDroneMissionConfig& AnchorConfig) -> bool
                 {
                     const FIntVector AnchorCell = AnchorState.LastObservedCell;
-                    const int32 AnchorInfluenceRadius = GetMissionInfluenceRadiusCells(AnchorConfig);
+                    const int32 AnchorInfluenceRadius = FUTMSafetyModel::GetMissionInfluenceRadiusCells(AnchorConfig);
 
                     for (const int32 CandidateMissionId : CandidateMissionIds)
                     {
@@ -3317,7 +3078,7 @@ bool APathPlanningDemoActor::TryExecutionReplan(
 
                         const int32 EffectiveRadiusCells = AnchorSpatialRadiusCells
                             + AnchorInfluenceRadius
-                            + GetMissionInfluenceRadiusCells(*CandidateConfig);
+                            + FUTMSafetyModel::GetMissionInfluenceRadiusCells(*CandidateConfig);
 
                         auto IsCandidateCellRelevant = [&](const FIntVector& CandidateCell) -> bool
                             {
@@ -3405,7 +3166,7 @@ bool APathPlanningDemoActor::TryExecutionReplan(
             auto MarkStaticAnchorFootprint = [&](const FExecutionAgentState& AnchorState, const FDroneMissionConfig& AnchorConfig)
                 {
                     const FIntVector AnchorCell = AnchorState.LastObservedCell;
-                    const int32 AnchorInfluenceRadius = GetMissionInfluenceRadiusCells(AnchorConfig);
+                    const int32 AnchorInfluenceRadius = FUTMSafetyModel::GetMissionInfluenceRadiusCells(AnchorConfig);
 
                     for (const int32 CandidateMissionId : CandidateMissionIds)
                     {
@@ -3415,7 +3176,9 @@ bool APathPlanningDemoActor::TryExecutionReplan(
                             continue;
                         }
 
-                        const int32 SearchRadiusCells = FMath::Max(0, AnchorInfluenceRadius + GetMissionInfluenceRadiusCells(*CandidateConfig));
+                        const int32 SearchRadiusCells = FMath::Max(
+                            0,
+                            AnchorInfluenceRadius + FUTMSafetyModel::GetMissionInfluenceRadiusCells(*CandidateConfig));
                         for (int32 Z = AnchorCell.Z - SearchRadiusCells; Z <= AnchorCell.Z + SearchRadiusCells; ++Z)
                         {
                             for (int32 Y = AnchorCell.Y - SearchRadiusCells; Y <= AnchorCell.Y + SearchRadiusCells; ++Y)
@@ -3428,7 +3191,7 @@ bool APathPlanningDemoActor::TryExecutionReplan(
                                         continue;
                                     }
 
-                                    if (!HasStaticUTMConfigConflict(CandidateCell, *CandidateConfig, AnchorCell, AnchorConfig))
+                                    if (!FUTMSafetyModel::HasStaticUTMConfigConflict(CandidateCell, *CandidateConfig, AnchorCell, AnchorConfig))
                                     {
                                         continue;
                                     }
@@ -3462,28 +3225,25 @@ bool APathPlanningDemoActor::TryExecutionReplan(
                 MarkStaticAnchorFootprint(*AnchorState, *AnchorConfig);
             }
 
-            TArray<FDroneMissionConfig> ReplanMissions;
-            ReplanMissions.Reserve(CandidateMissionIds.Num());
+            FReplanMissionBuildInput ReplanMissionBuildInput;
+            ReplanMissionBuildInput.Agents = ExecutionSnapshot.Agents;
+            ReplanMissionBuildInput.MissionConfigsById = ExecutionMissionConfigsByMissionId;
+            ReplanMissionBuildInput.RequestedMissionIds = CandidateMissionIdSet;
+            ReplanMissionBuildInput.bGlobalReplan = false;
 
-            for (const int32 MissionId : CandidateMissionIds)
+            const FReplanMissionBuildResult ReplanMissionBuildResult =
+                FReplanMissionBuilder::Build(ReplanMissionBuildInput);
+            if (!ReplanMissionBuildResult.bSuccess)
             {
-                const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-                const FDroneMissionConfig* MissionConfig = ExecutionMissionConfigsByMissionId.Find(MissionId);
-                if (!State || !MissionConfig)
-                {
-                    UE_LOG(
-                        LogTemp,
-                        Warning,
-                        TEXT("[AlignmentReplan] missing state or mission config for Mission %d"),
-                        MissionId);
-                    return false;
-                }
-
-                FDroneMissionConfig ReplanMission = *MissionConfig;
-                ReplanMission.StartWorld = GridMap.CellToWorld(State->LastObservedCell);
-                ReplanMission.bStationaryAnchor = false;
-                ReplanMissions.Add(ReplanMission);
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[AlignmentReplan] failed to build replan missions: %s"),
+                    *ReplanMissionBuildResult.FailureReason);
+                return false;
             }
+
+            const TArray<FDroneMissionConfig>& ReplanMissions = ReplanMissionBuildResult.ReplanMissions;
 
             TMap<int32, TArray<FVector>> ReplannedWorldPaths;
             const bool bSuccess = PlanMultiAgentMissionsOnGrid(ReplanGrid, ReplanMissions, ReplannedWorldPaths);
@@ -3650,7 +3410,7 @@ bool APathPlanningDemoActor::TryExecutionReplan(
                                     const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(StateB->MissionId);
                                     if (MissionConfigA && MissionConfigB)
                                     {
-                                        const EStaticUTMConflictType UTMConflictType = GetStaticUTMConfigConflictType(
+                                        const EStaticUTMConflictType UTMConflictType = FUTMSafetyModel::GetStaticUTMConfigConflictType(
                                             CellA,
                                             *MissionConfigA,
                                             CellB,
@@ -3750,36 +3510,19 @@ bool APathPlanningDemoActor::TryExecutionReplan(
                     AddPostCheckRetryMission(PostCheckConflict.AgentA);
                     AddPostCheckRetryMission(PostCheckConflict.AgentB);
 
-                    bool bExpandedTargetedComponent = true;
-                    while (bTargetedRetryExpanded && bExpandedTargetedComponent)
+                    if (bTargetedRetryExpanded)
                     {
-                        bExpandedTargetedComponent = false;
-                        for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
-                        {
-                            const FExecutionAgentState& State = KVP.Value;
-                            if (State.bFinished || CandidateMissionIdSet.Contains(State.MissionId))
-                            {
-                                continue;
-                            }
+                        FExecutionReplanCandidateSelectionInput TargetedSelectionInput;
+                        TargetedSelectionInput.Snapshot = ExecutionSnapshot;
+                        TargetedSelectionInput.MissionConfigsById = ExecutionMissionConfigsByMissionId;
+                        TargetedSelectionInput.RequestedMissionIds = CandidateMissionIdSet;
+                        TargetedSelectionInput.bGlobalReplan = false;
+                        TargetedSelectionInput.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
+                        TargetedSelectionInput.SpatialRadiusCells = SpatialRadiusCells;
+                        TargetedSelectionInput.LookaheadSteps = LookaheadSteps;
 
-                            bool bCoupledWithCandidate = false;
-                            for (const int32 CandidateMissionId : CandidateMissionIdSet)
-                            {
-                                if (AreCurrentStartsCoupled(CandidateMissionId, State.MissionId)
-                                    || AreWithinSpatialExpansion(CandidateMissionId, State.MissionId, SpatialRadiusCells)
-                                    || HaveFutureWindowCoupling(CandidateMissionId, State.MissionId, LookaheadSteps))
-                                {
-                                    bCoupledWithCandidate = true;
-                                    break;
-                                }
-                            }
-
-                            if (bCoupledWithCandidate)
-                            {
-                                CandidateMissionIdSet.Add(State.MissionId);
-                                bExpandedTargetedComponent = true;
-                            }
-                        }
+                        CandidateMissionIdSet =
+                            FExecutionReplanCandidateSelector::Select(TargetedSelectionInput).CandidateMissionIds;
                     }
 
                     if (bTargetedRetryExpanded)
@@ -3900,9 +3643,20 @@ bool APathPlanningDemoActor::TryExecutionReplan(
             ? BaseLookaheadSteps
             : BaseLookaheadSteps * (AttemptIndex + 1);
 
-        TSet<int32> CandidateMissionIdSet = BuildCandidateSet(SpatialRadiusCells, LookaheadSteps);
+        FExecutionReplanCandidateSelectionInput CandidateSelectionInput;
+        CandidateSelectionInput.Snapshot = ExecutionSnapshot;
+        CandidateSelectionInput.MissionConfigsById = ExecutionMissionConfigsByMissionId;
+        CandidateSelectionInput.RequestedMissionIds = RequestedMissionIds;
+        CandidateSelectionInput.bGlobalReplan = bGlobalReplan;
+        CandidateSelectionInput.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
+        CandidateSelectionInput.SpatialRadiusCells = SpatialRadiusCells;
+        CandidateSelectionInput.LookaheadSteps = LookaheadSteps;
 
-        if (!bGlobalReplan && CandidateMissionIdSet.Num() > ActiveRequestedMissionCount)
+        const FExecutionReplanCandidateSelectionResult CandidateSelectionResult =
+            FExecutionReplanCandidateSelector::Select(CandidateSelectionInput);
+        TSet<int32> CandidateMissionIdSet = CandidateSelectionResult.CandidateMissionIds;
+
+        if (!bGlobalReplan && CandidateMissionIdSet.Num() > CandidateSelectionResult.ActiveRequestedMissionCount)
         {
             UE_LOG(
                 LogTemp,
@@ -3910,7 +3664,7 @@ bool APathPlanningDemoActor::TryExecutionReplan(
                 TEXT("[AlignmentReplan] local conflict component attempt %d/%d expanded from %d to %d missions (K=%d W=%d)"),
                 AttemptIndex + 1,
                 AttemptCount,
-                ActiveRequestedMissionCount,
+                CandidateSelectionResult.ActiveRequestedMissionCount,
                 CandidateMissionIdSet.Num(),
                 SpatialRadiusCells,
                 LookaheadSteps);
@@ -4023,7 +3777,7 @@ bool APathPlanningDemoActor::TryGenerateSingleMission(
             for (const FDroneMissionConfig& ExistingMission : MissionConfigs)
             {
                 const FIntVector ExistingStartCell = GridMap.WorldToCell(ExistingMission.StartWorld);
-                if (HasStaticUTMConfigConflict(CandidateStartCell, CandidateMission, ExistingStartCell, ExistingMission))
+                if (FUTMSafetyModel::HasStaticUTMConfigConflict(CandidateStartCell, CandidateMission, ExistingStartCell, ExistingMission))
                 {
                     return true;
                 }
@@ -4037,7 +3791,7 @@ bool APathPlanningDemoActor::TryGenerateSingleMission(
             for (const FDroneMissionConfig& ExistingMission : MissionConfigs)
             {
                 const FIntVector ExistingGoalCell = GridMap.WorldToCell(ExistingMission.GoalWorld);
-                if (HasStaticUTMConfigConflict(CandidateGoalCell, CandidateMission, ExistingGoalCell, ExistingMission))
+                if (FUTMSafetyModel::HasStaticUTMConfigConflict(CandidateGoalCell, CandidateMission, ExistingGoalCell, ExistingMission))
                 {
                     return true;
                 }
