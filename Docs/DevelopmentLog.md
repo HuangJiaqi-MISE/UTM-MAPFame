@@ -876,3 +876,67 @@ post-check 验证用于检查重规划后的路径与未重规划 agent 的未�
 - 没有修改 vertex、edge、`ProtectionFootprint`、`Downwash` 的判定优先级。
 - `Offset == 0` 时仍然不启用 edge swap 检查。
 - `FExecutionReplanPostCheckPolicy` 不再直接依赖 `FUTMSafetyModel`，统一通过 `FConflictPredictionPolicy` 间接使用安全模型。
+
+## 2026-07-14 Execution Replan Attempt 第一轮整理
+
+### 背景
+
+在前几轮拆分后，`APathPlanningDemoActor::TryExecutionReplan(...)` 已经不再直接维护 candidate selection、replan grid 构造、post-check 内部冲突判断等细节，但单次 replan attempt 的 grid 构造、mission 构造、planner 调用、cell path 转换和 post-check 调用仍然堆在同一个内部 lambda 中。
+
+本轮先做低风险整理：抽出一次 attempt 的输入/输出结构和 Actor 内部 helper，并将成功后的执行状态写回整理为单独的 Actor 内部 helper。
+
+### 修改文件
+
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 新增内部结构
+
+`APathPlanningDemoActor` 新增以下私有结构：
+
+- `FExecutionReplanAttemptSpec`
+- `FExecutionReplanAttemptInput`
+- `EExecutionReplanAttemptStatus`
+- `FExecutionReplanAttemptResult`
+
+这些结构只用于 Actor 内部，不暴露给 Blueprint。
+
+### 当前职责划分
+
+`RunExecutionReplanAttempt(...)` 现在负责：
+
+- 将 candidate mission set 排序为本轮 movable mission 列表。
+- 调用 `FExecutionReplanGridBuilder::Build(...)`。
+- 调用 `FReplanMissionBuilder::Build(...)`。
+- 调用 `PlanMultiAgentMissionsOnGrid(...)`。
+- 将 replanned world path 转换为 cell path。
+- 调用 `FExecutionReplanPostCheckPolicy::Validate(...)`。
+- 返回 attempt 状态、anchor 信息、static blocked cell 数量、replanned cell paths 和 post-check conflict。
+
+`TryExecutionReplan(...)` 继续负责：
+
+- 入口条件检查。
+- 捕获执行期 snapshot。
+- local/global attempt 计时和统计。
+- local expansion attempt 循环。
+- post-check targeted retry 控制。
+- 成功后调用 `ApplyExecutionReplanAttemptResult(...)` 写回执行状态。
+- 更新 `TotalExecutionReplanCount` 和原有日志。
+
+`ApplyExecutionReplanAttemptResult(...)` 现在负责：
+
+- 根据成功 attempt 产物更新 `ExecutionStates`。
+- 重建 timeline cell path 和 world path。
+- 更新 `PlannedCellPathsByMission`。
+- 更新 `LastPlannedPathsByMission`。
+- 填充 `OutReplannedMissionIds`。
+
+### 保守性说明
+
+- 没有修改 local/global replan attempt 计时作用域。
+- 没有把 post-check targeted retry 计为额外 attempt。
+- 没有修改 planner 调用参数。
+- 没有修改 post-check 触发条件。
+- 没有修改成功后的执行状态写回语义。
+- `RunExecutionReplanAttempt(...)` 仍然留在 Actor 中，因为它需要访问 `PlanMultiAgentMissionsOnGrid(...)`、`BuildCellPathFromWorldPath(...)`、`ExecutionStates` 和 `GridMap`。
+- `ApplyExecutionReplanAttemptResult(...)` 也留在 Actor 中，因为它直接写入 `FExecutionAgentState` 和 Actor 内部路径缓存。
