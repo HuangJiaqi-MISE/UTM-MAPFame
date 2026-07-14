@@ -156,7 +156,7 @@ bool FConflictPredictionPolicy::FindFirstConflict(
                 continue;
             }
 
-            if (ConflictPredictionFindPairConflict(A, B, Settings, Input, OutConflict))
+            if (FindPairConflict(A, B, Input, OutConflict))
             {
                 return true;
             }
@@ -164,6 +164,15 @@ bool FConflictPredictionPolicy::FindFirstConflict(
     }
 
     return false;
+}
+
+bool FConflictPredictionPolicy::FindPairConflict(
+    const FExecutionConflictCheckItem& A,
+    const FExecutionConflictCheckItem& B,
+    const FExecutionConflictPredictionInput& Input,
+    FExecutionPredictedConflict& OutConflict) const
+{
+    return ConflictPredictionFindPairConflict(A, B, Settings, Input, OutConflict);
 }
 
 TArray<FExecutionPredictedConflict> FConflictPredictionPolicy::FindConflicts(
@@ -196,7 +205,7 @@ TArray<FExecutionPredictedConflict> FConflictPredictionPolicy::FindConflicts(
             }
 
             FExecutionPredictedConflict Conflict;
-            if (ConflictPredictionFindPairConflict(A, B, Settings, Input, Conflict))
+            if (FindPairConflict(A, B, Input, Conflict))
             {
                 Conflicts.Add(Conflict);
             }

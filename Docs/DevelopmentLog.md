@@ -840,3 +840,39 @@ post-check 验证用于检查重规划后的路径与未重规划 agent 的未�
 - 没有修改原有日志文本和执行失败处理语义。
 - `PlannerType` 仍然只在 Actor 中判断，Execution 模块不反向依赖具体 planner 枚举。
 - Actor 内部的临时 `FPredictedExecutionConflict` 已移除，执行期冲突结果统一使用 `FExecutionPredictedConflict`。
+
+## 2026-07-14 Replan PostCheck 复用 ConflictPredictionPolicy
+
+### 背景
+
+`FConflictPredictionPolicy` 已经统一了承担 one-step 执行期冲突预测的 vertex、edge、`ProtectionFootprint` 和 `Downwash` 判断，但 `FExecutionReplanPostCheckPolicy` 内部仍然保留了一套相似的 post-check pair conflict 判断。
+
+为了避免执行推进、Final Safety Gate 和重规划后复查使用不同的安全语义，本轮将 post-check 的 pair conflict 判断接入统一的 `FConflictPredictionPolicy`。
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ConflictPredictionPolicy.h`
+- `Source/UTM/Private/Execution/ConflictPredictionPolicy.cpp`
+- `Source/UTM/Private/Execution/ExecutionReplanPostCheckPolicy.cpp`
+
+### 当前职责划分
+
+`FConflictPredictionPolicy` 现在额外提供：
+
+- `FindPairConflict(...)`，用于直接检查两个 execution conflict item 是否存在冲突。
+- 内部 `FindFirstConflict(...)` 和 `FindConflicts(...)` 也复用同一个 pair conflict 入口。
+
+`FExecutionReplanPostCheckPolicy` 现在负责：
+
+- 保留原有 lookahead offset 遍历。
+- 保留 candidate mission pair 过滤。
+- 将 offset 下的 previous / current cell 转换成 `FExecutionConflictCheckItem`。
+- 调用 `FConflictPredictionPolicy::FindPairConflict(...)` 做 vertex、edge、UTM 静态安全判断。
+
+### 保守性说明
+
+- 没有修改 post-check 的 lookahead 范围。
+- 没有修改 candidate mission pair 过滤规则。
+- 没有修改 vertex、edge、`ProtectionFootprint`、`Downwash` 的判定优先级。
+- `Offset == 0` 时仍然不启用 edge swap 检查。
+- `FExecutionReplanPostCheckPolicy` 不再直接依赖 `FUTMSafetyModel`，统一通过 `FConflictPredictionPolicy` 间接使用安全模型。

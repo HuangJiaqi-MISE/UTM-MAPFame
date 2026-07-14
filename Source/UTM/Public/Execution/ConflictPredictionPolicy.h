@@ -40,6 +40,12 @@ public:
         const FExecutionConflictPredictionInput& Input,
         FExecutionPredictedConflict& OutConflict) const;
 
+    bool FindPairConflict(
+        const FExecutionConflictCheckItem& A,
+        const FExecutionConflictCheckItem& B,
+        const FExecutionConflictPredictionInput& Input,
+        FExecutionPredictedConflict& OutConflict) const;
+
     TArray<FExecutionPredictedConflict> FindConflicts(
         const TArray<FExecutionStepDecision>& Decisions) const;
 

@@ -1,6 +1,6 @@
 #include "Execution/ExecutionReplanPostCheckPolicy.h"
 
-#include "Planning/UTMSafetyModel.h"
+#include "Execution/ConflictPredictionPolicy.h"
 
 namespace
 {
@@ -51,17 +51,17 @@ namespace
         return PostCheckClampCellToGrid(PostCheckGetCellAtTime(Agent.PlannedCells, BaseIndex + Offset), Input.GridDim);
     }
 
-    EExecutionPredictedConflictType PostCheckConvertUTMConflictType(EStaticUTMConflictType Type)
+    FExecutionConflictCheckItem PostCheckMakeConflictCheckItem(
+        int32 MissionId,
+        const FIntVector& PreviousCell,
+        const FIntVector& CurrentCell)
     {
-        switch (Type)
-        {
-        case EStaticUTMConflictType::ProtectionFootprint:
-            return EExecutionPredictedConflictType::ProtectionFootprint;
-        case EStaticUTMConflictType::Downwash:
-            return EExecutionPredictedConflictType::Downwash;
-        default:
-            return EExecutionPredictedConflictType::None;
-        }
+        FExecutionConflictCheckItem Item;
+        Item.MissionId = MissionId;
+        Item.bValid = true;
+        Item.ObservedCell = PreviousCell;
+        Item.TargetCell = CurrentCell;
+        return Item;
     }
 }
 
@@ -83,9 +83,17 @@ FExecutionReplanPostCheckResult FExecutionReplanPostCheckPolicy::Validate(
 
     ValidationMissionIds.Sort();
 
+    FExecutionConflictPredictionInput ConflictPredictionInput;
+    ConflictPredictionInput.MissionConfigsById = &Input.MissionConfigsById;
+    ConflictPredictionInput.bCheckStaticUTMSafety = Input.bCheckStaticUTMSafety;
+
     const int32 PostCheckLookaheadSteps = FMath::Max(0, Input.LookaheadSteps);
     for (int32 Offset = 0; Offset <= PostCheckLookaheadSteps; ++Offset)
     {
+        FConflictPredictionSettings ConflictPredictionSettings;
+        ConflictPredictionSettings.bCheckEdgeConflicts = (Offset > 0);
+        const FConflictPredictionPolicy ConflictPredictionPolicy(ConflictPredictionSettings);
+
         for (int32 I = 0; I < ValidationMissionIds.Num(); ++I)
         {
             const FExecutionAgentSnapshot* const* AgentA = AgentsByMissionId.Find(ValidationMissionIds[I]);
@@ -110,60 +118,24 @@ FExecutionReplanPostCheckResult FExecutionReplanPostCheckPolicy::Validate(
 
                 const FIntVector CellA = PostCheckGetCell(Input, **AgentA, Offset);
                 const FIntVector CellB = PostCheckGetCell(Input, **AgentB, Offset);
+                const FIntVector PreviousCellA = Offset > 0
+                    ? PostCheckGetCell(Input, **AgentA, Offset - 1)
+                    : CellA;
+                const FIntVector PreviousCellB = Offset > 0
+                    ? PostCheckGetCell(Input, **AgentB, Offset - 1)
+                    : CellB;
 
-                if (CellA == CellB)
+                FExecutionPredictedConflict Conflict;
+                if (ConflictPredictionPolicy.FindPairConflict(
+                    PostCheckMakeConflictCheckItem((*AgentA)->MissionId, PreviousCellA, CellA),
+                    PostCheckMakeConflictCheckItem((*AgentB)->MissionId, PreviousCellB, CellB),
+                    ConflictPredictionInput,
+                    Conflict))
                 {
                     Result.bHasConflict = true;
-                    Result.Conflict.Type = EExecutionPredictedConflictType::Vertex;
-                    Result.Conflict.AgentA = (*AgentA)->MissionId;
-                    Result.Conflict.AgentB = (*AgentB)->MissionId;
-                    Result.Conflict.Cell = CellA;
+                    Result.Conflict = Conflict;
                     Result.ConflictOffset = Offset;
                     return Result;
-                }
-
-                if (Offset > 0)
-                {
-                    const FIntVector PrevA = PostCheckGetCell(Input, **AgentA, Offset - 1);
-                    const FIntVector PrevB = PostCheckGetCell(Input, **AgentB, Offset - 1);
-                    const bool bEdgeConflict =
-                        (PrevA == CellB) &&
-                        (PrevB == CellA) &&
-                        (CellA != CellB);
-
-                    if (bEdgeConflict)
-                    {
-                        Result.bHasConflict = true;
-                        Result.Conflict.Type = EExecutionPredictedConflictType::Edge;
-                        Result.Conflict.AgentA = (*AgentA)->MissionId;
-                        Result.Conflict.AgentB = (*AgentB)->MissionId;
-                        Result.Conflict.Cell = CellA;
-                        Result.ConflictOffset = Offset;
-                        return Result;
-                    }
-                }
-
-                if (Input.bCheckStaticUTMSafety)
-                {
-                    const FDroneMissionConfig* MissionConfigA = Input.MissionConfigsById.Find((*AgentA)->MissionId);
-                    const FDroneMissionConfig* MissionConfigB = Input.MissionConfigsById.Find((*AgentB)->MissionId);
-                    if (MissionConfigA && MissionConfigB)
-                    {
-                        const EStaticUTMConflictType UTMConflictType =
-                            FUTMSafetyModel::GetStaticUTMConfigConflictType(CellA, *MissionConfigA, CellB, *MissionConfigB);
-
-                        const EExecutionPredictedConflictType ConflictType = PostCheckConvertUTMConflictType(UTMConflictType);
-                        if (ConflictType != EExecutionPredictedConflictType::None)
-                        {
-                            Result.bHasConflict = true;
-                            Result.Conflict.Type = ConflictType;
-                            Result.Conflict.AgentA = (*AgentA)->MissionId;
-                            Result.Conflict.AgentB = (*AgentB)->MissionId;
-                            Result.Conflict.Cell = CellA;
-                            Result.ConflictOffset = Offset;
-                            return Result;
-                        }
-                    }
                 }
             }
         }
