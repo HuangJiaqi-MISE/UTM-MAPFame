@@ -761,3 +761,43 @@ Scene Start_i / Goal_i Actors
 - 没有修改 global/local replan 的日志字段。
 - `ExecutionReplanGridBuilder` 不接触 `AActor`、`ADroneActor`、`UWorld` 或 Debug 绘制。
 - post-check 验证和执行状态写回仍留在 Actor，作为下一轮可选拆分对象。
+
+## 2026-07-14 Execution Replan 第三轮拆分
+
+### 背景
+
+第二轮拆分后，`APathPlanningDemoActor::TryExecutionReplan(...)` 已经不再直接维护 static anchor 选择和 `ReplanGrid` 构造，但重规划完成后的 post-check lookahead 验证仍然保留在 Actor 内部。
+
+post-check 验证用于检查重规划后的路径与未重规划 agent 的未来轨迹是否仍然存在 vertex、edge、ProtectionFootprint 或 Downwash 冲突。它本身只需要执行快照、候选 mission 集合、重规划后的 cell path、mission config 和 grid 维度，不需要访问 `ADroneActor` 或 `UWorld`，因此适合继续抽入 Execution 模块。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionReplanPostCheckPolicy.h`
+- `Source/UTM/Private/Execution/ExecutionReplanPostCheckPolicy.cpp`
+
+### 当前职责划分
+
+`FExecutionReplanPostCheckPolicy` 负责：
+
+- 接收 `FExecutionReplanPostCheckInput`。
+- 将重规划后的 cell path 与原执行快照中的计划 path 合并为验证视角。
+- 在 lookahead window 内检查 vertex conflict。
+- 在 lookahead window 内检查 edge swap conflict。
+- 在 LaCAM-UTM 场景下通过 `FUTMSafetyModel` 检查 `ProtectionFootprint` 和 `Downwash`。
+- 返回 `FExecutionReplanPostCheckResult`，包括是否存在冲突、冲突类型、冲突双方、冲突 cell 和 offset。
+
+`APathPlanningDemoActor::TryExecutionReplan(...)` 现在仍然负责：
+
+- 构造 `FExecutionReplanPostCheckInput`。
+- 输出原有 post-check 失败日志。
+- 控制 local post-check targeted retry。
+- 将成功的重规划结果写回执行状态。
+
+### 保守性说明
+
+- 没有修改 post-check 的 lookahead 范围。
+- 没有修改 vertex、edge、ProtectionFootprint、Downwash 的判定顺序。
+- 没有修改 post-check 失败后的日志字段。
+- 没有修改 local targeted retry 触发条件。
+- 没有把 `FExecutionAgentState` 传入新模块，post-check 只读取 `FExecutionSnapshot`。
+- 执行状态写回仍保留在 Actor，作为下一轮可选拆分对象。

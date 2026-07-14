@@ -10,6 +10,7 @@
 
 #include "Execution/ExecutionReplanCandidateSelector.h"
 #include "Execution/ExecutionReplanGridBuilder.h"
+#include "Execution/ExecutionReplanPostCheckPolicy.h"
 #include "Execution/ReplanMissionBuilder.h"
 #include "Planning/DiscreteAlignmentManager.h"
 #include "Planning/MissionSchedulerRegistry.h"
@@ -83,6 +84,23 @@ namespace
         case EPredictedExecutionConflictType::ProtectionFootprint:
             return TEXT("ProtectionFootprint");
         case EPredictedExecutionConflictType::Downwash:
+            return TEXT("Downwash");
+        default:
+            return TEXT("None");
+        }
+    }
+
+    const TCHAR* LexToString(EExecutionPredictedConflictType Type)
+    {
+        switch (Type)
+        {
+        case EExecutionPredictedConflictType::Vertex:
+            return TEXT("Vertex");
+        case EExecutionPredictedConflictType::Edge:
+            return TEXT("Edge");
+        case EExecutionPredictedConflictType::ProtectionFootprint:
+            return TEXT("ProtectionFootprint");
+        case EExecutionPredictedConflictType::Downwash:
             return TEXT("Downwash");
         default:
             return TEXT("None");
@@ -3139,129 +3157,20 @@ bool APathPlanningDemoActor::TryExecutionReplan(
                 ReplannedCellPathsByMission.Add(Mission.MissionId, MoveTemp(ReplannedCellPath));
             }
 
-            auto ClampPostCheckCell = [&](const FIntVector& Cell) -> FIntVector
-                {
-                    return FIntVector(
-                        FMath::Clamp(Cell.X, 0, FMath::Max(0, GridMap.GridDim.X - 1)),
-                        FMath::Clamp(Cell.Y, 0, FMath::Max(0, GridMap.GridDim.Y - 1)),
-                        FMath::Clamp(Cell.Z, 0, FMath::Max(0, GridMap.GridDim.Z - 1)));
-                };
+            FExecutionReplanPostCheckInput PostCheckInput;
+            PostCheckInput.Snapshot = ExecutionSnapshot;
+            PostCheckInput.MissionConfigsById = ExecutionMissionConfigsByMissionId;
+            PostCheckInput.ReplannedCellPathsByMission = ReplannedCellPathsByMission;
+            PostCheckInput.CandidateMissionIds = CandidateMissionIdSet;
+            PostCheckInput.GridDim = GridMap.GridDim;
+            PostCheckInput.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
+            PostCheckInput.LookaheadSteps = LookaheadSteps;
 
-            auto GetPostCheckCell = [&](const FExecutionAgentState& State, int32 Offset) -> FIntVector
-                {
-                    if (const TArray<FIntVector>* ReplannedCellPath = ReplannedCellPathsByMission.Find(State.MissionId))
-                    {
-                        return ClampPostCheckCell(GetCellAtTime(*ReplannedCellPath, Offset));
-                    }
-
-                    if (Offset <= 0 || State.PlannedCells.Num() <= 0)
-                    {
-                        return State.LastObservedCell;
-                    }
-
-                    const int32 BaseIndex = FMath::Clamp(State.ExecutedPlanIndex, 0, State.PlannedCells.Num() - 1);
-                    return ClampPostCheckCell(GetCellAtTime(State.PlannedCells, BaseIndex + Offset));
-                };
-
-            auto FindPostReplanConflict = [&](FPredictedExecutionConflict& OutConflict, int32& OutOffset) -> bool
-                {
-                    TArray<int32> ValidationMissionIds;
-                    ExecutionStates.GetKeys(ValidationMissionIds);
-                    ValidationMissionIds.Sort();
-
-                    const int32 PostCheckLookaheadSteps = FMath::Max(0, LookaheadSteps);
-                    for (int32 Offset = 0; Offset <= PostCheckLookaheadSteps; ++Offset)
-                    {
-                        for (int32 I = 0; I < ValidationMissionIds.Num(); ++I)
-                        {
-                            const FExecutionAgentState* StateA = ExecutionStates.Find(ValidationMissionIds[I]);
-                            if (!StateA || StateA->PlannedCells.Num() <= 0)
-                            {
-                                continue;
-                            }
-
-                            for (int32 J = I + 1; J < ValidationMissionIds.Num(); ++J)
-                            {
-                                const FExecutionAgentState* StateB = ExecutionStates.Find(ValidationMissionIds[J]);
-                                if (!StateB || StateB->PlannedCells.Num() <= 0)
-                                {
-                                    continue;
-                                }
-
-                                if (!CandidateMissionIdSet.Contains(StateA->MissionId)
-                                    && !CandidateMissionIdSet.Contains(StateB->MissionId))
-                                {
-                                    continue;
-                                }
-
-                                const FIntVector CellA = GetPostCheckCell(*StateA, Offset);
-                                const FIntVector CellB = GetPostCheckCell(*StateB, Offset);
-
-                                if (CellA == CellB)
-                                {
-                                    OutConflict.Type = EPredictedExecutionConflictType::Vertex;
-                                    OutConflict.AgentA = StateA->MissionId;
-                                    OutConflict.AgentB = StateB->MissionId;
-                                    OutConflict.Cell = CellA;
-                                    OutOffset = Offset;
-                                    return true;
-                                }
-
-                                if (Offset > 0)
-                                {
-                                    const FIntVector PrevA = GetPostCheckCell(*StateA, Offset - 1);
-                                    const FIntVector PrevB = GetPostCheckCell(*StateB, Offset - 1);
-                                    const bool bEdgeConflict =
-                                        (PrevA == CellB) &&
-                                        (PrevB == CellA) &&
-                                        (CellA != CellB);
-
-                                    if (bEdgeConflict)
-                                    {
-                                        OutConflict.Type = EPredictedExecutionConflictType::Edge;
-                                        OutConflict.AgentA = StateA->MissionId;
-                                        OutConflict.AgentB = StateB->MissionId;
-                                        OutConflict.Cell = CellA;
-                                        OutOffset = Offset;
-                                        return true;
-                                    }
-                                }
-
-                                if (PlannerType == EPlannerType::LaCAMUTM)
-                                {
-                                    const FDroneMissionConfig* MissionConfigA = ExecutionMissionConfigsByMissionId.Find(StateA->MissionId);
-                                    const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(StateB->MissionId);
-                                    if (MissionConfigA && MissionConfigB)
-                                    {
-                                        const EStaticUTMConflictType UTMConflictType = FUTMSafetyModel::GetStaticUTMConfigConflictType(
-                                            CellA,
-                                            *MissionConfigA,
-                                            CellB,
-                                            *MissionConfigB);
-
-                                        if (UTMConflictType != EStaticUTMConflictType::None)
-                                        {
-                                            OutConflict.Type = (UTMConflictType == EStaticUTMConflictType::ProtectionFootprint)
-                                                ? EPredictedExecutionConflictType::ProtectionFootprint
-                                                : EPredictedExecutionConflictType::Downwash;
-                                            OutConflict.AgentA = StateA->MissionId;
-                                            OutConflict.AgentB = StateB->MissionId;
-                                            OutConflict.Cell = CellA;
-                                            OutOffset = Offset;
-                                            return true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    return false;
-                };
-
-            FPredictedExecutionConflict PostCheckConflict;
-            int32 PostCheckOffset = 0;
-            if (FindPostReplanConflict(PostCheckConflict, PostCheckOffset))
+            const FExecutionReplanPostCheckResult PostCheckResult =
+                FExecutionReplanPostCheckPolicy::Validate(PostCheckInput);
+            const FExecutionPredictedConflict& PostCheckConflict = PostCheckResult.Conflict;
+            const int32 PostCheckOffset = PostCheckResult.ConflictOffset;
+            if (PostCheckResult.bHasConflict)
             {
                 if (bGlobalReplan)
                 {

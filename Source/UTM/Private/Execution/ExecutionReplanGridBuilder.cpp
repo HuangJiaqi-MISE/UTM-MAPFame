@@ -4,7 +4,7 @@
 
 namespace
 {
-    FIntVector GetCellAtTime(const TArray<FIntVector>& Cells, int32 TimeStep)
+    FIntVector GetGridBuilderCellAtTime(const TArray<FIntVector>& Cells, int32 TimeStep)
     {
         if (Cells.Num() <= 0)
         {
@@ -24,7 +24,7 @@ namespace
         return Cells.Last();
     }
 
-    FIntVector GetPredictedCellAtOffset(const FExecutionAgentSnapshot& Agent, int32 Offset)
+    FIntVector GetGridBuilderPredictedCellAtOffset(const FExecutionAgentSnapshot& Agent, int32 Offset)
     {
         if (Offset <= 0 || Agent.PlannedCells.Num() <= 0)
         {
@@ -32,10 +32,10 @@ namespace
         }
 
         const int32 BaseIndex = FMath::Clamp(Agent.ExecutedPlanIndex, 0, Agent.PlannedCells.Num() - 1);
-        return GetCellAtTime(Agent.PlannedCells, BaseIndex + Offset);
+        return GetGridBuilderCellAtTime(Agent.PlannedCells, BaseIndex + Offset);
     }
 
-    int32 GetCellDistance(const FIntVector& A, const FIntVector& B)
+    int32 GetGridBuilderCellDistance(const FIntVector& A, const FIntVector& B)
     {
         return FMath::Max3(
             FMath::Abs(A.X - B.X),
@@ -94,12 +94,12 @@ namespace
                 {
                     return CandidateCell == AnchorCell
                         || HaveStaticUTMCoupling(Input, CandidateCell, CandidateMissionId, AnchorCell, AnchorAgent.MissionId)
-                        || (EffectiveRadiusCells > 0 && GetCellDistance(CandidateCell, AnchorCell) <= EffectiveRadiusCells);
+                        || (EffectiveRadiusCells > 0 && GetGridBuilderCellDistance(CandidateCell, AnchorCell) <= EffectiveRadiusCells);
                 };
 
             for (int32 Offset = 0; Offset <= AnchorLookaheadSteps; ++Offset)
             {
-                if (IsCandidateCellRelevant(GetPredictedCellAtOffset(**CandidateAgent, Offset)))
+                if (IsCandidateCellRelevant(GetGridBuilderPredictedCellAtOffset(**CandidateAgent, Offset)))
                 {
                     return true;
                 }
