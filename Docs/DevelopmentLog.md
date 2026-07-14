@@ -801,3 +801,42 @@ post-check 验证用于检查重规划后的路径与未重规划 agent 的未�
 - 没有修改 local targeted retry 触发条件。
 - 没有把 `FExecutionAgentState` 传入新模块，post-check 只读取 `FExecutionSnapshot`。
 - 执行状态写回仍保留在 Actor，作为下一轮可选拆分对象。
+
+## 2026-07-14 Execution Conflict Prediction Policy 统一
+
+### 背景
+
+执行期冲突预测逻辑此前分散在多个位置：`APathPlanningDemoActor::AdvanceExecutionOneStep()` 内部有用于 conflict-aware alignment 的预测检查，Final Safety Gate 内部又维护了一套相似的 pair conflict 检查，而 Execution 模块中已有的 `FConflictPredictionPolicy` 只覆盖了较基础的 vertex / edge 检查。
+
+这会导致后续维护 UTM 安全规则时出现风险：执行推进、最终安全门和重规划后复查可能逐渐使用不同的冲突判定语义。
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ConflictPredictionPolicy.h`
+- `Source/UTM/Private/Execution/ConflictPredictionPolicy.cpp`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 当前职责划分
+
+`FConflictPredictionPolicy` 现在负责：
+
+- 接收 one-step conflict prediction 输入。
+- 检查 vertex conflict。
+- 检查 edge swap conflict。
+- 在启用 UTM 静态安全检查时，调用 `FUTMSafetyModel` 检查 `ProtectionFootprint` 和 `Downwash`。
+- 返回统一的 `FExecutionPredictedConflict` 结果。
+
+`APathPlanningDemoActor::AdvanceExecutionOneStep()` 现在负责：
+
+- 将内部 `FExecutionStepProposal` 转换成 `FExecutionConflictPredictionInput`。
+- 决定是否启用 UTM 静态安全检查。
+- 根据 `FConflictPredictionPolicy` 的结果继续执行原有 hold、replan、Final Safety Gate 和失败处理流程。
+
+### 保守性说明
+
+- 没有修改 conflict-aware alignment 的让行策略。
+- 没有修改 Final Safety Gate 的 hold set 扩展逻辑。
+- 没有修改 local / global replan 的触发条件。
+- 没有修改原有日志文本和执行失败处理语义。
+- `PlannerType` 仍然只在 Actor 中判断，Execution 模块不反向依赖具体 planner 枚举。
+- Actor 内部的临时 `FPredictedExecutionConflict` 已移除，执行期冲突结果统一使用 `FExecutionPredictedConflict`。

@@ -8,6 +8,7 @@
 #include "Actors/DroneActor.h"
 #include "Engine/World.h"
 
+#include "Execution/ConflictPredictionPolicy.h"
 #include "Execution/ExecutionReplanCandidateSelector.h"
 #include "Execution/ExecutionReplanGridBuilder.h"
 #include "Execution/ExecutionReplanPostCheckPolicy.h"
@@ -38,15 +39,6 @@ namespace
     constexpr int32 MaxDebugDrawPathPoints = 2048;
     constexpr int32 MaxSpawnableDronePathPoints = 20000;
 
-    enum class EPredictedExecutionConflictType : uint8
-    {
-        None,
-        Vertex,
-        Edge,
-        ProtectionFootprint,
-        Downwash
-    };
-
     struct FExecutionStepProposal
     {
         int32 MissionId = INDEX_NONE;
@@ -64,31 +56,6 @@ namespace
         EDiscreteAlignmentAction FinalAction = EDiscreteAlignmentAction::FollowPlan;
         FString ResolutionReason;
     };
-
-    struct FPredictedExecutionConflict
-    {
-        EPredictedExecutionConflictType Type = EPredictedExecutionConflictType::None;
-        int32 AgentA = INDEX_NONE;
-        int32 AgentB = INDEX_NONE;
-        FIntVector Cell = FIntVector::ZeroValue;
-    };
-
-    const TCHAR* LexToString(EPredictedExecutionConflictType Type)
-    {
-        switch (Type)
-        {
-        case EPredictedExecutionConflictType::Vertex:
-            return TEXT("Vertex");
-        case EPredictedExecutionConflictType::Edge:
-            return TEXT("Edge");
-        case EPredictedExecutionConflictType::ProtectionFootprint:
-            return TEXT("ProtectionFootprint");
-        case EPredictedExecutionConflictType::Downwash:
-            return TEXT("Downwash");
-        default:
-            return TEXT("None");
-        }
-    }
 
     const TCHAR* LexToString(EExecutionPredictedConflictType Type)
     {
@@ -1201,76 +1168,63 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         StepProposals.Add(MissionId, Proposal);
     }
 
-    auto FindFirstPredictedConflict =
-        [&](FPredictedExecutionConflict& OutConflict) -> bool
+    const FConflictPredictionPolicy ConflictPredictionPolicy;
+
+    auto BuildConflictPredictionInput =
+        [&]() -> FExecutionConflictPredictionInput
         {
-            for (int32 I = 0; I < MissionIds.Num(); ++I)
+            FExecutionConflictPredictionInput Input;
+            Input.Items.Reserve(StepProposals.Num());
+            Input.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
+            Input.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
+
+            for (const int32 MissionId : MissionIds)
             {
-                const FExecutionStepProposal* ProposalA = StepProposals.Find(MissionIds[I]);
-                if (!ProposalA)
+                const FExecutionStepProposal* Proposal = StepProposals.Find(MissionId);
+                if (!Proposal)
                 {
                     continue;
                 }
 
-                for (int32 J = I + 1; J < MissionIds.Num(); ++J)
-                {
-                    const FExecutionStepProposal* ProposalB = StepProposals.Find(MissionIds[J]);
-                    if (!ProposalB)
-                    {
-                        continue;
-                    }
-
-                    if (ProposalA->ProposedCell == ProposalB->ProposedCell)
-                    {
-                        OutConflict.Type = EPredictedExecutionConflictType::Vertex;
-                        OutConflict.AgentA = ProposalA->MissionId;
-                        OutConflict.AgentB = ProposalB->MissionId;
-                        OutConflict.Cell = ProposalA->ProposedCell;
-                        return true;
-                    }
-
-                    const bool bEdgeConflict =
-                        (ProposalA->ObservedCell == ProposalB->ProposedCell) &&
-                        (ProposalB->ObservedCell == ProposalA->ProposedCell) &&
-                        (ProposalA->ProposedCell != ProposalB->ProposedCell);
-
-                    if (bEdgeConflict)
-                    {
-                        OutConflict.Type = EPredictedExecutionConflictType::Edge;
-                        OutConflict.AgentA = ProposalA->MissionId;
-                        OutConflict.AgentB = ProposalB->MissionId;
-                        OutConflict.Cell = ProposalA->ProposedCell;
-                        return true;
-                    }
-
-                    if (PlannerType == EPlannerType::LaCAMUTM)
-                    {
-                        const FDroneMissionConfig* MissionConfigA = ExecutionMissionConfigsByMissionId.Find(ProposalA->MissionId);
-                        const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(ProposalB->MissionId);
-                        if (MissionConfigA && MissionConfigB)
-                        {
-                            const EStaticUTMConflictType UTMConflictType = FUTMSafetyModel::GetStaticUTMConfigConflictType(
-                                ProposalA->ProposedCell,
-                                *MissionConfigA,
-                                ProposalB->ProposedCell,
-                                *MissionConfigB);
-
-                            if (UTMConflictType != EStaticUTMConflictType::None)
-                            {
-                                OutConflict.Type = (UTMConflictType == EStaticUTMConflictType::ProtectionFootprint)
-                                    ? EPredictedExecutionConflictType::ProtectionFootprint
-                                    : EPredictedExecutionConflictType::Downwash;
-                                OutConflict.AgentA = ProposalA->MissionId;
-                                OutConflict.AgentB = ProposalB->MissionId;
-                                OutConflict.Cell = ProposalA->ProposedCell;
-                                return true;
-                            }
-                        }
-                    }
-                }
+                FExecutionConflictCheckItem Item;
+                Item.MissionId = Proposal->MissionId;
+                Item.bValid = true;
+                Item.ObservedCell = Proposal->ObservedCell;
+                Item.TargetCell = Proposal->ProposedCell;
+                Input.Items.Add(Item);
             }
 
-            return false;
+            return Input;
+        };
+
+    auto FindFirstPredictedConflict =
+        [&](FExecutionPredictedConflict& OutConflict) -> bool
+        {
+            return ConflictPredictionPolicy.FindFirstConflict(
+                BuildConflictPredictionInput(),
+                OutConflict);
+        };
+
+    auto CollectProposalConflictEndpoints =
+        [&](TSet<int32>& OutMissionIds, FExecutionPredictedConflict& OutFirstConflict) -> bool
+        {
+            bool bFoundConflict = false;
+            const TArray<FExecutionPredictedConflict> Conflicts =
+                ConflictPredictionPolicy.FindConflicts(BuildConflictPredictionInput());
+
+            for (const FExecutionPredictedConflict& Conflict : Conflicts)
+            {
+                if (!bFoundConflict)
+                {
+                    OutFirstConflict = Conflict;
+                    bFoundConflict = true;
+                }
+
+                OutMissionIds.Add(Conflict.AgentA);
+                OutMissionIds.Add(Conflict.AgentB);
+            }
+
+            return bFoundConflict;
         };
 
     auto ChooseYieldingMissionId =
@@ -1307,7 +1261,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         {
             bNeedsAnotherPass = false;
 
-            FPredictedExecutionConflict Conflict;
+            FExecutionPredictedConflict Conflict;
             if (!FindFirstPredictedConflict(Conflict))
             {
                 break;
@@ -1395,7 +1349,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             bNeedsAnotherPass = true;
         }
 
-        FPredictedExecutionConflict RemainingConflict;
+        FExecutionPredictedConflict RemainingConflict;
         if (FindFirstPredictedConflict(RemainingConflict))
         {
             RequestedReplanMissionIds.Add(RemainingConflict.AgentA);
@@ -1479,98 +1433,6 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
 
     if (bEnableFinalSafetyGate && StepProposals.Num() > 1)
     {
-        auto FindProposalPairConflict = [&](const FExecutionStepProposal& ProposalA, const FExecutionStepProposal& ProposalB, FPredictedExecutionConflict& OutConflict) -> bool
-            {
-                if (ProposalA.ProposedCell == ProposalB.ProposedCell)
-                {
-                    OutConflict.Type = EPredictedExecutionConflictType::Vertex;
-                    OutConflict.AgentA = ProposalA.MissionId;
-                    OutConflict.AgentB = ProposalB.MissionId;
-                    OutConflict.Cell = ProposalA.ProposedCell;
-                    return true;
-                }
-
-                const bool bEdgeConflict =
-                    (ProposalA.ObservedCell == ProposalB.ProposedCell) &&
-                    (ProposalB.ObservedCell == ProposalA.ProposedCell) &&
-                    (ProposalA.ProposedCell != ProposalB.ProposedCell);
-
-                if (bEdgeConflict)
-                {
-                    OutConflict.Type = EPredictedExecutionConflictType::Edge;
-                    OutConflict.AgentA = ProposalA.MissionId;
-                    OutConflict.AgentB = ProposalB.MissionId;
-                    OutConflict.Cell = ProposalA.ProposedCell;
-                    return true;
-                }
-
-                if (PlannerType == EPlannerType::LaCAMUTM)
-                {
-                    const FDroneMissionConfig* MissionConfigA = ExecutionMissionConfigsByMissionId.Find(ProposalA.MissionId);
-                    const FDroneMissionConfig* MissionConfigB = ExecutionMissionConfigsByMissionId.Find(ProposalB.MissionId);
-                    if (MissionConfigA && MissionConfigB)
-                    {
-                        const EStaticUTMConflictType UTMConflictType = FUTMSafetyModel::GetStaticUTMConfigConflictType(
-                            ProposalA.ProposedCell,
-                            *MissionConfigA,
-                            ProposalB.ProposedCell,
-                            *MissionConfigB);
-
-                        if (UTMConflictType != EStaticUTMConflictType::None)
-                        {
-                            OutConflict.Type = (UTMConflictType == EStaticUTMConflictType::ProtectionFootprint)
-                                ? EPredictedExecutionConflictType::ProtectionFootprint
-                                : EPredictedExecutionConflictType::Downwash;
-                            OutConflict.AgentA = ProposalA.MissionId;
-                            OutConflict.AgentB = ProposalB.MissionId;
-                            OutConflict.Cell = ProposalA.ProposedCell;
-                            return true;
-                        }
-                    }
-                }
-
-                return false;
-            };
-
-        auto CollectProposalConflictEndpoints = [&](TSet<int32>& OutMissionIds, FPredictedExecutionConflict& OutFirstConflict) -> bool
-            {
-                bool bFoundConflict = false;
-                for (int32 I = 0; I < MissionIds.Num(); ++I)
-                {
-                    const FExecutionStepProposal* ProposalA = StepProposals.Find(MissionIds[I]);
-                    if (!ProposalA)
-                    {
-                        continue;
-                    }
-
-                    for (int32 J = I + 1; J < MissionIds.Num(); ++J)
-                    {
-                        const FExecutionStepProposal* ProposalB = StepProposals.Find(MissionIds[J]);
-                        if (!ProposalB)
-                        {
-                            continue;
-                        }
-
-                        FPredictedExecutionConflict Conflict;
-                        if (!FindProposalPairConflict(*ProposalA, *ProposalB, Conflict))
-                        {
-                            continue;
-                        }
-
-                        if (!bFoundConflict)
-                        {
-                            OutFirstConflict = Conflict;
-                            bFoundConflict = true;
-                        }
-
-                        OutMissionIds.Add(Conflict.AgentA);
-                        OutMissionIds.Add(Conflict.AgentB);
-                    }
-                }
-
-                return bFoundConflict;
-            };
-
         auto ApplySafetyGateHold = [&](const TSet<int32>& HoldMissionIds)
             {
                 for (const int32 MissionId : HoldMissionIds)
@@ -1592,7 +1454,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                 }
             };
 
-        FPredictedExecutionConflict GateConflict;
+        FExecutionPredictedConflict GateConflict;
         TSet<int32> SafetyGateMissionIds;
         if (CollectProposalConflictEndpoints(SafetyGateMissionIds, GateConflict))
         {
@@ -1610,13 +1472,13 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                 SafetyGateMissionIds.Num());
 
             bool bHoldConfigurationSafe = false;
-            FPredictedExecutionConflict HoldConflict;
+            FExecutionPredictedConflict HoldConflict;
             for (int32 Pass = 0; Pass < MissionIds.Num(); ++Pass)
             {
                 ApplySafetyGateHold(SafetyGateMissionIds);
 
                 TSet<int32> RemainingConflictMissionIds;
-                FPredictedExecutionConflict RemainingConflict;
+                FExecutionPredictedConflict RemainingConflict;
                 if (!CollectProposalConflictEndpoints(RemainingConflictMissionIds, RemainingConflict))
                 {
                     bHoldConfigurationSafe = true;
@@ -1751,7 +1613,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                             : TEXT("hold to synchronize with safety-gate replanned agents");
                     }
                     TSet<int32> FinalConflictMissionIds;
-                    FPredictedExecutionConflict FinalConflict;
+                    FExecutionPredictedConflict FinalConflict;
                     if (CollectProposalConflictEndpoints(FinalConflictMissionIds, FinalConflict))
                     {
                         UE_LOG(
