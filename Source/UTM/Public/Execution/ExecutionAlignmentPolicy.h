@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Execution/ExecutionTypes.h"
-#include "Planning/DiscreteAlignmentManager.h"
+#include "Execution/DiscreteAlignmentManager.h"
 
 class FGridMap3D;
 
@@ -16,6 +16,8 @@ public:
     FExecutionStepDecision Decide(
         const FGridMap3D& GridMap,
         const FExecutionAgentSnapshot& AgentSnapshot) const;
+
+    static const TCHAR* LexToString(EExecutionPolicyAction Action);
 
 private:
     static EExecutionPolicyAction ConvertAction(EDiscreteAlignmentAction Action);

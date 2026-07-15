@@ -940,3 +940,86 @@ post-check 验证用于检查重规划后的路径与未重规划 agent 的未�
 - 没有修改成功后的执行状态写回语义。
 - `RunExecutionReplanAttempt(...)` 仍然留在 Actor 中，因为它需要访问 `PlanMultiAgentMissionsOnGrid(...)`、`BuildCellPathFromWorldPath(...)`、`ExecutionStates` 和 `GridMap`。
 - `ApplyExecutionReplanAttemptResult(...)` 也留在 Actor 中，因为它直接写入 `FExecutionAgentState` 和 Actor 内部路径缓存。
+
+## 2026-07-15 Execution Replan Attempt 类型外移
+
+### 背景
+
+上一轮已经用四个数据类型描述单次 execution replan attempt 的配置、输入、状态和结果，但这些类型仍然嵌套在 `APathPlanningDemoActor` 内部，使后续独立的 Execution Replan Pipeline 无法在不依赖 Actor 类型的情况下复用这些输入输出协议。
+
+### 修改文件
+
+- 新增 `Source/UTM/Public/Execution/ExecutionReplanAttemptTypes.h`
+- 修改 `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- 修改 `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 当前职责划分
+
+以下类型已从 `APathPlanningDemoActor` 私有定义外移到 `Execution` 公共目录：
+
+- `FExecutionReplanAttemptSpec`
+- `FExecutionReplanAttemptInput`
+- `EExecutionReplanAttemptStatus`
+- `FExecutionReplanAttemptResult`
+
+`APathPlanningDemoActor` 继续负责 `RunExecutionReplanAttempt(...)` 和 `ApplyExecutionReplanAttemptResult(...)` 的具体实现，只是通过新的公共头文件使用 attempt 数据结构。
+
+### 保守性说明
+
+- 四个类型的字段、默认值和状态枚举顺序均未修改。
+- 没有修改 local/global replan attempt 循环。
+- 没有修改 planner 调用、post-check 或 targeted retry 行为。
+- 没有修改执行状态和路径缓存的写回逻辑。
+- 本轮只建立独立 Execution Replan Pipeline 后续可使用的公共数据协议。
+
+## 2026-07-15 Discrete Alignment 目录归属整理
+
+### 背景
+
+`FDiscreteAlignmentManager` 负责根据计划路径、实际执行位置、当前执行时刻和延迟请求计算单步对齐动作，属于执行期控制逻辑，但此前仍存放在 `Planning` 目录。该目录归属会让路径规划与执行对齐的模块边界不清晰。
+
+### 修改文件
+
+- `Source/UTM/Public/Planning/DiscreteAlignmentManager.h` 移动到 `Source/UTM/Public/Execution/DiscreteAlignmentManager.h`
+- `Source/UTM/Private/Planning/DiscreteAlignmentManager.cpp` 移动到 `Source/UTM/Private/Execution/DiscreteAlignmentManager.cpp`
+- 更新 `APathPlanningDemoActor` 和 `FExecutionAlignmentPolicy` 的 include 路径
+
+### 当前职责划分
+
+- `FDiscreteAlignmentManager` 继续负责原有离散路径对齐计算。
+- `FExecutionAlignmentPolicy` 继续作为未来可替换的执行对齐策略入口。
+- `APathPlanningDemoActor` 本轮仍直接调用 `FDiscreteAlignmentManager`，下一阶段再单独接入 `FExecutionAlignmentPolicy`。
+
+### 保守性说明
+
+- 没有修改 `FDiscreteAlignmentSettings`、`FDiscreteAlignmentResult` 或 `EDiscreteAlignmentAction`。
+- 没有修改 `AlignStep(...)` 的实现。
+- 没有修改 Actor 的 Alignment 调用顺序、随机延迟顺序、冲突消解或重规划逻辑。
+- 本轮仅调整文件目录和 include 路径，便于独立验证目录迁移不会改变 N200 行为。
+
+## 2026-07-15 ExecutionAlignmentPolicy 接入主流程
+
+### 背景
+
+`FExecutionAlignmentPolicy` 已经能够把执行快照转换成统一的 `FExecutionStepDecision`，但此前 Actor 仍然直接创建 `FDiscreteAlignmentManager` 并调用 `AlignStep(...)`，因此该 Execution Policy 只是预留实现，没有实际参与执行流程。
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionAlignmentPolicy.h`
+- `Source/UTM/Private/Execution/ExecutionAlignmentPolicy.cpp`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 当前职责划分
+
+- `APathPlanningDemoActor` 继续采集无人机实际位置、生成随机延迟请求并提供执行状态。
+- `FExecutionAlignmentPolicy::Decide(...)` 根据 `FExecutionAgentSnapshot` 和网格生成 `FExecutionStepDecision`。
+- Actor 内部后续冲突仲裁、Safety Gate、重规划和状态写回统一使用 `EExecutionPolicyAction` 和 `FExecutionStepDecision`。
+- `FExecutionAlignmentPolicy::LexToString(...)` 保留原有动作名称，用于现有状态文本和 Alignment 日志。
+
+### 保守性说明
+
+- `FExecutionAlignmentPolicy` 内部仍调用原有 `FDiscreteAlignmentManager::AlignStep(...)`。
+- Agent Snapshot 使用与旧调用完全相同的计划路径、执行索引、时间步、实际单元格和延迟请求。
+- 动作转换保持一一对应，动作日志字符串未改变。
+- 没有修改随机数调用位置和次数。
+- 没有修改冲突仲裁、Final Safety Gate、重规划请求或状态统计规则。

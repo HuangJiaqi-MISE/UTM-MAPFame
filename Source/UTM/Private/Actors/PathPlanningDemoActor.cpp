@@ -9,11 +9,11 @@
 #include "Engine/World.h"
 
 #include "Execution/ConflictPredictionPolicy.h"
+#include "Execution/ExecutionAlignmentPolicy.h"
 #include "Execution/ExecutionReplanCandidateSelector.h"
 #include "Execution/ExecutionReplanGridBuilder.h"
 #include "Execution/ExecutionReplanPostCheckPolicy.h"
 #include "Execution/ReplanMissionBuilder.h"
-#include "Planning/DiscreteAlignmentManager.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
 #include "Planning/PlannerRegistry.h"
@@ -52,8 +52,8 @@ namespace
         bool bInitialAlignmentInvalid = false;
         bool bHeldForPredictedConflict = false;
         bool bHeldForReplan = false;
-        FDiscreteAlignmentResult AlignmentResult;
-        EDiscreteAlignmentAction FinalAction = EDiscreteAlignmentAction::FollowPlan;
+        FExecutionStepDecision AlignmentDecision;
+        EExecutionPolicyAction FinalAction = EExecutionPolicyAction::FollowPlan;
         FString ResolutionReason;
     };
 
@@ -1096,7 +1096,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
     CurrentExecutionTimeStep++;
 
 
-    const FDiscreteAlignmentManager AlignmentManager(BuildDiscreteAlignmentSettings());
+    const FExecutionAlignmentPolicy AlignmentPolicy(BuildDiscreteAlignmentSettings());
 
     TArray<int32> MissionIds;
     ExecutionStates.GetKeys(MissionIds);
@@ -1119,45 +1119,50 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
 
         const bool bCanAdvance = (State->ExecutedPlanIndex + 1 < State->PlannedCells.Num());
         const bool bDelay = bCanAdvance && ShouldDelayThisStep(*State, CurrentExecutionTimeStep);
-        const FDiscreteAlignmentResult AlignmentResult =
-            AlignmentManager.AlignStep(
-                GridMap,
-                State->PlannedCells,
-                State->ExecutedPlanIndex,
-                CurrentExecutionTimeStep,
-                ObservedCell,
-                bDelay);
+        FExecutionAgentSnapshot AgentSnapshot;
+        AgentSnapshot.MissionId = MissionId;
+        AgentSnapshot.bFinished = State->bFinished;
+        AgentSnapshot.bDelayRequested = bDelay;
+        AgentSnapshot.ObservedCell = ObservedCell;
+        AgentSnapshot.TimeStep = CurrentExecutionTimeStep;
+        AgentSnapshot.ExecutedPlanIndex = State->ExecutedPlanIndex;
+        AgentSnapshot.ConsecutiveConflictHoldCount = State->ConsecutiveConflictHoldCount;
+        AgentSnapshot.ConsecutiveSafetyGateHoldCount = State->ConsecutiveSafetyGateHoldCount;
+        AgentSnapshot.PlannedCells = State->PlannedCells;
+
+        const FExecutionStepDecision AlignmentDecision =
+            AlignmentPolicy.Decide(GridMap, AgentSnapshot);
 
         FExecutionStepProposal Proposal;
         Proposal.MissionId = MissionId;
         Proposal.ObservedCell = ObservedCell;
         Proposal.bDelayRequested = bDelay;
-        Proposal.AlignmentResult = AlignmentResult;
+        Proposal.AlignmentDecision = AlignmentDecision;
         Proposal.ReferencePlanIndex = FMath::Clamp(State->ExecutedPlanIndex, 0, State->PlannedCells.Num() - 1);
         Proposal.ProposedPlanIndex = Proposal.ReferencePlanIndex;
         Proposal.ProposedCell = ObservedCell;
-        Proposal.FinalAction = EDiscreteAlignmentAction::HoldForAlignment;
-        Proposal.ResolutionReason = AlignmentResult.Reason;
+        Proposal.FinalAction = EExecutionPolicyAction::HoldForAlignment;
+        Proposal.ResolutionReason = AlignmentDecision.Reason;
 
-        if (AlignmentResult.bValid)
+        if (AlignmentDecision.bValid)
         {
             Proposal.bValid = true;
-            Proposal.bRequiresReplan = AlignmentResult.bRequiresReplan;
-            Proposal.ReferencePlanIndex = FMath::Clamp(AlignmentResult.ReferencePlanIndex, 0, State->PlannedCells.Num() - 1);
-            Proposal.ProposedPlanIndex = FMath::Clamp(AlignmentResult.NextPlanIndex, 0, State->PlannedCells.Num() - 1);
+            Proposal.bRequiresReplan = AlignmentDecision.bRequiresReplan;
+            Proposal.ReferencePlanIndex = FMath::Clamp(AlignmentDecision.ReferencePlanIndex, 0, State->PlannedCells.Num() - 1);
+            Proposal.ProposedPlanIndex = FMath::Clamp(AlignmentDecision.TargetPlanIndex, 0, State->PlannedCells.Num() - 1);
 
 
 
-            Proposal.ProposedCell = AlignmentResult.NextCell;
-            Proposal.FinalAction = AlignmentResult.Action;
+            Proposal.ProposedCell = AlignmentDecision.TargetCell;
+            Proposal.FinalAction = AlignmentDecision.Action;
         }
         else
         {
             Proposal.bInitialAlignmentInvalid = true;
             Proposal.bRequiresReplan = true;
-            Proposal.ResolutionReason = AlignmentResult.Reason.IsEmpty()
+            Proposal.ResolutionReason = AlignmentDecision.Reason.IsEmpty()
                 ? TEXT("invalid alignment result")
-                : AlignmentResult.Reason;
+                : AlignmentDecision.Reason;
         }
 
         if (Proposal.bRequiresReplan || Proposal.bInitialAlignmentInvalid)
@@ -1240,8 +1245,8 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
 
             const FExecutionAgentState* StateA = ExecutionStates.Find(ProposalA.MissionId);
             const FExecutionAgentState* StateB = ExecutionStates.Find(ProposalB.MissionId);
-            const bool bAGoalHold = StateA && (StateA->bFinished || ProposalA.FinalAction == EDiscreteAlignmentAction::GoalHold);
-            const bool bBGoalHold = StateB && (StateB->bFinished || ProposalB.FinalAction == EDiscreteAlignmentAction::GoalHold);
+            const bool bAGoalHold = StateA && (StateA->bFinished || ProposalA.FinalAction == EExecutionPolicyAction::GoalHold);
+            const bool bBGoalHold = StateB && (StateB->bFinished || ProposalB.FinalAction == EExecutionPolicyAction::GoalHold);
             if (bAGoalHold != bBGoalHold)
             {
                 return bAGoalHold ? ProposalB.MissionId : ProposalA.MissionId;
@@ -1291,7 +1296,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
 
             const bool bAlreadyHolding =
                 (YieldProposal->ProposedCell == YieldProposal->ObservedCell) &&
-                (YieldProposal->FinalAction == EDiscreteAlignmentAction::HoldForPredictedConflict);
+                (YieldProposal->FinalAction == EExecutionPolicyAction::HoldForPredictedConflict);
 
             if (bAlreadyHolding)
             {
@@ -1315,7 +1320,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             YieldProposal->ProposedCell = YieldProposal->ObservedCell;
             YieldProposal->ProposedPlanIndex = YieldProposal->ReferencePlanIndex;
             YieldProposal->bHeldForPredictedConflict = true;
-            YieldProposal->FinalAction = EDiscreteAlignmentAction::HoldForPredictedConflict;
+            YieldProposal->FinalAction = EExecutionPolicyAction::HoldForPredictedConflict;
             YieldProposal->ResolutionReason = FString::Printf(
                 TEXT("yield to Mission %d for predicted %s conflict"),
                 KeepMissionId,
@@ -1416,7 +1421,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                 Proposal->bHeldForReplan = true;
                 Proposal->bHeldForPredictedConflict = false;
                 Proposal->bRequiresReplan = false;
-                Proposal->FinalAction = EDiscreteAlignmentAction::HoldForReplan;
+                Proposal->FinalAction = EExecutionPolicyAction::HoldForReplan;
                 Proposal->ReferencePlanIndex = FMath::Clamp(State->ExecutedPlanIndex, 0, State->PlannedCells.Num() - 1);
                 Proposal->ProposedPlanIndex = SuccessfulReplanMissionIds.Contains(MissionId)
                     ? FMath::Min(Proposal->ReferencePlanIndex + 1, State->PlannedCells.Num() - 1)
@@ -1447,7 +1452,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                     Proposal->bHeldForPredictedConflict = false;
                     Proposal->bHeldForReplan = false;
                     Proposal->bRequiresReplan = true;
-                    Proposal->FinalAction = EDiscreteAlignmentAction::HoldForSafetyGate;
+                    Proposal->FinalAction = EExecutionPolicyAction::HoldForSafetyGate;
                     Proposal->ProposedPlanIndex = Proposal->ReferencePlanIndex;
                     Proposal->ProposedCell = Proposal->ObservedCell;
                     Proposal->ResolutionReason = TEXT("final safety gate hold before replanning");
@@ -1602,7 +1607,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                         Proposal->bHeldForReplan = true;
                         Proposal->bHeldForPredictedConflict = false;
                         Proposal->bRequiresReplan = false;
-                        Proposal->FinalAction = EDiscreteAlignmentAction::HoldForReplan;
+                        Proposal->FinalAction = EExecutionPolicyAction::HoldForReplan;
                         Proposal->ReferencePlanIndex = FMath::Clamp(State->ExecutedPlanIndex, 0, State->PlannedCells.Num() - 1);
                         Proposal->ProposedPlanIndex = SafetyGateSuccessfulReplanMissionIds.Contains(MissionId)
                             ? FMath::Min(Proposal->ReferencePlanIndex + 1, State->PlannedCells.Num() - 1)
@@ -1691,26 +1696,26 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             0,
             State->PlannedCells.Num() - 1);
         State->DisplayToCell = Proposal->ProposedCell;
-        State->LastAlignmentAction = FDiscreteAlignmentManager::LexToString(Proposal->FinalAction);
+        State->LastAlignmentAction = FExecutionAlignmentPolicy::LexToString(Proposal->FinalAction);
         State->MaxAlignmentSpatialError = FMath::Max(
             State->MaxAlignmentSpatialError,
-            Proposal->AlignmentResult.SpatialErrorCells);
+            Proposal->AlignmentDecision.SpatialErrorCells);
         State->MaxAlignmentTemporalError = FMath::Max(
             State->MaxAlignmentTemporalError,
-            FMath::Abs(Proposal->AlignmentResult.TemporalErrorSteps));
+            FMath::Abs(Proposal->AlignmentDecision.TemporalErrorSteps));
 
-        if (Proposal->FinalAction == EDiscreteAlignmentAction::SnapToPlanIndex)
+        if (Proposal->FinalAction == EExecutionPolicyAction::SnapToPlanIndex)
         {
             State->AlignmentSnapCount++;
         }
-        else if (Proposal->FinalAction == EDiscreteAlignmentAction::RecoverTowardPlan)
+        else if (Proposal->FinalAction == EExecutionPolicyAction::RecoverTowardPlan)
         {
             State->AlignmentCorrectionCount++;
         }
-        else if (Proposal->FinalAction == EDiscreteAlignmentAction::HoldForAlignment ||
-            Proposal->FinalAction == EDiscreteAlignmentAction::HoldForPredictedConflict ||
-            Proposal->FinalAction == EDiscreteAlignmentAction::HoldForSafetyGate ||
-            Proposal->FinalAction == EDiscreteAlignmentAction::HoldForReplan)
+        else if (Proposal->FinalAction == EExecutionPolicyAction::HoldForAlignment ||
+            Proposal->FinalAction == EExecutionPolicyAction::HoldForPredictedConflict ||
+            Proposal->FinalAction == EExecutionPolicyAction::HoldForSafetyGate ||
+            Proposal->FinalAction == EExecutionPolicyAction::HoldForReplan)
         {
             State->AlignmentHoldCount++;
         }
@@ -1720,16 +1725,16 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             State->AlignmentConflictHoldCount++;
             State->ConsecutiveConflictHoldCount++;
         }
-        else if (Proposal->FinalAction != EDiscreteAlignmentAction::HoldForReplan)
+        else if (Proposal->FinalAction != EExecutionPolicyAction::HoldForReplan)
         {
             State->ConsecutiveConflictHoldCount = 0;
         }
 
-        if (Proposal->FinalAction == EDiscreteAlignmentAction::HoldForSafetyGate)
+        if (Proposal->FinalAction == EExecutionPolicyAction::HoldForSafetyGate)
         {
             State->ConsecutiveSafetyGateHoldCount++;
         }
-        else if (Proposal->FinalAction != EDiscreteAlignmentAction::HoldForReplan)
+        else if (Proposal->FinalAction != EExecutionPolicyAction::HoldForReplan)
         {
             State->ConsecutiveSafetyGateHoldCount = 0;
         }
@@ -1771,7 +1776,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             }
         }
 
-        if (bLogAlignmentEvents && Proposal->FinalAction != EDiscreteAlignmentAction::FollowPlan)
+        if (bLogAlignmentEvents && Proposal->FinalAction != EExecutionPolicyAction::FollowPlan)
         {
             UE_LOG(
                 LogTemp,
@@ -1779,10 +1784,10 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                 TEXT("[Alignment] t=%d Mission=%d Action=%s Observed=(%d,%d,%d) RefIndex=%d RefCell=(%d,%d,%d) NextCell=(%d,%d,%d) SpatialError=%d TemporalError=%d Replan=%s Reason=%s"),
                 CurrentExecutionTimeStep,
                 State->MissionId,
-                FDiscreteAlignmentManager::LexToString(Proposal->FinalAction),
-                Proposal->AlignmentResult.ObservedCell.X,
-                Proposal->AlignmentResult.ObservedCell.Y,
-                Proposal->AlignmentResult.ObservedCell.Z,
+                FExecutionAlignmentPolicy::LexToString(Proposal->FinalAction),
+                Proposal->AlignmentDecision.ObservedCell.X,
+                Proposal->AlignmentDecision.ObservedCell.Y,
+                Proposal->AlignmentDecision.ObservedCell.Z,
                 Proposal->ReferencePlanIndex,
                 GetCellAtTime(State->PlannedCells, Proposal->ReferencePlanIndex).X,
                 GetCellAtTime(State->PlannedCells, Proposal->ReferencePlanIndex).Y,
@@ -1790,8 +1795,8 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                 Proposal->ProposedCell.X,
                 Proposal->ProposedCell.Y,
                 Proposal->ProposedCell.Z,
-                Proposal->AlignmentResult.SpatialErrorCells,
-                Proposal->AlignmentResult.TemporalErrorSteps,
+                Proposal->AlignmentDecision.SpatialErrorCells,
+                Proposal->AlignmentDecision.TemporalErrorSteps,
                 bReplanRequestedForState ? TEXT("true") : TEXT("false"),
                 *Proposal->ResolutionReason);
         }
@@ -2821,8 +2826,8 @@ bool APathPlanningDemoActor::PlanMultiAgentMissionsOnGrid(
 }
 
 bool APathPlanningDemoActor::RunExecutionReplanAttempt(
-    const APathPlanningDemoActor::FExecutionReplanAttemptInput& Input,
-    APathPlanningDemoActor::FExecutionReplanAttemptResult& OutResult) const
+    const FExecutionReplanAttemptInput& Input,
+    FExecutionReplanAttemptResult& OutResult) const
 {
     OutResult = FExecutionReplanAttemptResult();
 
@@ -2988,7 +2993,7 @@ bool APathPlanningDemoActor::RunExecutionReplanAttempt(
 }
 
 bool APathPlanningDemoActor::ApplyExecutionReplanAttemptResult(
-    const APathPlanningDemoActor::FExecutionReplanAttemptResult& Result,
+    const FExecutionReplanAttemptResult& Result,
     TSet<int32>& OutReplannedMissionIds)
 {
     for (const int32 MissionId : Result.CandidateMissionIds)

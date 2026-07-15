@@ -43,6 +43,33 @@ FExecutionStepDecision FExecutionAlignmentPolicy::Decide(
     return Decision;
 }
 
+const TCHAR* FExecutionAlignmentPolicy::LexToString(EExecutionPolicyAction Action)
+{
+    switch (Action)
+    {
+    case EExecutionPolicyAction::FollowPlan:
+        return TEXT("FollowPlan");
+    case EExecutionPolicyAction::HoldForDelay:
+        return TEXT("HoldForDelay");
+    case EExecutionPolicyAction::SnapToPlanIndex:
+        return TEXT("SnapToPlanIndex");
+    case EExecutionPolicyAction::RecoverTowardPlan:
+        return TEXT("RecoverTowardPlan");
+    case EExecutionPolicyAction::HoldForAlignment:
+        return TEXT("HoldForAlignment");
+    case EExecutionPolicyAction::HoldForPredictedConflict:
+        return TEXT("HoldForPredictedConflict");
+    case EExecutionPolicyAction::HoldForSafetyGate:
+        return TEXT("HoldForSafetyGate");
+    case EExecutionPolicyAction::HoldForReplan:
+        return TEXT("HoldForReplan");
+    case EExecutionPolicyAction::GoalHold:
+        return TEXT("GoalHold");
+    default:
+        return TEXT("Unknown");
+    }
+}
+
 EExecutionPolicyAction FExecutionAlignmentPolicy::ConvertAction(EDiscreteAlignmentAction Action)
 {
     switch (Action)
