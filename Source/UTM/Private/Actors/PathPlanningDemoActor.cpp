@@ -11,7 +11,7 @@
 #include "Execution/ConflictPredictionPolicy.h"
 #include "Execution/ExecutionAlignmentPolicy.h"
 #include "Execution/ExecutionReplanAttemptRunner.h"
-#include "Execution/ExecutionReplanCandidateSelector.h"
+#include "Execution/ExecutionReplanCoordinator.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
 #include "Planning/PlannerRegistry.h"
@@ -21,7 +21,6 @@
 #include "Actors/MissionMarkerActor.h"
 #include "Engine/StaticMeshActor.h"
 #include "Kismet/GameplayStatics.h"
-#include "Misc/ScopeExit.h"
 #include "Reporting/ExperimentMetadataResolver.h"
 #include "Reporting/ExperimentReporter.h"
 
@@ -132,6 +131,115 @@ namespace
             break;
 
         default:
+            break;
+        }
+    }
+
+    void LogExecutionReplanCoordinatorEvent(const FExecutionReplanCoordinatorEvent& Event)
+    {
+        switch (Event.Type)
+        {
+        case EExecutionReplanCoordinatorEventType::CandidateSetExpanded:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[AlignmentReplan] local conflict component attempt %d/%d expanded from %d to %d missions (K=%d W=%d)"),
+                Event.AttemptIndex + 1,
+                Event.AttemptCount,
+                Event.ActiveRequestedMissionCount,
+                Event.CandidateMissionCount,
+                Event.SpatialRadiusCells,
+                Event.LookaheadSteps);
+            break;
+
+        case EExecutionReplanCoordinatorEventType::PostCheckFailed:
+            if (Event.bGlobalReplan)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[AlignmentReplan] global replan post-check failed: predicted %s conflict between Mission %d and Mission %d at +%d Cell=(%d,%d,%d) (Movable=%d Anchors=%d StaticBlocked=%d)"),
+                    LexToString(Event.Conflict.Type),
+                    Event.Conflict.AgentA,
+                    Event.Conflict.AgentB,
+                    Event.ConflictOffset,
+                    Event.Conflict.Cell.X,
+                    Event.Conflict.Cell.Y,
+                    Event.Conflict.Cell.Z,
+                    Event.CandidateMissionCount,
+                    Event.AnchorMissionCount,
+                    Event.StaticAnchorBlockedCellCount);
+            }
+            else
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[AlignmentReplan] local replan attempt %d/%d post-check failed: predicted %s conflict between Mission %d and Mission %d at +%d Cell=(%d,%d,%d) (Movable=%d Anchors=%d StaticBlocked=%d K=%d W=%d)"),
+                    Event.AttemptIndex + 1,
+                    Event.AttemptCount,
+                    LexToString(Event.Conflict.Type),
+                    Event.Conflict.AgentA,
+                    Event.Conflict.AgentB,
+                    Event.ConflictOffset,
+                    Event.Conflict.Cell.X,
+                    Event.Conflict.Cell.Y,
+                    Event.Conflict.Cell.Z,
+                    Event.CandidateMissionCount,
+                    Event.AnchorMissionCount,
+                    Event.StaticAnchorBlockedCellCount,
+                    Event.SpatialRadiusCells,
+                    Event.LookaheadSteps);
+            }
+            break;
+
+        case EExecutionReplanCoordinatorEventType::TargetedRetryExpanded:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[AlignmentReplan] local post-check targeted retry %d/%d after %s conflict between Mission %d and Mission %d: movable %d->%d forced anchors %d->%d (K=%d W=%d)"),
+                Event.TargetedRetryIndex,
+                Event.MaxTargetedRetryCount,
+                LexToString(Event.Conflict.Type),
+                Event.Conflict.AgentA,
+                Event.Conflict.AgentB,
+                Event.PreviousCandidateMissionCount,
+                Event.CandidateMissionCount,
+                Event.PreviousForcedAnchorMissionCount,
+                Event.ForcedAnchorMissionCount,
+                Event.SpatialRadiusCells,
+                Event.LookaheadSteps);
+            break;
+
+        case EExecutionReplanCoordinatorEventType::AttemptSucceeded:
+            if (Event.bGlobalReplan)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[AlignmentReplan] global replan succeeded for %d movable missions at t=%d (Total=%d, Anchors=%d StaticBlocked=%d)"),
+                    Event.ReplannedMissionCount,
+                    Event.ExecutionTimeStep,
+                    Event.TotalReplanCount,
+                    Event.AnchorMissionCount,
+                    Event.StaticAnchorBlockedCellCount);
+            }
+            else
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[AlignmentReplan] local replan succeeded for %d movable missions at t=%d (Total=%d, Attempt=%d/%d, Anchors=%d StaticBlocked=%d K=%d W=%d)"),
+                    Event.ReplannedMissionCount,
+                    Event.ExecutionTimeStep,
+                    Event.TotalReplanCount,
+                    Event.AttemptIndex + 1,
+                    Event.AttemptCount,
+                    Event.AnchorMissionCount,
+                    Event.StaticAnchorBlockedCellCount,
+                    Event.SpatialRadiusCells,
+                    Event.LookaheadSteps);
+            }
             break;
         }
     }
@@ -2987,267 +3095,62 @@ bool APathPlanningDemoActor::TryExecutionReplan(
         }
     }
 
-    auto IsActiveMission = [&](int32 MissionId) -> bool
+    FExecutionReplanCoordinatorRequest CoordinatorRequest;
+    CoordinatorRequest.Snapshot = &ExecutionSnapshot;
+    CoordinatorRequest.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
+    CoordinatorRequest.RequestedMissionIds = RequestedMissionIds;
+    CoordinatorRequest.bGlobalReplan = bGlobalReplan;
+    CoordinatorRequest.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
+    CoordinatorRequest.MaxExpansionRounds = LocalReplanMaxExpansionRounds;
+    CoordinatorRequest.BaseSpatialRadiusCells = LocalReplanSpatialExpansionRadiusCells;
+    CoordinatorRequest.BaseLookaheadSteps = LocalReplanLookaheadSteps;
+    CoordinatorRequest.ExecutionTimeStep = CurrentExecutionTimeStep;
+    CoordinatorRequest.CurrentTotalReplanCount = TotalExecutionReplanCount;
+
+    FExecutionReplanCoordinatorCallbacks CoordinatorCallbacks;
+    CoordinatorCallbacks.RunAttempt =
+        [this](
+            const FExecutionReplanAttemptInput& AttemptInput,
+            FExecutionReplanAttemptResult& AttemptResult) -> bool
         {
-            const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-            return State != nullptr && !State->bFinished;
+            return RunExecutionReplanAttempt(AttemptInput, AttemptResult);
+        };
+    CoordinatorCallbacks.ApplyAttemptResult =
+        [this](
+            const FExecutionReplanAttemptResult& AttemptResult,
+            TSet<int32>& ReplannedMissionIds) -> bool
+        {
+            return ApplyExecutionReplanAttemptResult(AttemptResult, ReplannedMissionIds);
+        };
+    CoordinatorCallbacks.OnEvent =
+        [](const FExecutionReplanCoordinatorEvent& Event)
+        {
+            LogExecutionReplanCoordinatorEvent(Event);
         };
 
-    auto TryPlanCandidateSet = [&](TSet<int32> CandidateMissionIdSet, int32 AttemptIndex, int32 AttemptCount, int32 SpatialRadiusCells, int32 LookaheadSteps) -> bool
-        {
-            const double AttemptStartSeconds = FPlatformTime::Seconds();
-            ON_SCOPE_EXIT
-            {
-                const double AttemptTimeMs = (FPlatformTime::Seconds() - AttemptStartSeconds) * 1000.0;
-                if (bGlobalReplan)
-                {
-                    ExecutionReplanTimingStats.GlobalAttemptCount++;
-                    ExecutionReplanTimingStats.GlobalTotalTimeMs += AttemptTimeMs;
-                    ExecutionReplanTimingStats.GlobalMaxTimeMs = FMath::Max(ExecutionReplanTimingStats.GlobalMaxTimeMs, AttemptTimeMs);
-                }
-                else
-                {
-                    ExecutionReplanTimingStats.LocalAttemptCount++;
-                    ExecutionReplanTimingStats.LocalTotalTimeMs += AttemptTimeMs;
-                    ExecutionReplanTimingStats.LocalMaxTimeMs = FMath::Max(ExecutionReplanTimingStats.LocalMaxTimeMs, AttemptTimeMs);
-                }
-            };
+    const FExecutionReplanCoordinatorResult CoordinatorResult =
+        FExecutionReplanCoordinator::Run(CoordinatorRequest, CoordinatorCallbacks);
 
-            const int32 MaxPostCheckTargetedRetries = bGlobalReplan ? 0 : 1;
-            int32 PostCheckTargetedRetryCount = 0;
-            TSet<int32> ForcedAnchorMissionIdSet;
-
-            while (true)
-            {
-            FExecutionReplanAttemptInput AttemptInput;
-            AttemptInput.Snapshot = &ExecutionSnapshot;
-            AttemptInput.CandidateMissionIdSet = CandidateMissionIdSet;
-            AttemptInput.ForcedAnchorMissionIdSet = ForcedAnchorMissionIdSet;
-            AttemptInput.Spec.bGlobalReplan = bGlobalReplan;
-            AttemptInput.Spec.AttemptIndex = AttemptIndex;
-            AttemptInput.Spec.AttemptCount = AttemptCount;
-            AttemptInput.Spec.SpatialRadiusCells = SpatialRadiusCells;
-            AttemptInput.Spec.LookaheadSteps = LookaheadSteps;
-            AttemptInput.Spec.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
-
-            FExecutionReplanAttemptResult AttemptResult;
-            const bool bAttemptSuccess = RunExecutionReplanAttempt(AttemptInput, AttemptResult);
-
-            const TArray<int32>& CandidateMissionIds = AttemptResult.CandidateMissionIds;
-            const TArray<int32>& AnchorMissionIds = AttemptResult.AnchorMissionIds;
-            const int32 StaticAnchorBlockedCellCount = AttemptResult.StaticAnchorBlockedCellCount;
-
-            if (!bAttemptSuccess)
-            {
-                if (AttemptResult.Status != EExecutionReplanAttemptStatus::PostCheckFailed)
-                {
-                    return false;
-                }
-
-                const FExecutionPredictedConflict& PostCheckConflict = AttemptResult.PostCheckConflict;
-                const int32 PostCheckOffset = AttemptResult.PostCheckConflictOffset;
-
-                if (bGlobalReplan)
-                {
-                    UE_LOG(
-                        LogTemp,
-                        Warning,
-                        TEXT("[AlignmentReplan] global replan post-check failed: predicted %s conflict between Mission %d and Mission %d at +%d Cell=(%d,%d,%d) (Movable=%d Anchors=%d StaticBlocked=%d)"),
-                        LexToString(PostCheckConflict.Type),
-                        PostCheckConflict.AgentA,
-                        PostCheckConflict.AgentB,
-                        PostCheckOffset,
-                        PostCheckConflict.Cell.X,
-                        PostCheckConflict.Cell.Y,
-                        PostCheckConflict.Cell.Z,
-                        CandidateMissionIds.Num(),
-                        AnchorMissionIds.Num(),
-                        StaticAnchorBlockedCellCount);
-                }
-                else
-                {
-                    UE_LOG(
-                        LogTemp,
-                        Warning,
-                        TEXT("[AlignmentReplan] local replan attempt %d/%d post-check failed: predicted %s conflict between Mission %d and Mission %d at +%d Cell=(%d,%d,%d) (Movable=%d Anchors=%d StaticBlocked=%d K=%d W=%d)"),
-                        AttemptIndex + 1,
-                        AttemptCount,
-                        LexToString(PostCheckConflict.Type),
-                        PostCheckConflict.AgentA,
-                        PostCheckConflict.AgentB,
-                        PostCheckOffset,
-                        PostCheckConflict.Cell.X,
-                        PostCheckConflict.Cell.Y,
-                        PostCheckConflict.Cell.Z,
-                        CandidateMissionIds.Num(),
-                        AnchorMissionIds.Num(),
-                        StaticAnchorBlockedCellCount,
-                        SpatialRadiusCells,
-                        LookaheadSteps);
-                }
-                const int32 PreviousMovableCount = CandidateMissionIds.Num();
-                const int32 PreviousForcedAnchorCount = ForcedAnchorMissionIdSet.Num();
-                bool bTargetedRetryExpanded = false;
-
-                auto AddPostCheckRetryMission = [&](int32 MissionId)
-                    {
-                        if (IsActiveMission(MissionId))
-                        {
-                            if (!CandidateMissionIdSet.Contains(MissionId))
-                            {
-                                CandidateMissionIdSet.Add(MissionId);
-                                bTargetedRetryExpanded = true;
-                            }
-                            return;
-                        }
-
-                        const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-                        if (PlannerType == EPlannerType::LaCAMUTM
-                            && State
-                            && State->bFinished
-                            && !ForcedAnchorMissionIdSet.Contains(MissionId))
-                        {
-                            ForcedAnchorMissionIdSet.Add(MissionId);
-                            bTargetedRetryExpanded = true;
-                        }
-                    };
-
-                if (PostCheckTargetedRetryCount < MaxPostCheckTargetedRetries)
-                {
-                    AddPostCheckRetryMission(PostCheckConflict.AgentA);
-                    AddPostCheckRetryMission(PostCheckConflict.AgentB);
-
-                    if (bTargetedRetryExpanded)
-                    {
-                        FExecutionReplanCandidateSelectionInput TargetedSelectionInput;
-                        TargetedSelectionInput.Snapshot = ExecutionSnapshot;
-                        TargetedSelectionInput.MissionConfigsById = ExecutionMissionConfigsByMissionId;
-                        TargetedSelectionInput.RequestedMissionIds = CandidateMissionIdSet;
-                        TargetedSelectionInput.bGlobalReplan = false;
-                        TargetedSelectionInput.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
-                        TargetedSelectionInput.SpatialRadiusCells = SpatialRadiusCells;
-                        TargetedSelectionInput.LookaheadSteps = LookaheadSteps;
-
-                        CandidateMissionIdSet =
-                            FExecutionReplanCandidateSelector::Select(TargetedSelectionInput).CandidateMissionIds;
-                    }
-
-                    if (bTargetedRetryExpanded)
-                    {
-                        PostCheckTargetedRetryCount++;
-                        UE_LOG(
-                            LogTemp,
-                            Warning,
-                            TEXT("[AlignmentReplan] local post-check targeted retry %d/%d after %s conflict between Mission %d and Mission %d: movable %d->%d forced anchors %d->%d (K=%d W=%d)"),
-                            PostCheckTargetedRetryCount,
-                            MaxPostCheckTargetedRetries,
-                            LexToString(PostCheckConflict.Type),
-                            PostCheckConflict.AgentA,
-                            PostCheckConflict.AgentB,
-                            PreviousMovableCount,
-                            CandidateMissionIdSet.Num(),
-                            PreviousForcedAnchorCount,
-                            ForcedAnchorMissionIdSet.Num(),
-                            SpatialRadiusCells,
-                            LookaheadSteps);
-                        continue;
-                    }
-                }
-
-                return false;
-            }
-
-            if (!ApplyExecutionReplanAttemptResult(AttemptResult, OutReplannedMissionIds))
-            {
-                return false;
-            }
-
-            TotalExecutionReplanCount++;
-
-            if (bGlobalReplan)
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[AlignmentReplan] global replan succeeded for %d movable missions at t=%d (Total=%d, Anchors=%d StaticBlocked=%d)"),
-                    OutReplannedMissionIds.Num(),
-                    CurrentExecutionTimeStep,
-                    TotalExecutionReplanCount,
-                    AnchorMissionIds.Num(),
-                    StaticAnchorBlockedCellCount);
-            }
-            else
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[AlignmentReplan] local replan succeeded for %d movable missions at t=%d (Total=%d, Attempt=%d/%d, Anchors=%d StaticBlocked=%d K=%d W=%d)"),
-                    OutReplannedMissionIds.Num(),
-                    CurrentExecutionTimeStep,
-                    TotalExecutionReplanCount,
-                    AttemptIndex + 1,
-                    AttemptCount,
-                    AnchorMissionIds.Num(),
-                    StaticAnchorBlockedCellCount,
-                    SpatialRadiusCells,
-                    LookaheadSteps);
-            }
-
-            return OutReplannedMissionIds.Num() > 0;
-            }
-        };
-
-    const int32 AttemptCount = bGlobalReplan
-        ? 1
-        : FMath::Max(1, LocalReplanMaxExpansionRounds);
-    const int32 BaseSpatialRadiusCells = FMath::Max(0, LocalReplanSpatialExpansionRadiusCells);
-    const int32 BaseLookaheadSteps = FMath::Max(0, LocalReplanLookaheadSteps);
-
-    for (int32 AttemptIndex = 0; AttemptIndex < AttemptCount; ++AttemptIndex)
+    if (bGlobalReplan)
     {
-        const int32 SpatialRadiusCells = bGlobalReplan
-            ? BaseSpatialRadiusCells
-            : BaseSpatialRadiusCells * (AttemptIndex + 1);
-        const int32 LookaheadSteps = bGlobalReplan
-            ? BaseLookaheadSteps
-            : BaseLookaheadSteps * (AttemptIndex + 1);
-
-        FExecutionReplanCandidateSelectionInput CandidateSelectionInput;
-        CandidateSelectionInput.Snapshot = ExecutionSnapshot;
-        CandidateSelectionInput.MissionConfigsById = ExecutionMissionConfigsByMissionId;
-        CandidateSelectionInput.RequestedMissionIds = RequestedMissionIds;
-        CandidateSelectionInput.bGlobalReplan = bGlobalReplan;
-        CandidateSelectionInput.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
-        CandidateSelectionInput.SpatialRadiusCells = SpatialRadiusCells;
-        CandidateSelectionInput.LookaheadSteps = LookaheadSteps;
-
-        const FExecutionReplanCandidateSelectionResult CandidateSelectionResult =
-            FExecutionReplanCandidateSelector::Select(CandidateSelectionInput);
-        TSet<int32> CandidateMissionIdSet = CandidateSelectionResult.CandidateMissionIds;
-
-        if (!bGlobalReplan && CandidateMissionIdSet.Num() > CandidateSelectionResult.ActiveRequestedMissionCount)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentReplan] local conflict component attempt %d/%d expanded from %d to %d missions (K=%d W=%d)"),
-                AttemptIndex + 1,
-                AttemptCount,
-                CandidateSelectionResult.ActiveRequestedMissionCount,
-                CandidateMissionIdSet.Num(),
-                SpatialRadiusCells,
-                LookaheadSteps);
-        }
-
-        if (TryPlanCandidateSet(CandidateMissionIdSet, AttemptIndex, AttemptCount, SpatialRadiusCells, LookaheadSteps))
-        {
-            return true;
-        }
-
-        OutReplannedMissionIds.Reset();
+        ExecutionReplanTimingStats.GlobalAttemptCount += CoordinatorResult.TimedAttemptCount;
+        ExecutionReplanTimingStats.GlobalTotalTimeMs += CoordinatorResult.TotalAttemptTimeMs;
+        ExecutionReplanTimingStats.GlobalMaxTimeMs = FMath::Max(
+            ExecutionReplanTimingStats.GlobalMaxTimeMs,
+            CoordinatorResult.MaxAttemptTimeMs);
+    }
+    else
+    {
+        ExecutionReplanTimingStats.LocalAttemptCount += CoordinatorResult.TimedAttemptCount;
+        ExecutionReplanTimingStats.LocalTotalTimeMs += CoordinatorResult.TotalAttemptTimeMs;
+        ExecutionReplanTimingStats.LocalMaxTimeMs = FMath::Max(
+            ExecutionReplanTimingStats.LocalMaxTimeMs,
+            CoordinatorResult.MaxAttemptTimeMs);
     }
 
-    return false;
+    TotalExecutionReplanCount += CoordinatorResult.AppliedReplanCount;
+    OutReplannedMissionIds = CoordinatorResult.ReplannedMissionIds;
+    return CoordinatorResult.bSuccess;
 }
 bool APathPlanningDemoActor::IsMultiAgentPlannerType() const
 {

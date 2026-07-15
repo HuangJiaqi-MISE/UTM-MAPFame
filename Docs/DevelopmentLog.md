@@ -1069,3 +1069,56 @@ Actor 中原有的 `PlanMultiAgentMissionsOnGrid(...)` 已移除。成功后的 
 - stationary anchor 和路径起点仍使用 Snapshot 中由 Actor 写入的 `LastObservedCell`。
 - local/global attempt 计时、扩张轮次、targeted retry、成功写回和计数逻辑未修改。
 - 原有失败日志文本和触发状态保持不变。
+
+## 2026-07-15 ExecutionReplanCoordinator 抽取
+
+### 背景
+
+`FExecutionReplanAttemptRunner` 已经负责一次具体重规划尝试，但 `APathPlanningDemoActor::TryExecutionReplan(...)` 仍然维护 local/global 扩张轮次、candidate selection、PostCheck targeted retry、attempt 计时和成功控制。该部分属于执行期重规划编排，不需要直接依赖 UE 场景对象。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionReplanCoordinator.h`
+- `Source/UTM/Private/Execution/ExecutionReplanCoordinator.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 当前职责划分
+
+`FExecutionReplanCoordinator::Run(...)` 现在负责：
+
+- 根据 local/global 模式确定 outer attempt 数量。
+- 按 attempt index 扩大 spatial radius 和 lookahead。
+- 调用 `FExecutionReplanCandidateSelector::Select(...)` 构造 candidate mission 集合。
+- 在一次 outer attempt 内执行最多一次 local PostCheck targeted retry。
+- 根据冲突双方状态扩充 movable mission 或 LaCAM-UTM stationary anchor。
+- 统计每个 outer attempt 的次数、总耗时和最大耗时。
+- 通过同步回调执行单次 attempt、成功结果写回和事件通知。
+
+`APathPlanningDemoActor::TryExecutionReplan(...)` 现在负责：
+
+- 保留空请求、Disabled 模式和最大重规划次数检查。
+- 捕获执行快照，并将 `LastObservedCell` 写入 Snapshot。
+- 构造 Coordinator Request 和同步回调。
+- 将 Coordinator timing result 合并到原有 local/global 统计字段。
+- 更新 `TotalExecutionReplanCount` 并返回 replanned mission IDs。
+
+Actor 继续通过回调负责：
+
+- 调用 `RunExecutionReplanAttempt(...)` Actor 适配层。
+- 调用 `ApplyExecutionReplanAttemptResult(...)` 写入执行状态和路径缓存。
+- 根据 `FExecutionReplanCoordinatorEvent` 输出原有 UE 日志。
+
+### 保守性说明
+
+- global replan 仍固定为一次 outer attempt。
+- local replan outer attempt 数量仍为 `Max(1, LocalReplanMaxExpansionRounds)`。
+- spatial radius 和 lookahead 仍按 `AttemptIndex + 1` 线性扩大。
+- global 模式 targeted retry 上限仍为 0，local 模式仍为 1。
+- targeted retry 仍包含在当前 outer attempt 的计时中，不额外增加 attempt count。
+- candidate selection 前的 local expansion 日志仍不计入 attempt 时间。
+- Runner、PostCheck 日志、targeted retry、成功写回和成功日志仍位于 attempt 计时作用域内。
+- 原有 `[AlignmentReplan]` 日志模板逐项比对一致。
+- 没有修改 JSON 字段或 execution replan timing 指标定义。
