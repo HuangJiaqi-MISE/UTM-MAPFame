@@ -422,7 +422,6 @@ private:
         const FMultiAgentPlanningPipelineResult& PipelineResult,
         EMultiAgentPlanningResultLogMode LogMode);
 
-    bool PlanMultiAgentMissionsOnGrid(const FGridMap3D& PlanningGrid, const TArray<FDroneMissionConfig>& Missions, TMap<int32, TArray<FVector>>& OutPaths) const;
     bool RunExecutionReplanAttempt(const FExecutionReplanAttemptInput& Input, FExecutionReplanAttemptResult& OutResult) const;
     bool ApplyExecutionReplanAttemptResult(const FExecutionReplanAttemptResult& Result, TSet<int32>& OutReplannedMissionIds);
     bool TryExecutionReplan(const TSet<int32>& RequestedMissionIds, bool bGlobalReplan, TSet<int32>& OutReplannedMissionIds);

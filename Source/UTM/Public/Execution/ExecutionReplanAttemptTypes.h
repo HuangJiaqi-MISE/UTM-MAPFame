@@ -35,6 +35,8 @@ enum class EExecutionReplanAttemptStatus : uint8
 struct FExecutionReplanAttemptResult
 {
     EExecutionReplanAttemptStatus Status = EExecutionReplanAttemptStatus::PlannerFailed;
+    FString FailureReason;
+    int32 FailedMissionId = INDEX_NONE;
     TArray<int32> CandidateMissionIds;
     TArray<int32> AnchorMissionIds;
     TSet<int32> AnchorMissionIdSet;

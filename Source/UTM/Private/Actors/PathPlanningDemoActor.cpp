@@ -10,10 +10,8 @@
 
 #include "Execution/ConflictPredictionPolicy.h"
 #include "Execution/ExecutionAlignmentPolicy.h"
+#include "Execution/ExecutionReplanAttemptRunner.h"
 #include "Execution/ExecutionReplanCandidateSelector.h"
-#include "Execution/ExecutionReplanGridBuilder.h"
-#include "Execution/ExecutionReplanPostCheckPolicy.h"
-#include "Execution/ReplanMissionBuilder.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
 #include "Planning/PlannerRegistry.h"
@@ -71,6 +69,70 @@ namespace
             return TEXT("Downwash");
         default:
             return TEXT("None");
+        }
+    }
+
+    void LogExecutionReplanAttemptFailure(
+        const FExecutionReplanAttemptInput& Input,
+        const FExecutionReplanAttemptResult& Result)
+    {
+        switch (Result.Status)
+        {
+        case EExecutionReplanAttemptStatus::GridBuildFailed:
+            if (!Result.FailureReason.IsEmpty())
+            {
+                UE_LOG(LogTemp, Warning, TEXT("[AlignmentReplan] %s"), *Result.FailureReason);
+            }
+            break;
+
+        case EExecutionReplanAttemptStatus::MissionBuildFailed:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[AlignmentReplan] failed to build replan missions: %s"),
+                *Result.FailureReason);
+            break;
+
+        case EExecutionReplanAttemptStatus::PlannerFailed:
+            if (Input.Spec.bGlobalReplan)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[AlignmentReplan] global replan failed for %d movable missions (Anchors=%d StaticBlocked=%d)"),
+                    Result.CandidateMissionIds.Num(),
+                    Result.AnchorMissionIds.Num(),
+                    Result.StaticAnchorBlockedCellCount);
+            }
+            else
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[AlignmentReplan] local replan attempt %d/%d failed for %d movable missions (Anchors=%d StaticBlocked=%d K=%d W=%d)"),
+                    Input.Spec.AttemptIndex + 1,
+                    Input.Spec.AttemptCount,
+                    Result.CandidateMissionIds.Num(),
+                    Result.AnchorMissionIds.Num(),
+                    Result.StaticAnchorBlockedCellCount,
+                    Input.Spec.SpatialRadiusCells,
+                    Input.Spec.LookaheadSteps);
+            }
+            break;
+
+        case EExecutionReplanAttemptStatus::InvalidReplannedPath:
+            if (Result.FailedMissionId != INDEX_NONE)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[AlignmentReplan] invalid replanned path for Mission %d"),
+                    Result.FailedMissionId);
+            }
+            break;
+
+        default:
+            break;
         }
     }
 
@@ -2816,180 +2878,25 @@ bool APathPlanningDemoActor::ProcessMissionConfigsMultiAgent()
         EMultiAgentPlanningResultLogMode::MissionConfig);
 }
 
-bool APathPlanningDemoActor::PlanMultiAgentMissionsOnGrid(
-    const FGridMap3D& PlanningGrid,
-    const TArray<FDroneMissionConfig>& Missions,
-    TMap<int32, TArray<FVector>>& OutPaths) const
-{
-    const FPlannerRuntimeConfig Config = BuildPlannerRuntimeConfig();
-    return FPlannerRegistry::PlanMultiAgentMissions(PlannerType, Config, PlanningGrid, Missions, OutPaths);
-}
-
 bool APathPlanningDemoActor::RunExecutionReplanAttempt(
     const FExecutionReplanAttemptInput& Input,
     FExecutionReplanAttemptResult& OutResult) const
 {
-    OutResult = FExecutionReplanAttemptResult();
+    const FPlannerRuntimeConfig PlannerConfig = BuildPlannerRuntimeConfig();
 
-    if (!Input.Snapshot)
-    {
-        OutResult.Status = EExecutionReplanAttemptStatus::GridBuildFailed;
-        return false;
-    }
+    FExecutionReplanAttemptContext Context;
+    Context.BaseGrid = &GridMap;
+    Context.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
+    Context.PlannerType = PlannerType;
+    Context.PlannerConfig = &PlannerConfig;
 
-    OutResult.CandidateMissionIds.Reserve(Input.CandidateMissionIdSet.Num());
-    for (const int32 CandidateMissionId : Input.CandidateMissionIdSet)
-    {
-        OutResult.CandidateMissionIds.Add(CandidateMissionId);
-    }
-
-    OutResult.CandidateMissionIds.Sort();
-
-    if (OutResult.CandidateMissionIds.Num() <= 0)
-    {
-        OutResult.Status = EExecutionReplanAttemptStatus::EmptyCandidateSet;
-        return false;
-    }
-
-    FExecutionReplanGridBuildInput GridBuildInput;
-    GridBuildInput.BaseGrid = &GridMap;
-    GridBuildInput.Snapshot = *Input.Snapshot;
-    GridBuildInput.MissionConfigsById = ExecutionMissionConfigsByMissionId;
-    GridBuildInput.CandidateMissionIds = Input.CandidateMissionIdSet;
-    GridBuildInput.ForcedAnchorMissionIds = Input.ForcedAnchorMissionIdSet;
-    GridBuildInput.bGlobalReplan = Input.Spec.bGlobalReplan;
-    GridBuildInput.bCheckStaticUTMSafety = Input.Spec.bCheckStaticUTMSafety;
-    GridBuildInput.SpatialRadiusCells = Input.Spec.SpatialRadiusCells;
-    GridBuildInput.LookaheadSteps = Input.Spec.LookaheadSteps;
-
-    const FExecutionReplanGridBuildResult GridBuildResult =
-        FExecutionReplanGridBuilder::Build(GridBuildInput);
-    if (!GridBuildResult.bSuccess)
-    {
-        OutResult.Status = EExecutionReplanAttemptStatus::GridBuildFailed;
-        UE_LOG(LogTemp, Warning, TEXT("[AlignmentReplan] %s"), *GridBuildResult.FailureReason);
-        return false;
-    }
-
-    OutResult.AnchorMissionIds = GridBuildResult.AnchorMissionIds;
-    OutResult.AnchorMissionIdSet = GridBuildResult.AnchorMissionIdSet;
-    OutResult.StaticAnchorBlockedCellCount = GridBuildResult.StaticAnchorBlockedCellCount;
-
-    FReplanMissionBuildInput ReplanMissionBuildInput;
-    ReplanMissionBuildInput.Agents = Input.Snapshot->Agents;
-    ReplanMissionBuildInput.MissionConfigsById = ExecutionMissionConfigsByMissionId;
-    ReplanMissionBuildInput.RequestedMissionIds = Input.CandidateMissionIdSet;
-    ReplanMissionBuildInput.bGlobalReplan = false;
-
-    const FReplanMissionBuildResult ReplanMissionBuildResult =
-        FReplanMissionBuilder::Build(ReplanMissionBuildInput);
-    if (!ReplanMissionBuildResult.bSuccess)
-    {
-        OutResult.Status = EExecutionReplanAttemptStatus::MissionBuildFailed;
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[AlignmentReplan] failed to build replan missions: %s"),
-            *ReplanMissionBuildResult.FailureReason);
-        return false;
-    }
-
-    const TArray<FDroneMissionConfig>& ReplanMissions = ReplanMissionBuildResult.ReplanMissions;
-
-    TMap<int32, TArray<FVector>> ReplannedWorldPaths;
-    const bool bSuccess = PlanMultiAgentMissionsOnGrid(GridBuildResult.ReplanGrid, ReplanMissions, ReplannedWorldPaths);
+    const bool bSuccess = FExecutionReplanAttemptRunner::Run(Context, Input, OutResult);
     if (!bSuccess)
     {
-        OutResult.Status = EExecutionReplanAttemptStatus::PlannerFailed;
-        if (Input.Spec.bGlobalReplan)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentReplan] global replan failed for %d movable missions (Anchors=%d StaticBlocked=%d)"),
-                OutResult.CandidateMissionIds.Num(),
-                OutResult.AnchorMissionIds.Num(),
-                OutResult.StaticAnchorBlockedCellCount);
-        }
-        else
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentReplan] local replan attempt %d/%d failed for %d movable missions (Anchors=%d StaticBlocked=%d K=%d W=%d)"),
-                Input.Spec.AttemptIndex + 1,
-                Input.Spec.AttemptCount,
-                OutResult.CandidateMissionIds.Num(),
-                OutResult.AnchorMissionIds.Num(),
-                OutResult.StaticAnchorBlockedCellCount,
-                Input.Spec.SpatialRadiusCells,
-                Input.Spec.LookaheadSteps);
-        }
-        return false;
+        LogExecutionReplanAttemptFailure(Input, OutResult);
     }
 
-    OutResult.ReplannedCellPathsByMission.Reserve(ReplanMissions.Num());
-
-    for (const FDroneMissionConfig& Mission : ReplanMissions)
-    {
-        const FExecutionAgentState* State = ExecutionStates.Find(Mission.MissionId);
-        const bool bStationaryAnchor = OutResult.AnchorMissionIdSet.Contains(Mission.MissionId);
-        const TArray<FVector>* ReplannedWorldPath = ReplannedWorldPaths.Find(Mission.MissionId);
-        if (!State || (!bStationaryAnchor && (!ReplannedWorldPath || ReplannedWorldPath->Num() <= 0)))
-        {
-            OutResult.Status = EExecutionReplanAttemptStatus::InvalidReplannedPath;
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentReplan] invalid replanned path for Mission %d"),
-                Mission.MissionId);
-            return false;
-        }
-
-        TArray<FIntVector> ReplannedCellPath;
-        if (bStationaryAnchor)
-        {
-            ReplannedCellPath.Add(State->LastObservedCell);
-        }
-        else
-        {
-            ReplannedCellPath = BuildCellPathFromWorldPath(*ReplannedWorldPath);
-            if (ReplannedCellPath.Num() <= 0)
-            {
-                OutResult.Status = EExecutionReplanAttemptStatus::InvalidReplannedPath;
-                return false;
-            }
-
-            if (ReplannedCellPath[0] != State->LastObservedCell)
-            {
-                ReplannedCellPath.Insert(State->LastObservedCell, 0);
-            }
-        }
-
-        OutResult.ReplannedCellPathsByMission.Add(Mission.MissionId, MoveTemp(ReplannedCellPath));
-    }
-
-    FExecutionReplanPostCheckInput PostCheckInput;
-    PostCheckInput.Snapshot = *Input.Snapshot;
-    PostCheckInput.MissionConfigsById = ExecutionMissionConfigsByMissionId;
-    PostCheckInput.ReplannedCellPathsByMission = OutResult.ReplannedCellPathsByMission;
-    PostCheckInput.CandidateMissionIds = Input.CandidateMissionIdSet;
-    PostCheckInput.GridDim = GridMap.GridDim;
-    PostCheckInput.bCheckStaticUTMSafety = Input.Spec.bCheckStaticUTMSafety;
-    PostCheckInput.LookaheadSteps = Input.Spec.LookaheadSteps;
-
-    const FExecutionReplanPostCheckResult PostCheckResult =
-        FExecutionReplanPostCheckPolicy::Validate(PostCheckInput);
-    if (PostCheckResult.bHasConflict)
-    {
-        OutResult.Status = EExecutionReplanAttemptStatus::PostCheckFailed;
-        OutResult.PostCheckConflict = PostCheckResult.Conflict;
-        OutResult.PostCheckConflictOffset = PostCheckResult.ConflictOffset;
-        return false;
-    }
-
-    OutResult.Status = EExecutionReplanAttemptStatus::Success;
-    return true;
+    return bSuccess;
 }
 
 bool APathPlanningDemoActor::ApplyExecutionReplanAttemptResult(

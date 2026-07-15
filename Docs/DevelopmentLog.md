@@ -1023,3 +1023,49 @@ post-check 验证用于检查重规划后的路径与未重规划 agent 的未�
 - 动作转换保持一一对应，动作日志字符串未改变。
 - 没有修改随机数调用位置和次数。
 - 没有修改冲突仲裁、Final Safety Gate、重规划请求或状态统计规则。
+
+## 2026-07-15 ExecutionReplanAttemptRunner 抽取
+
+### 背景
+
+单次 execution replan attempt 的输入、配置、状态和结果类型已经外移，但具体执行流程仍然由 `APathPlanningDemoActor::RunExecutionReplanAttempt(...)` 直接串联 Grid Builder、Mission Builder、Planner Registry、路径转换和 PostCheck。该实现仍然需要读取 Actor 成员，其他执行器无法独立复用。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionReplanAttemptRunner.h`
+- `Source/UTM/Private/Execution/ExecutionReplanAttemptRunner.cpp`
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionReplanAttemptTypes.h`
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 当前职责划分
+
+`FExecutionReplanAttemptRunner::Run(...)` 负责：
+
+- 检查 attempt context、snapshot 和 candidate mission 集合。
+- 调用 `FExecutionReplanGridBuilder::Build(...)`。
+- 调用 `FReplanMissionBuilder::Build(...)`。
+- 通过 `FPlannerRegistry::PlanMultiAgentMissions(...)` 调用多智能体规划器。
+- 将 replanned world path 转换为 cell path。
+- 调用 `FExecutionReplanPostCheckPolicy::Validate(...)`。
+- 返回 attempt 状态、路径、anchor、失败原因和 post-check conflict。
+
+`APathPlanningDemoActor::RunExecutionReplanAttempt(...)` 现在只负责：
+
+- 用 Actor 当前的 GridMap、Mission 配置、Planner 类型和 Planner Runtime Config 构造 context。
+- 调用 `FExecutionReplanAttemptRunner::Run(...)`。
+- 根据 attempt result 输出原有 UE 日志。
+
+Actor 中原有的 `PlanMultiAgentMissionsOnGrid(...)` 已移除。成功后的 `ApplyExecutionReplanAttemptResult(...)` 继续留在 Actor，因为它仍然需要写入 `ExecutionStates`、`PlannedCellPathsByMission` 和 `LastPlannedPathsByMission`。
+
+### 保守性说明
+
+- Runner 不依赖 `APathPlanningDemoActor`、`AActor`、`UWorld`、`DrawDebug` 或 Details 反射属性。
+- Planner 类型和 Runtime Config 仍由 Actor 使用原有 `BuildPlannerRuntimeConfig()` 构造。
+- world path 到 cell path 仍使用同一个基础 `GridMap.WorldToCell(...)`。
+- stationary anchor 和路径起点仍使用 Snapshot 中由 Actor 写入的 `LastObservedCell`。
+- local/global attempt 计时、扩张轮次、targeted retry、成功写回和计数逻辑未修改。
+- 原有失败日志文本和触发状态保持不变。
