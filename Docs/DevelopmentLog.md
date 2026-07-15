@@ -1382,3 +1382,49 @@ Actor 中的适配层现在负责：
 - world 坐标转换、Actor 状态字段和路径缓存写入顺序保持不变。
 - `PathMergePolicy` 本轮未修改、未删除，也没有接入执行期时间线整合流程。
 - Replan Runner、Coordinator、attempt 计时、状态统计和 JSON 指标定义未修改。
+
+## 2026-07-15 Execution Step Proposal Builder 抽取
+
+### 背景
+
+`APathPlanningDemoActor::AdvanceExecutionOneStep()` 在调用 `FExecutionAlignmentPolicy::Decide(...)` 后，仍直接将 `FExecutionStepDecision` 转换为 `FExecutionStepProposal`，并在 Actor 中维护默认动作、路径下标钳制、无效 Alignment fallback 和初始重规划请求条件。这些规则只依赖轻量输入和 Alignment Decision，不需要访问 UE 场景对象。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionStepProposalBuilder.h`
+- `Source/UTM/Private/Execution/ExecutionStepProposalBuilder.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Builder 当前职责
+
+`FExecutionStepProposalBuilder::Build(...)` 现在负责：
+
+- 写入 Mission ID、Observed Cell、Delay 请求和完整 Alignment Decision。
+- 将当前执行路径下标限制在有效路径范围内。
+- 初始化 Proposed Index、Observed Cell、`HoldForAlignment` 和 Alignment Reason。
+- 对有效 Alignment 写入 valid、requires replan、reference/target index、target cell 和最终动作。
+- 对无效 Alignment 设置 `bInitialAlignmentInvalid` 和 `bRequiresReplan`。
+- 在无效 Alignment 没有 reason 时继续使用 `invalid alignment result`。
+- 返回是否需要加入初始 execution replan Mission 集合。
+- 对空规划路径返回失败，不生成可提交 Proposal。
+
+### Actor 继续保留的职责
+
+- 读取 Drone 实际位置并更新 `LastObservedCell` 和 `DisplayFromCell`。
+- 按原顺序调用 `ShouldDelayThisStep(...)` 生成随机或脚本延迟请求。
+- 构造 `FExecutionAgentSnapshot` 并调用 `FExecutionAlignmentPolicy::Decide(...)`。
+- 调用 Builder，将结果加入 `StepProposals` 和初始 replan Mission 集合。
+
+### 保守性说明
+
+- Mission ID 仍按排序后的顺序逐个处理。
+- `ShouldDelayThisStep(...)` 的调用位置、次数和 Mission 顺序未修改。
+- `FRandomStream` 仍由 Actor 持有和消费，随机数序列未移入 Builder。
+- Alignment Snapshot 的字段、Policy 设置和调用顺序未修改。
+- Proposal 默认字段、有效/无效分支、索引钳制范围和 fallback reason 保持不变。
+- 初始 replan 条件仍为 `bRequiresReplan || bInitialAlignmentInvalid`。
+- Conflict Resolution、普通 Execution Replan、Final Safety Gate 和 State Transition 未修改。
+- 日志、replan timing、状态统计和 JSON 指标定义未修改。

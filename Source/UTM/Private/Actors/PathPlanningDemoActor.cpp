@@ -15,6 +15,7 @@
 #include "Execution/ExecutionReplanCoordinator.h"
 #include "Execution/ExecutionReplanPathIntegrator.h"
 #include "Execution/ExecutionStateTransition.h"
+#include "Execution/ExecutionStepProposalBuilder.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
@@ -1500,44 +1501,28 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         const FExecutionStepDecision AlignmentDecision =
             AlignmentPolicy.Decide(GridMap, AgentSnapshot);
 
-        FExecutionStepProposal Proposal;
-        Proposal.MissionId = MissionId;
-        Proposal.ObservedCell = ObservedCell;
-        Proposal.bDelayRequested = bDelay;
-        Proposal.AlignmentDecision = AlignmentDecision;
-        Proposal.ReferencePlanIndex = FMath::Clamp(State->ExecutedPlanIndex, 0, State->PlannedCells.Num() - 1);
-        Proposal.ProposedPlanIndex = Proposal.ReferencePlanIndex;
-        Proposal.ProposedCell = ObservedCell;
-        Proposal.FinalAction = EExecutionPolicyAction::HoldForAlignment;
-        Proposal.ResolutionReason = AlignmentDecision.Reason;
+        FExecutionStepProposalBuildInput ProposalBuildInput;
+        ProposalBuildInput.MissionId = MissionId;
+        ProposalBuildInput.ObservedCell = ObservedCell;
+        ProposalBuildInput.bDelayRequested = bDelay;
+        ProposalBuildInput.CurrentPlanIndex = State->ExecutedPlanIndex;
+        ProposalBuildInput.PlannedCellCount = State->PlannedCells.Num();
 
-        if (AlignmentDecision.bValid)
+        const FExecutionStepProposalBuildResult ProposalBuildResult =
+            FExecutionStepProposalBuilder::Build(
+                ProposalBuildInput,
+                AlignmentDecision);
+        if (!ProposalBuildResult.bSuccess)
         {
-            Proposal.bValid = true;
-            Proposal.bRequiresReplan = AlignmentDecision.bRequiresReplan;
-            Proposal.ReferencePlanIndex = FMath::Clamp(AlignmentDecision.ReferencePlanIndex, 0, State->PlannedCells.Num() - 1);
-            Proposal.ProposedPlanIndex = FMath::Clamp(AlignmentDecision.TargetPlanIndex, 0, State->PlannedCells.Num() - 1);
-
-
-
-            Proposal.ProposedCell = AlignmentDecision.TargetCell;
-            Proposal.FinalAction = AlignmentDecision.Action;
-        }
-        else
-        {
-            Proposal.bInitialAlignmentInvalid = true;
-            Proposal.bRequiresReplan = true;
-            Proposal.ResolutionReason = AlignmentDecision.Reason.IsEmpty()
-                ? TEXT("invalid alignment result")
-                : AlignmentDecision.Reason;
+            continue;
         }
 
-        if (Proposal.bRequiresReplan || Proposal.bInitialAlignmentInvalid)
+        if (ProposalBuildResult.bRequestsReplan)
         {
             RequestedReplanMissionIds.Add(MissionId);
         }
 
-        StepProposals.Add(MissionId, Proposal);
+        StepProposals.Add(MissionId, ProposalBuildResult.Proposal);
     }
 
     FExecutionConflictResolutionInput ConflictResolutionInput;
