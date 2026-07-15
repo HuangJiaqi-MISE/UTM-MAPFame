@@ -8,9 +8,9 @@
 #include "Actors/DroneActor.h"
 #include "Engine/World.h"
 
-#include "Execution/ConflictPredictionPolicy.h"
 #include "Execution/ExecutionAlignmentPolicy.h"
 #include "Execution/ExecutionConflictResolutionPolicy.h"
+#include "Execution/ExecutionFinalSafetyGateCoordinator.h"
 #include "Execution/ExecutionReplanAttemptRunner.h"
 #include "Execution/ExecutionReplanCoordinator.h"
 #include "Execution/ExecutionStateTransition.h"
@@ -96,6 +96,128 @@ namespace
                 LexToString(Event.Conflict.Type),
                 Event.Conflict.AgentA,
                 Event.Conflict.AgentB);
+            break;
+        }
+    }
+
+    EExecutionPolicyReplanMode ToExecutionPolicyReplanMode(EExecutionReplanMode ReplanMode)
+    {
+        switch (ReplanMode)
+        {
+        case EExecutionReplanMode::LocalConflictSet:
+            return EExecutionPolicyReplanMode::LocalConflictSet;
+        case EExecutionReplanMode::GlobalUnfinished:
+            return EExecutionPolicyReplanMode::GlobalUnfinished;
+        case EExecutionReplanMode::Disabled:
+        default:
+            return EExecutionPolicyReplanMode::Disabled;
+        }
+    }
+
+    void LogExecutionFinalSafetyGateEvent(
+        const FExecutionFinalSafetyGateEvent& Event,
+        int32 TimeStep)
+    {
+        switch (Event.Type)
+        {
+        case EExecutionFinalSafetyGateEventType::UnsafeProposalDetected:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[FinalSafetyGate] t=%d unsafe proposed %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); forcing %d missions to hold"),
+                TimeStep,
+                LexToString(Event.Conflict.Type),
+                Event.Conflict.AgentA,
+                Event.Conflict.AgentB,
+                Event.Conflict.Cell.X,
+                Event.Conflict.Cell.Y,
+                Event.Conflict.Cell.Z,
+                Event.MissionCount);
+            break;
+
+        case EExecutionFinalSafetyGateEventType::HoldSetExpanded:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[FinalSafetyGate] t=%d hold set expanded from %d to %d missions due to remaining %s conflict between Mission %d and Mission %d"),
+                TimeStep,
+                Event.PreviousMissionCount,
+                Event.MissionCount,
+                LexToString(Event.Conflict.Type),
+                Event.Conflict.AgentA,
+                Event.Conflict.AgentB);
+            break;
+
+        case EExecutionFinalSafetyGateEventType::HoldLimitReached:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[FinalSafetyGate] t=%d Mission %d reached safety-gate hold limit %d; upgrade to global replan"),
+                TimeStep,
+                Event.MissionId,
+                Event.HoldBudget);
+            break;
+
+        case EExecutionFinalSafetyGateEventType::SafeHoldReplanRequested:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[FinalSafetyGate] t=%d hold fallback is safe for %d missions; trigger %s execution replan"),
+                TimeStep,
+                Event.MissionCount,
+                Event.bForceGlobalReplan ? TEXT("global") : TEXT("configured"));
+            break;
+
+        case EExecutionFinalSafetyGateEventType::LocalReplanFailedUpgradeGlobal:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[FinalSafetyGate] t=%d local safety-gate replan failed; upgrade to global replan"),
+                TimeStep);
+            break;
+
+        case EExecutionFinalSafetyGateEventType::ReplanDisabledSafeHold:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[FinalSafetyGate] t=%d execution replan disabled; committing safe hold only"),
+                TimeStep);
+            break;
+
+        case EExecutionFinalSafetyGateEventType::FinalProposalUnsafe:
+            UE_LOG(
+                LogTemp,
+                Error,
+                TEXT("[FinalSafetyGate] t=%d final proposal remains unsafe after safety-gate replan: %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); mark execution failed instead of committing unsafe state"),
+                TimeStep,
+                LexToString(Event.Conflict.Type),
+                Event.Conflict.AgentA,
+                Event.Conflict.AgentB,
+                Event.Conflict.Cell.X,
+                Event.Conflict.Cell.Y,
+                Event.Conflict.Cell.Z);
+            break;
+
+        case EExecutionFinalSafetyGateEventType::GlobalReplanFailedAfterHoldLimit:
+            UE_LOG(
+                LogTemp,
+                Error,
+                TEXT("[FinalSafetyGate] t=%d global replan failed after safety-gate hold limit; mark execution failed instead of committing unsafe state"),
+                TimeStep);
+            break;
+
+        case EExecutionFinalSafetyGateEventType::HoldFallbackUnsafe:
+            UE_LOG(
+                LogTemp,
+                Error,
+                TEXT("[FinalSafetyGate] t=%d hold fallback remains unsafe: %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); dirty-start recovery required but unavailable, mark execution failed"),
+                TimeStep,
+                LexToString(Event.Conflict.Type),
+                Event.Conflict.AgentA,
+                Event.Conflict.AgentB,
+                Event.Conflict.Cell.X,
+                Event.Conflict.Cell.Y,
+                Event.Conflict.Cell.Z);
             break;
         }
     }
@@ -1454,57 +1576,6 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         }
     }
 
-    // Final Safety Gate remains in the Actor and rechecks the proposals after any replan.
-    const FConflictPredictionPolicy ConflictPredictionPolicy;
-    auto BuildConflictPredictionInput =
-        [&]() -> FExecutionConflictPredictionInput
-        {
-            FExecutionConflictPredictionInput Input;
-            Input.Items.Reserve(StepProposals.Num());
-            Input.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
-            Input.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
-
-            for (const int32 MissionId : MissionIds)
-            {
-                const FExecutionStepProposal* Proposal = StepProposals.Find(MissionId);
-                if (!Proposal)
-                {
-                    continue;
-                }
-
-                FExecutionConflictCheckItem Item;
-                Item.MissionId = Proposal->MissionId;
-                Item.bValid = true;
-                Item.ObservedCell = Proposal->ObservedCell;
-                Item.TargetCell = Proposal->ProposedCell;
-                Input.Items.Add(Item);
-            }
-
-            return Input;
-        };
-
-    auto CollectProposalConflictEndpoints =
-        [&](TSet<int32>& OutMissionIds, FExecutionPredictedConflict& OutFirstConflict) -> bool
-        {
-            bool bFoundConflict = false;
-            const TArray<FExecutionPredictedConflict> Conflicts =
-                ConflictPredictionPolicy.FindConflicts(BuildConflictPredictionInput());
-
-            for (const FExecutionPredictedConflict& Conflict : Conflicts)
-            {
-                if (!bFoundConflict)
-                {
-                    OutFirstConflict = Conflict;
-                    bFoundConflict = true;
-                }
-
-                OutMissionIds.Add(Conflict.AgentA);
-                OutMissionIds.Add(Conflict.AgentB);
-            }
-
-            return bFoundConflict;
-        };
-
     TSet<int32> SuccessfulReplanMissionIds;
     bool bReplanSucceeded = false;
     if (RequestedReplanMissionIds.Num() > 0 && ExecutionReplanMode != EExecutionReplanMode::Disabled)
@@ -1547,233 +1618,108 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
 
     bool bStopExecutionForSafetyGate = false;
 
-    if (bEnableFinalSafetyGate && StepProposals.Num() > 1)
+    FExecutionFinalSafetyGateInput SafetyGateInput;
+    SafetyGateInput.OrderedMissionIds = MissionIds;
+    SafetyGateInput.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
+    SafetyGateInput.Settings.bEnabled = bEnableFinalSafetyGate;
+    SafetyGateInput.Settings.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
+    SafetyGateInput.Settings.MaxHoldSteps = FinalSafetyGateMaxHoldSteps;
+
+    for (const int32 MissionId : MissionIds)
     {
-        auto ApplySafetyGateHold = [&](const TSet<int32>& HoldMissionIds)
-            {
-                for (const int32 MissionId : HoldMissionIds)
-                {
-                    FExecutionStepProposal* Proposal = StepProposals.Find(MissionId);
-                    if (!Proposal)
-                    {
-                        continue;
-                    }
-
-                    Proposal->bValid = true;
-                    Proposal->bHeldForPredictedConflict = false;
-                    Proposal->bHeldForReplan = false;
-                    Proposal->bRequiresReplan = true;
-                    Proposal->FinalAction = EExecutionPolicyAction::HoldForSafetyGate;
-                    Proposal->ProposedPlanIndex = Proposal->ReferencePlanIndex;
-                    Proposal->ProposedCell = Proposal->ObservedCell;
-                    Proposal->ResolutionReason = TEXT("final safety gate hold before replanning");
-                }
-            };
-
-        FExecutionPredictedConflict GateConflict;
-        TSet<int32> SafetyGateMissionIds;
-        if (CollectProposalConflictEndpoints(SafetyGateMissionIds, GateConflict))
+        const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+        if (!State)
         {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[FinalSafetyGate] t=%d unsafe proposed %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); forcing %d missions to hold"),
-                CurrentExecutionTimeStep,
-                LexToString(GateConflict.Type),
-                GateConflict.AgentA,
-                GateConflict.AgentB,
-                GateConflict.Cell.X,
-                GateConflict.Cell.Y,
-                GateConflict.Cell.Z,
-                SafetyGateMissionIds.Num());
+            continue;
+        }
 
-            bool bHoldConfigurationSafe = false;
-            FExecutionPredictedConflict HoldConflict;
-            for (int32 Pass = 0; Pass < MissionIds.Num(); ++Pass)
+        FExecutionFinalSafetyGateAgentState AgentState;
+        AgentState.ConsecutiveSafetyGateHoldCount = State->ConsecutiveSafetyGateHoldCount;
+        SafetyGateInput.AgentStatesByMissionId.Add(MissionId, AgentState);
+    }
+
+    FExecutionFinalSafetyGateCoordinatorRequest SafetyGateRequest;
+    SafetyGateRequest.SafetyGateInput = &SafetyGateInput;
+    SafetyGateRequest.ReplanMode = ToExecutionPolicyReplanMode(ExecutionReplanMode);
+
+    FExecutionFinalSafetyGateCoordinatorCallbacks SafetyGateCallbacks;
+    SafetyGateCallbacks.RunReplan =
+        [this](
+            const TSet<int32>& RequestedMissionIds,
+            bool bGlobalReplan,
+            TSet<int32>& ReplannedMissionIds) -> bool
+        {
+            return TryExecutionReplan(
+                RequestedMissionIds,
+                bGlobalReplan,
+                ReplannedMissionIds);
+        };
+    SafetyGateCallbacks.ApplyReplanResult =
+        [this, &MissionIds](
+            const TSet<int32>& HoldMissionIds,
+            const TSet<int32>& ReplannedMissionIds,
+            TMap<int32, FExecutionStepProposal>& InOutProposals)
+        {
+            for (const int32 MissionId : MissionIds)
             {
-                ApplySafetyGateHold(SafetyGateMissionIds);
-
-                TSet<int32> RemainingConflictMissionIds;
-                FExecutionPredictedConflict RemainingConflict;
-                if (!CollectProposalConflictEndpoints(RemainingConflictMissionIds, RemainingConflict))
+                FExecutionStepProposal* Proposal = InOutProposals.Find(MissionId);
+                FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+                if (!Proposal || !State || State->PlannedCells.Num() <= 0)
                 {
-                    bHoldConfigurationSafe = true;
-                    break;
-                }
-
-                bool bExpandedHoldSet = false;
-                const int32 PreviousHoldCount = SafetyGateMissionIds.Num();
-                for (const int32 MissionId : RemainingConflictMissionIds)
-                {
-                    if (!SafetyGateMissionIds.Contains(MissionId))
-                    {
-                        SafetyGateMissionIds.Add(MissionId);
-                        bExpandedHoldSet = true;
-                    }
-                }
-
-                if (bExpandedHoldSet)
-                {
-                    UE_LOG(
-                        LogTemp,
-                        Warning,
-                        TEXT("[FinalSafetyGate] t=%d hold set expanded from %d to %d missions due to remaining %s conflict between Mission %d and Mission %d"),
-                        CurrentExecutionTimeStep,
-                        PreviousHoldCount,
-                        SafetyGateMissionIds.Num(),
-                        LexToString(RemainingConflict.Type),
-                        RemainingConflict.AgentA,
-                        RemainingConflict.AgentB);
                     continue;
                 }
 
-                HoldConflict = RemainingConflict;
-                break;
+                if (!HoldMissionIds.Contains(MissionId) &&
+                    !ReplannedMissionIds.Contains(MissionId))
+                {
+                    continue;
+                }
+
+                Proposal->bValid = true;
+                Proposal->bHeldForReplan = true;
+                Proposal->bHeldForPredictedConflict = false;
+                Proposal->bRequiresReplan = false;
+                Proposal->FinalAction = EExecutionPolicyAction::HoldForReplan;
+                Proposal->ReferencePlanIndex = FMath::Clamp(
+                    State->ExecutedPlanIndex,
+                    0,
+                    State->PlannedCells.Num() - 1);
+                Proposal->ProposedPlanIndex = ReplannedMissionIds.Contains(MissionId)
+                    ? FMath::Min(Proposal->ReferencePlanIndex + 1, State->PlannedCells.Num() - 1)
+                    : Proposal->ReferencePlanIndex;
+                Proposal->ProposedCell = Proposal->ObservedCell;
+                Proposal->ResolutionReason = ReplannedMissionIds.Contains(MissionId)
+                    ? TEXT("hold while applying safety-gate replanned trajectory")
+                    : TEXT("hold to synchronize with safety-gate replanned agents");
             }
+        };
+    SafetyGateCallbacks.OnEvent =
+        [this](const FExecutionFinalSafetyGateEvent& Event)
+        {
+            LogExecutionFinalSafetyGateEvent(Event, CurrentExecutionTimeStep);
+        };
 
-            if (bHoldConfigurationSafe)
-            {
-                ApplySafetyGateHold(SafetyGateMissionIds);
-                for (const int32 MissionId : SafetyGateMissionIds)
-                {
-                    RequestedReplanMissionIds.Add(MissionId);
-                }
+    const FExecutionFinalSafetyGateCoordinatorResult SafetyGateCoordinatorResult =
+        FExecutionFinalSafetyGateCoordinator::Run(
+            SafetyGateRequest,
+            SafetyGateCallbacks,
+            StepProposals);
 
-                bool bForceGlobalSafetyGateReplan = false;
-                const int32 SafetyGateHoldBudget = FMath::Max(1, FinalSafetyGateMaxHoldSteps);
-                for (const int32 MissionId : SafetyGateMissionIds)
-                {
-                    const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-                    if (State && State->ConsecutiveSafetyGateHoldCount + 1 >= SafetyGateHoldBudget)
-                    {
-                        bForceGlobalSafetyGateReplan = true;
-                        UE_LOG(
-                            LogTemp,
-                            Warning,
-                            TEXT("[FinalSafetyGate] t=%d Mission %d reached safety-gate hold limit %d; upgrade to global replan"),
-                            CurrentExecutionTimeStep,
-                            MissionId,
-                            SafetyGateHoldBudget);
-                        break;
-                    }
-                }
+    for (const int32 MissionId : SafetyGateCoordinatorResult.RequestedReplanMissionIds)
+    {
+        RequestedReplanMissionIds.Add(MissionId);
+    }
 
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[FinalSafetyGate] t=%d hold fallback is safe for %d missions; trigger %s execution replan"),
-                    CurrentExecutionTimeStep,
-                    SafetyGateMissionIds.Num(),
-                    bForceGlobalSafetyGateReplan ? TEXT("global") : TEXT("configured"));
-
-                bool bSafetyGateReplanSucceeded = false;
-                TSet<int32> SafetyGateSuccessfulReplanMissionIds;
-                if (ExecutionReplanMode != EExecutionReplanMode::Disabled)
-                {
-                    const bool bUseGlobalReplan = bForceGlobalSafetyGateReplan || (ExecutionReplanMode == EExecutionReplanMode::GlobalUnfinished);
-                    bSafetyGateReplanSucceeded = TryExecutionReplan(SafetyGateMissionIds, bUseGlobalReplan, SafetyGateSuccessfulReplanMissionIds);
-
-                    if (!bSafetyGateReplanSucceeded && !bForceGlobalSafetyGateReplan && ExecutionReplanMode == EExecutionReplanMode::LocalConflictSet)
-                    {
-                        UE_LOG(
-                            LogTemp,
-                            Warning,
-                            TEXT("[FinalSafetyGate] t=%d local safety-gate replan failed; upgrade to global replan"),
-                            CurrentExecutionTimeStep);
-                        bSafetyGateReplanSucceeded = TryExecutionReplan(SafetyGateMissionIds, true, SafetyGateSuccessfulReplanMissionIds);
-                    }
-                }
-                else
-                {
-                    UE_LOG(
-                        LogTemp,
-                        Warning,
-                        TEXT("[FinalSafetyGate] t=%d execution replan disabled; committing safe hold only"),
-                        CurrentExecutionTimeStep);
-                }
-
-                if (bSafetyGateReplanSucceeded)
-                {
-                    bReplanSucceeded = true;
-                    for (const int32 MissionId : SafetyGateSuccessfulReplanMissionIds)
-                    {
-                        SuccessfulReplanMissionIds.Add(MissionId);
-                    }
-
-                    for (const int32 MissionId : MissionIds)
-                    {
-                        FExecutionStepProposal* Proposal = StepProposals.Find(MissionId);
-                        FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-                        if (!Proposal || !State || State->PlannedCells.Num() <= 0)
-                        {
-                            continue;
-                        }
-
-                        if (!SafetyGateMissionIds.Contains(MissionId) && !SafetyGateSuccessfulReplanMissionIds.Contains(MissionId))
-                        {
-                            continue;
-                        }
-
-                        Proposal->bValid = true;
-                        Proposal->bHeldForReplan = true;
-                        Proposal->bHeldForPredictedConflict = false;
-                        Proposal->bRequiresReplan = false;
-                        Proposal->FinalAction = EExecutionPolicyAction::HoldForReplan;
-                        Proposal->ReferencePlanIndex = FMath::Clamp(State->ExecutedPlanIndex, 0, State->PlannedCells.Num() - 1);
-                        Proposal->ProposedPlanIndex = SafetyGateSuccessfulReplanMissionIds.Contains(MissionId)
-                            ? FMath::Min(Proposal->ReferencePlanIndex + 1, State->PlannedCells.Num() - 1)
-                            : Proposal->ReferencePlanIndex;
-                        Proposal->ProposedCell = Proposal->ObservedCell;
-                        Proposal->ResolutionReason = SafetyGateSuccessfulReplanMissionIds.Contains(MissionId)
-                            ? TEXT("hold while applying safety-gate replanned trajectory")
-                            : TEXT("hold to synchronize with safety-gate replanned agents");
-                    }
-                    TSet<int32> FinalConflictMissionIds;
-                    FExecutionPredictedConflict FinalConflict;
-                    if (CollectProposalConflictEndpoints(FinalConflictMissionIds, FinalConflict))
-                    {
-                        UE_LOG(
-                            LogTemp,
-                            Error,
-                            TEXT("[FinalSafetyGate] t=%d final proposal remains unsafe after safety-gate replan: %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); mark execution failed instead of committing unsafe state"),
-                            CurrentExecutionTimeStep,
-                            LexToString(FinalConflict.Type),
-                            FinalConflict.AgentA,
-                            FinalConflict.AgentB,
-                            FinalConflict.Cell.X,
-                            FinalConflict.Cell.Y,
-                            FinalConflict.Cell.Z);
-                        bStopExecutionForSafetyGate = true;
-                    }
-
-                }
-                else if (bForceGlobalSafetyGateReplan)
-                {
-                    UE_LOG(
-                        LogTemp,
-                        Error,
-                        TEXT("[FinalSafetyGate] t=%d global replan failed after safety-gate hold limit; mark execution failed instead of committing unsafe state"),
-                        CurrentExecutionTimeStep);
-                    bStopExecutionForSafetyGate = true;
-                }
-            }
-            else
-            {
-                UE_LOG(
-                    LogTemp,
-                    Error,
-                    TEXT("[FinalSafetyGate] t=%d hold fallback remains unsafe: %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); dirty-start recovery required but unavailable, mark execution failed"),
-                    CurrentExecutionTimeStep,
-                    LexToString(HoldConflict.Type),
-                    HoldConflict.AgentA,
-                    HoldConflict.AgentB,
-                    HoldConflict.Cell.X,
-                    HoldConflict.Cell.Y,
-                    HoldConflict.Cell.Z);
-                bStopExecutionForSafetyGate = true;
-            }
+    if (SafetyGateCoordinatorResult.bReplanSucceeded)
+    {
+        bReplanSucceeded = true;
+        for (const int32 MissionId : SafetyGateCoordinatorResult.SuccessfulReplanMissionIds)
+        {
+            SuccessfulReplanMissionIds.Add(MissionId);
         }
     }
+
+    bStopExecutionForSafetyGate = SafetyGateCoordinatorResult.bStopExecution;
 
     if (bStopExecutionForSafetyGate)
     {

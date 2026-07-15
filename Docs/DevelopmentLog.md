@@ -1232,3 +1232,107 @@ Actor 中的适配层现在负责：
 - 成功重规划后清零连续 Hold、恢复 Alignment 状态的规则保持不变。
 - 原有 Delay 和 Alignment 日志模板及触发条件保持不变。
 - `ActualCells`、完成判定、`bAnyActive` 和执行 Summary 的统计口径保持不变。
+
+## 2026-07-15 Final Safety Gate 第一阶段抽取
+
+### 背景
+
+`APathPlanningDemoActor::AdvanceExecutionOneStep()` 在 Alignment、冲突仲裁和普通执行期重规划之后，仍直接维护 Final Safety Gate 的冲突检查、Hold 集合扩张和连续 Hold 升级全局重规划判断。这些规则只依赖单步 proposals、Mission 配置和轻量计数状态，不需要访问 UE 场景对象或直接调用 Planner。
+
+本轮只完成 Final Safety Gate 第一阶段抽取。重规划调用、日志、失败停止和 Summary 继续保留在 Actor。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionFinalSafetyGateTypes.h`
+- `Source/UTM/Public/Execution/ExecutionFinalSafetyGatePolicy.h`
+- `Source/UTM/Private/Execution/ExecutionFinalSafetyGatePolicy.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Policy 当前职责
+
+`FExecutionFinalSafetyGatePolicy::EvaluateAndApplyHold(...)` 现在负责：
+
+- 按 Actor 提供的排序后 Mission ID 构造统一 conflict prediction input。
+- 复用 `FConflictPredictionPolicy` 检查最终 proposals 的 vertex、edge 和可选 UTM 静态安全冲突。
+- 收集所有冲突两端的 Mission ID，形成初始 Hold 集合。
+- 将 Hold proposal 改为 `HoldForSafetyGate`，并反复检查 Hold 后是否仍有冲突。
+- 在最多 `OrderedMissionIds.Num()` 轮内扩张 Hold 集合。
+- 记录每轮扩张前后的 Mission 数量和导致扩张的首个剩余冲突。
+- 使用 `ConsecutiveSafetyGateHoldCount + 1 >= MaxHoldSteps` 判断是否强制升级全局重规划。
+- 返回初始冲突、最终 Hold 集合、Hold 是否安全、未解决冲突和全局升级决定。
+
+`FExecutionFinalSafetyGatePolicy::CheckConflicts(...)` 提供独立的 proposal 冲突检查，供 Actor 在 safety-gate replan 成功并同步 proposals 后执行最终复检。
+
+### Actor 继续保留的职责
+
+- 调用 `TryExecutionReplan(...)`。
+- 根据配置选择 local/global safety-gate replan。
+- local safety-gate replan 失败后升级 global。
+- 重规划成功后同步 `FExecutionStepProposal` 和成功 Mission ID。
+- 输出全部 `[FinalSafetyGate]` 日志。
+- 根据 Policy 结果决定是否停止执行。
+- 停止后调用 `BuildExecutionSummary()` 和 `LogExecutionSummary()`。
+
+### 保守性说明
+
+- Final Safety Gate 仍位于普通冲突仲裁和普通 execution replan 之后。
+- proposal conflict item 仍按排序后的 Mission ID 构造，并继续统一标记为 valid。
+- 初始 Hold 集合仍包含所有检测到的冲突端点，而不仅是首个冲突。
+- Hold proposal 的字段、`FinalAction` 和 `ResolutionReason` 文本保持不变。
+- Hold 集合扩张轮数、扩张条件和首个剩余冲突选择保持不变。
+- Safety Gate Hold 阈值仍使用当前连续计数加一后与 `Max(1, FinalSafetyGateMaxHoldSteps)` 比较。
+- `TryExecutionReplan(...)` 调用顺序、local/global 升级条件和执行期重规划计时范围未修改。
+- safety-gate replan 后的 proposal 同步和最终冲突复检仍由 Actor 控制。
+- 9 条 `[FinalSafetyGate]` 日志模板及其触发顺序保持不变。
+- Final Safety Gate 失败停止、Summary 生成、状态提交、随机延迟和 JSON 指标定义未修改。
+
+## 2026-07-15 Final Safety Gate 第二阶段编排抽取
+
+### 背景
+
+第一阶段已经将冲突检查、Hold 集合扩张和全局升级判断移入 `FExecutionFinalSafetyGatePolicy`，但 `APathPlanningDemoActor::AdvanceExecutionOneStep()` 仍直接编排 safety-gate local/global replan、失败升级、proposal 同步和重规划后复检。该控制流不需要直接依赖 UE 生命周期，可以通过同步回调与 Actor 适配层连接。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionFinalSafetyGateCoordinator.h`
+- `Source/UTM/Private/Execution/ExecutionFinalSafetyGateCoordinator.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Coordinator 当前职责
+
+`FExecutionFinalSafetyGateCoordinator::Run(...)` 现在负责：
+
+- 调用 `FExecutionFinalSafetyGatePolicy::EvaluateAndApplyHold(...)`。
+- 按原顺序发出初始冲突、Hold 扩张、Hold 阈值和安全 Hold 事件。
+- 根据 Execution replan mode 选择 configured local/global replan。
+- local safety-gate replan 失败后发出升级事件并调用 global replan。
+- replan disabled 时保留安全 Hold，不调用重规划。
+- 重规划成功后调用 Actor 提供的 proposal 同步回调。
+- 复用 Policy 对同步后的全部 proposals 执行最终冲突复检。
+- 返回 Safety Gate 新增的 requested/successful Mission ID、重规划成功状态和停止决定。
+
+### Actor 适配层继续负责
+
+- 通过 `RunReplan` 回调调用原有 `TryExecutionReplan(...)`。
+- 通过 `ApplyReplanResult` 回调读取 `ExecutionStates`，按原规则同步 safety-gate replanned proposals。
+- 通过 `OnEvent` 回调输出原有 9 条 `[FinalSafetyGate]` 日志。
+- 将 Coordinator 返回的 Mission ID 合并到当前执行步的 requested/successful 集合。
+- 根据 `bStopExecution` 停止执行并生成 Summary。
+
+### 保守性说明
+
+- 本轮只移动 Final Safety Gate 编排，普通 alignment/conflict execution replan 流程未移动。
+- Actor 的 `TryExecutionReplan(...)` 实现、调用参数和内部计时未修改。
+- configured global、configured local、local 失败升级 global 和 disabled 分支顺序保持不变。
+- 强制 global replan 失败后的停止条件保持不变。
+- 非强制 local/global replan 都失败时继续提交安全 Hold 的规则保持不变。
+- safety-gate replan 成功后的 proposal 字段、路径下标和 `ResolutionReason` 保持不变。
+- 最终冲突复检仍发生在 proposal 同步之后，并检查全部 Mission proposals。
+- 日志仍由 Actor 输出，9 条日志模板、级别和触发顺序保持不变。
+- Summary、状态提交、随机延迟、replan timing 和 JSON 指标定义未修改。
