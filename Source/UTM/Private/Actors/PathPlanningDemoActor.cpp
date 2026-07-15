@@ -13,6 +13,7 @@
 #include "Execution/ExecutionConflictResolutionPolicy.h"
 #include "Execution/ExecutionReplanAttemptRunner.h"
 #include "Execution/ExecutionReplanCoordinator.h"
+#include "Execution/ExecutionStateTransition.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
@@ -331,6 +332,51 @@ namespace
         default:
             return EExperimentMetadataReplanMode::Disabled;
         }
+    }
+
+    FExecutionStateTransitionState CaptureExecutionStateTransitionState(
+        const FExecutionAgentState& State)
+    {
+        FExecutionStateTransitionState TransitionState;
+        TransitionState.ExecutedPlanIndex = State.ExecutedPlanIndex;
+        TransitionState.TotalDelaySteps = State.TotalDelaySteps;
+        TransitionState.bFinished = State.bFinished;
+        TransitionState.AlignmentCorrectionCount = State.AlignmentCorrectionCount;
+        TransitionState.AlignmentHoldCount = State.AlignmentHoldCount;
+        TransitionState.AlignmentConflictHoldCount = State.AlignmentConflictHoldCount;
+        TransitionState.AlignmentSnapCount = State.AlignmentSnapCount;
+        TransitionState.AlignmentReplanRequestCount = State.AlignmentReplanRequestCount;
+        TransitionState.AlignmentSuccessfulReplanCount = State.AlignmentSuccessfulReplanCount;
+        TransitionState.MaxAlignmentSpatialError = State.MaxAlignmentSpatialError;
+        TransitionState.MaxAlignmentTemporalError = State.MaxAlignmentTemporalError;
+        TransitionState.bAlignmentLost = State.bAlignmentLost;
+        TransitionState.ConsecutiveConflictHoldCount = State.ConsecutiveConflictHoldCount;
+        TransitionState.ConsecutiveSafetyGateHoldCount = State.ConsecutiveSafetyGateHoldCount;
+        return TransitionState;
+    }
+
+    void CommitExecutionStateTransition(
+        FExecutionAgentState& State,
+        const FExecutionStepProposal& Proposal,
+        const FExecutionStateTransitionResult& Result)
+    {
+        State.ExecutedPlanIndex = Result.NextState.ExecutedPlanIndex;
+        State.TotalDelaySteps = Result.NextState.TotalDelaySteps;
+        State.bFinished = Result.NextState.bFinished;
+        State.AlignmentCorrectionCount = Result.NextState.AlignmentCorrectionCount;
+        State.AlignmentHoldCount = Result.NextState.AlignmentHoldCount;
+        State.AlignmentConflictHoldCount = Result.NextState.AlignmentConflictHoldCount;
+        State.AlignmentSnapCount = Result.NextState.AlignmentSnapCount;
+        State.AlignmentReplanRequestCount = Result.NextState.AlignmentReplanRequestCount;
+        State.AlignmentSuccessfulReplanCount = Result.NextState.AlignmentSuccessfulReplanCount;
+        State.MaxAlignmentSpatialError = Result.NextState.MaxAlignmentSpatialError;
+        State.MaxAlignmentTemporalError = Result.NextState.MaxAlignmentTemporalError;
+        State.bAlignmentLost = Result.NextState.bAlignmentLost;
+        State.ConsecutiveConflictHoldCount = Result.NextState.ConsecutiveConflictHoldCount;
+        State.ConsecutiveSafetyGateHoldCount = Result.NextState.ConsecutiveSafetyGateHoldCount;
+        State.DisplayToCell = Result.CommittedCell;
+        State.LastAlignmentAction = FExecutionAlignmentPolicy::LexToString(Proposal.FinalAction);
+        State.ActualCells.Add(Result.CommittedCell);
     }
 }
 
@@ -1756,89 +1802,31 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             SuccessfulReplanMissionIds.Contains(MissionId);
         const bool bReplannedForState = SuccessfulReplanMissionIds.Contains(MissionId);
 
-        State->ExecutedPlanIndex = FMath::Clamp(
-            Proposal->ProposedPlanIndex,
-            0,
-            State->PlannedCells.Num() - 1);
-        State->DisplayToCell = Proposal->ProposedCell;
-        State->LastAlignmentAction = FExecutionAlignmentPolicy::LexToString(Proposal->FinalAction);
-        State->MaxAlignmentSpatialError = FMath::Max(
-            State->MaxAlignmentSpatialError,
-            Proposal->AlignmentDecision.SpatialErrorCells);
-        State->MaxAlignmentTemporalError = FMath::Max(
-            State->MaxAlignmentTemporalError,
-            FMath::Abs(Proposal->AlignmentDecision.TemporalErrorSteps));
+        FExecutionStateTransitionInput TransitionInput;
+        TransitionInput.CurrentState = CaptureExecutionStateTransitionState(*State);
+        TransitionInput.PlannedCellCount = State->PlannedCells.Num();
+        TransitionInput.FinalPlannedCell = State->PlannedCells.Last();
+        TransitionInput.bReplanRequestedForState = bReplanRequestedForState;
+        TransitionInput.bOriginallyRequestedForReplan = RequestedReplanMissionIds.Contains(MissionId);
+        TransitionInput.bReplannedForState = bReplannedForState;
+        TransitionInput.bReplanSucceeded = bReplanSucceeded;
 
-        if (Proposal->FinalAction == EExecutionPolicyAction::SnapToPlanIndex)
-        {
-            State->AlignmentSnapCount++;
-        }
-        else if (Proposal->FinalAction == EExecutionPolicyAction::RecoverTowardPlan)
-        {
-            State->AlignmentCorrectionCount++;
-        }
-        else if (Proposal->FinalAction == EExecutionPolicyAction::HoldForAlignment ||
-            Proposal->FinalAction == EExecutionPolicyAction::HoldForPredictedConflict ||
-            Proposal->FinalAction == EExecutionPolicyAction::HoldForSafetyGate ||
-            Proposal->FinalAction == EExecutionPolicyAction::HoldForReplan)
-        {
-            State->AlignmentHoldCount++;
-        }
+        const FExecutionStateTransitionResult TransitionResult =
+            FExecutionStateTransition::Compute(TransitionInput, *Proposal);
+        CommitExecutionStateTransition(*State, *Proposal, TransitionResult);
 
-        if (Proposal->bHeldForPredictedConflict)
+        if (Proposal->bDelayRequested && bLogExecutionDelay)
         {
-            State->AlignmentConflictHoldCount++;
-            State->ConsecutiveConflictHoldCount++;
-        }
-        else if (Proposal->FinalAction != EExecutionPolicyAction::HoldForReplan)
-        {
-            State->ConsecutiveConflictHoldCount = 0;
-        }
-
-        if (Proposal->FinalAction == EExecutionPolicyAction::HoldForSafetyGate)
-        {
-            State->ConsecutiveSafetyGateHoldCount++;
-        }
-        else if (Proposal->FinalAction != EExecutionPolicyAction::HoldForReplan)
-        {
-            State->ConsecutiveSafetyGateHoldCount = 0;
-        }
-
-        if (bReplanRequestedForState)
-        {
-            State->AlignmentReplanRequestCount++;
-        }
-
-        if (bReplannedForState)
-        {
-            State->AlignmentSuccessfulReplanCount++;
-            State->bAlignmentLost = false;
-            State->ConsecutiveConflictHoldCount = 0;
-            State->ConsecutiveSafetyGateHoldCount = 0;
-        }
-        else if ((Proposal->bRequiresReplan || Proposal->bInitialAlignmentInvalid || RequestedReplanMissionIds.Contains(MissionId)) &&
-            !bReplanSucceeded)
-        {
-            State->bAlignmentLost = true;
-        }
-
-        if (Proposal->bDelayRequested)
-        {
-            State->TotalDelaySteps++;
-
-            if (bLogExecutionDelay)
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[ExecutionDelay] t=%d Mission=%d stay at Cell=(%d,%d,%d)"),
-                    CurrentExecutionTimeStep,
-                    State->MissionId,
-                    Proposal->ObservedCell.X,
-                    Proposal->ObservedCell.Y,
-                    Proposal->ObservedCell.Z
-                );
-            }
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[ExecutionDelay] t=%d Mission=%d stay at Cell=(%d,%d,%d)"),
+                CurrentExecutionTimeStep,
+                State->MissionId,
+                Proposal->ObservedCell.X,
+                Proposal->ObservedCell.Y,
+                Proposal->ObservedCell.Z
+            );
         }
 
         if (bLogAlignmentEvents && Proposal->FinalAction != EExecutionPolicyAction::FollowPlan)
@@ -1865,11 +1853,6 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                 bReplanRequestedForState ? TEXT("true") : TEXT("false"),
                 *Proposal->ResolutionReason);
         }
-
-        State->ActualCells.Add(Proposal->ProposedCell);
-        State->bFinished =
-            (State->ExecutedPlanIndex >= State->PlannedCells.Num() - 1) &&
-            (Proposal->ProposedCell == State->PlannedCells.Last());
 
         if (!State->bFinished)
         {

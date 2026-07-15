@@ -1179,3 +1179,56 @@ Actor 继续通过回调负责：
 - conflict hold 阈值仍使用 `State.ConsecutiveConflictHoldCount + 1` 判断。
 - `ResolutionReason` 文本和三种 `[AlignmentConflictPrediction]` 日志模板保持不变。
 - 没有修改随机延迟、Alignment Policy、Execution Replan Coordinator 或 Final Safety Gate。
+
+## 2026-07-15 Execution State Transition 抽取
+
+### 背景
+
+`APathPlanningDemoActor::AdvanceExecutionOneStep()` 在 Alignment、冲突仲裁、执行期重规划和 Final Safety Gate 得到最终 proposal 后，仍直接维护路径进度、完成状态、连续 Hold 计数、Alignment 状态和各类执行统计。这些确定性的状态转移规则属于执行模块，不需要依赖 UE 场景对象。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionStateTransitionTypes.h`
+- `Source/UTM/Public/Execution/ExecutionStateTransition.h`
+- `Source/UTM/Private/Execution/ExecutionStateTransition.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 当前职责划分
+
+`FExecutionStateTransition::Compute(...)` 现在负责：
+
+- 将 proposal 的目标路径下标限制在当前路径有效范围内。
+- 根据最终执行动作更新 Snap、Correction 和 Hold 统计。
+- 更新 conflict hold 与 safety-gate hold 的连续计数。
+- 更新重规划请求次数、成功次数和 Alignment Lost 状态。
+- 更新延迟总步数以及最大空间、时间对齐误差。
+- 根据最终路径下标和提交位置判断任务是否完成。
+- 返回提交位置和新的轻量执行状态，不直接访问 `FExecutionAgentState`。
+
+Actor 中的适配层现在负责：
+
+- 从 `FExecutionAgentState` 捕获纯状态转移输入。
+- 将 `FExecutionStateTransitionResult` 提交回 UE 反射状态。
+- 追加 `ActualCells`，更新 `DisplayToCell` 和动作文本。
+- 继续输出原有 Delay 与 Alignment 日志。
+- 继续执行冲突统计、执行结束判断、Summary 生成和可视化更新。
+
+### 模块边界
+
+- State Transition 模块不依赖 `APathPlanningDemoActor`、`ADroneActor`、`UWorld`、`DrawDebug` 或 `UPROPERTY`。
+- `FExecutionAgentState` 继续保留在 Actor 层，因为它包含 `TObjectPtr<ADroneActor>` 和供 Details/Blueprint 读取的反射字段。
+- 算法模块通过统一的 `FExecutionStepProposal` 表达本时间步决定，平台通过统一 State Transition 规则提交该决定。
+- 本模块是执行平台的统一状态语义，不作为任意修改统计口径的算法扩展点。
+
+### 保守性说明
+
+- 随机延迟生成位置、调用次数和顺序未修改。
+- `FExecutionStepProposal` 的生成、冲突仲裁和重规划后修正未修改。
+- Final Safety Gate 的 Hold 集合扩张、local/global replan 和失败停止逻辑未修改，仍完整保留在 Actor。
+- `HoldForReplan` 期间不清零连续 conflict/safety-gate hold 的规则保持不变。
+- 成功重规划后清零连续 Hold、恢复 Alignment 状态的规则保持不变。
+- 原有 Delay 和 Alignment 日志模板及触发条件保持不变。
+- `ActualCells`、完成判定、`bAnyActive` 和执行 Summary 的统计口径保持不变。
