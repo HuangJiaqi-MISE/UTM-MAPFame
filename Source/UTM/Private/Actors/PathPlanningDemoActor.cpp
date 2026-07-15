@@ -10,13 +10,13 @@
 
 #include "Execution/ExecutionAlignmentPolicy.h"
 #include "Execution/ExecutionConflictResolutionPolicy.h"
+#include "Execution/ExecutionControllerRegistry.h"
 #include "Execution/ExecutionFinalSafetyGateCoordinator.h"
 #include "Execution/ExecutionReplanAttemptRunner.h"
 #include "Execution/ExecutionReplanCoordinator.h"
 #include "Execution/ExecutionReplanPathIntegrator.h"
 #include "Execution/ExecutionReplanProposalSynchronizer.h"
 #include "Execution/ExecutionStateTransition.h"
-#include "Execution/ExecutionStepPipeline.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
@@ -1447,6 +1447,27 @@ FDiscreteAlignmentSettings APathPlanningDemoActor::BuildDiscreteAlignmentSetting
     return Settings;
 }
 
+FExecutionRuntimeConfig APathPlanningDemoActor::BuildExecutionRuntimeConfig() const
+{
+    FExecutionRuntimeConfig Config;
+    Config.Alignment = BuildDiscreteAlignmentSettings();
+    Config.ConflictResolution.bEnabled = bEnableConflictAwareAlignment;
+    Config.ConflictResolution.MaxResolutionPasses =
+        AlignmentConflictResolutionPasses;
+    Config.ConflictResolution.ConflictHoldThresholdForReplan =
+        AlignmentConflictHoldThresholdForReplan;
+    Config.FinalSafetyGate.bEnabled = bEnableFinalSafetyGate;
+    Config.FinalSafetyGate.MaxHoldSteps = FinalSafetyGateMaxHoldSteps;
+    Config.ReplanMode = ToExecutionPolicyReplanMode(ExecutionReplanMode);
+    Config.ReplanService.MaxReplanCount = MaxExecutionReplanCount;
+    Config.ReplanService.LocalSpatialExpansionRadiusCells =
+        LocalReplanSpatialExpansionRadiusCells;
+    Config.ReplanService.LocalLookaheadSteps = LocalReplanLookaheadSteps;
+    Config.ReplanService.LocalMaxExpansionRounds = LocalReplanMaxExpansionRounds;
+    Config.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
+    return Config;
+}
+
 bool APathPlanningDemoActor::ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep)
 {
     if (State.bFinished)
@@ -1523,13 +1544,10 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         OrderedAgentSnapshots.Add(MoveTemp(AgentSnapshot));
     }
 
+    const FExecutionRuntimeConfig RuntimeConfig = BuildExecutionRuntimeConfig();
+
     FExecutionConflictResolutionInput ConflictResolutionInput;
     ConflictResolutionInput.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
-    ConflictResolutionInput.Settings.bEnabled = bEnableConflictAwareAlignment;
-    ConflictResolutionInput.Settings.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
-    ConflictResolutionInput.Settings.MaxResolutionPasses = AlignmentConflictResolutionPasses;
-    ConflictResolutionInput.Settings.ConflictHoldThresholdForReplan =
-        AlignmentConflictHoldThresholdForReplan;
 
     for (const int32 MissionId : MissionIds)
     {
@@ -1545,16 +1563,15 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         ConflictResolutionInput.AgentStatesByMissionId.Add(MissionId, AgentState);
     }
 
-    FExecutionStepPipelineRequest PipelineRequest;
-    PipelineRequest.OrderedMissionIds = MissionIds;
-    PipelineRequest.OrderedAgentSnapshots = MoveTemp(OrderedAgentSnapshots);
-    PipelineRequest.GridMap = &GridMap;
-    PipelineRequest.AlignmentSettings = BuildDiscreteAlignmentSettings();
-    PipelineRequest.ConflictResolutionInput = &ConflictResolutionInput;
-    PipelineRequest.ReplanMode = ToExecutionPolicyReplanMode(ExecutionReplanMode);
+    FExecutionControllerStepRequest ControllerRequest;
+    ControllerRequest.OrderedMissionIds = MissionIds;
+    ControllerRequest.OrderedAgentSnapshots = MoveTemp(OrderedAgentSnapshots);
+    ControllerRequest.GridMap = &GridMap;
+    ControllerRequest.RuntimeConfig = RuntimeConfig;
+    ControllerRequest.ConflictResolutionInput = &ConflictResolutionInput;
 
-    FExecutionStepPipelineCallbacks PipelineCallbacks;
-    PipelineCallbacks.RunReplan =
+    FExecutionControllerStepCallbacks ControllerCallbacks;
+    ControllerCallbacks.RunReplan =
         [this](
             const TSet<int32>& RequestedMissionIds,
             bool bGlobalReplan,
@@ -1565,21 +1582,17 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                 bGlobalReplan,
                 ReplannedMissionIds);
         };
-    PipelineCallbacks.CaptureReplanProposalAgentStates =
+    ControllerCallbacks.CaptureReplanProposalAgentStates =
         [this, &MissionIds]()
         {
             return CaptureReplanProposalAgentStates(MissionIds, ExecutionStates);
         };
-    PipelineCallbacks.BuildFinalSafetyGateInput =
+    ControllerCallbacks.BuildFinalSafetyGateInput =
         [this, &MissionIds]()
         {
             FExecutionFinalSafetyGateInput SafetyGateInput;
             SafetyGateInput.OrderedMissionIds = MissionIds;
             SafetyGateInput.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
-            SafetyGateInput.Settings.bEnabled = bEnableFinalSafetyGate;
-            SafetyGateInput.Settings.bCheckStaticUTMSafety =
-                (PlannerType == EPlannerType::LaCAMUTM);
-            SafetyGateInput.Settings.MaxHoldSteps = FinalSafetyGateMaxHoldSteps;
 
             for (const int32 MissionId : MissionIds)
             {
@@ -1599,31 +1612,32 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         };
     if (bLogConflictPredictionEvents)
     {
-        PipelineCallbacks.OnConflictResolutionEvent =
+        ControllerCallbacks.OnConflictResolutionEvent =
             [this](const FExecutionConflictResolutionEvent& Event)
             {
                 LogExecutionConflictResolutionEvent(Event, CurrentExecutionTimeStep);
             };
     }
-    PipelineCallbacks.OnFinalSafetyGateEvent =
+    ControllerCallbacks.OnFinalSafetyGateEvent =
         [this](const FExecutionFinalSafetyGateEvent& Event)
         {
             LogExecutionFinalSafetyGateEvent(Event, CurrentExecutionTimeStep);
         };
 
-    FExecutionStepPipelineResult PipelineResult =
-        FExecutionStepPipeline::Run(
-            PipelineRequest,
-            PipelineCallbacks);
+    FExecutionControllerStepResult ControllerResult =
+        FExecutionControllerRegistry::RunStep(
+            ExecutionControllerType,
+            ControllerRequest,
+            ControllerCallbacks);
 
     TMap<int32, FExecutionStepProposal>& StepProposals =
-        PipelineResult.StepProposals;
+        ControllerResult.StepProposals;
     const TSet<int32>& RequestedReplanMissionIds =
-        PipelineResult.RequestedReplanMissionIds;
+        ControllerResult.RequestedReplanMissionIds;
     const TSet<int32>& SuccessfulReplanMissionIds =
-        PipelineResult.SuccessfulReplanMissionIds;
-    const bool bReplanSucceeded = PipelineResult.bReplanSucceeded;
-    const bool bStopExecutionForSafetyGate = PipelineResult.bStopExecution;
+        ControllerResult.SuccessfulReplanMissionIds;
+    const bool bReplanSucceeded = ControllerResult.bReplanSucceeded;
+    const bool bStopExecutionForSafetyGate = ControllerResult.bStopExecution;
 
     if (bStopExecutionForSafetyGate)
     {
@@ -2793,19 +2807,21 @@ bool APathPlanningDemoActor::TryExecutionReplan(
         return false;
     }
 
-    if (ExecutionReplanMode == EExecutionReplanMode::Disabled)
+    const FExecutionRuntimeConfig RuntimeConfig = BuildExecutionRuntimeConfig();
+    if (RuntimeConfig.ReplanMode == EExecutionPolicyReplanMode::Disabled)
     {
         return false;
     }
 
-    if (MaxExecutionReplanCount >= 0 && TotalExecutionReplanCount >= MaxExecutionReplanCount)
+    const int32 MaxReplanCount = RuntimeConfig.ReplanService.MaxReplanCount;
+    if (MaxReplanCount >= 0 && TotalExecutionReplanCount >= MaxReplanCount)
     {
         UE_LOG(
             LogTemp,
             Warning,
             TEXT("[AlignmentReplan] skipped because total replan count %d reached limit %d"),
             TotalExecutionReplanCount,
-            MaxExecutionReplanCount);
+            MaxReplanCount);
         return false;
     }
 
@@ -2824,10 +2840,14 @@ bool APathPlanningDemoActor::TryExecutionReplan(
     CoordinatorRequest.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
     CoordinatorRequest.RequestedMissionIds = RequestedMissionIds;
     CoordinatorRequest.bGlobalReplan = bGlobalReplan;
-    CoordinatorRequest.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
-    CoordinatorRequest.MaxExpansionRounds = LocalReplanMaxExpansionRounds;
-    CoordinatorRequest.BaseSpatialRadiusCells = LocalReplanSpatialExpansionRadiusCells;
-    CoordinatorRequest.BaseLookaheadSteps = LocalReplanLookaheadSteps;
+    CoordinatorRequest.bCheckStaticUTMSafety =
+        RuntimeConfig.bCheckStaticUTMSafety;
+    CoordinatorRequest.MaxExpansionRounds =
+        RuntimeConfig.ReplanService.LocalMaxExpansionRounds;
+    CoordinatorRequest.BaseSpatialRadiusCells =
+        RuntimeConfig.ReplanService.LocalSpatialExpansionRadiusCells;
+    CoordinatorRequest.BaseLookaheadSteps =
+        RuntimeConfig.ReplanService.LocalLookaheadSteps;
     CoordinatorRequest.ExecutionTimeStep = CurrentExecutionTimeStep;
     CoordinatorRequest.CurrentTotalReplanCount = TotalExecutionReplanCount;
 

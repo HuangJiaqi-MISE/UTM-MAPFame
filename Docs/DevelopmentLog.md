@@ -1625,3 +1625,69 @@ Actor 已不再直接调用 `FExecutionAlignmentPolicy::Decide(...)` 或 `FExecu
 - Conflict Resolution、普通 Step Replan、Proposal Synchronizer 和 Final Safety Gate 的调用顺序与实现未修改。
 - Final Safety Gate 输入仍在普通重规划及路径写回完成后通过回调重新捕获。
 - State Transition、UE 状态写回、日志、Summary、replan timing 和 StructuredExperimentJSON 指标定义未修改。
+
+## 2026-07-15 Execution Runtime Config 与 Controller Registry
+
+### 背景
+
+`FExecutionStepPipeline` 已经统一编排 Alignment、Conflict Resolution、普通 Step Replan 和 Final Safety Gate，但运行参数仍由 `APathPlanningDemoActor` 分散组装，Actor 也直接依赖具体 Pipeline 类型。其他研究者若要替换整个执行控制算法，需要修改 Actor 主流程，扩展边界仍不够清晰。
+
+本轮引入统一运行配置和 Controller Registry：Actor 负责把 Details 参数转换成轻量配置并捕获 UE 运行状态，Controller 负责执行一次完整的执行期决策。默认 Controller 继续委托现有 Pipeline，不改变算法行为。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeConfig.h`
+- `Source/UTM/Public/Execution/ExecutionControllerTypes.h`
+- `Source/UTM/Public/Execution/ExecutionControllerRegistry.h`
+- `Source/UTM/Private/Execution/ExecutionControllerRegistry.cpp`
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionStepPipeline.h`
+- `Source/UTM/Private/Execution/ExecutionStepPipeline.cpp`
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Execution Runtime Config
+
+新增 `FExecutionRuntimeConfig`，集中保存一次执行控制所需的算法配置：
+
+- `Alignment`：离散对齐参数。
+- `ConflictResolution`：冲突仲裁开关、处理轮数和触发重规划的 Hold 阈值。
+- `FinalSafetyGate`：最终安全检查开关和最大 Hold 扩张轮数。
+- `ReplanService`：最大重规划次数、局部空间扩张半径、局部前瞻步数和最大扩张轮数。
+- `ReplanMode`：Disabled、LocalConflictSet 或 GlobalUnfinished。
+- `bCheckStaticUTMSafety`：是否启用 LaCAM-UTM 静态安全检查。
+
+Actor 新增 `BuildExecutionRuntimeConfig()`，只在 UE 配置边界读取 Details 属性。`AdvanceExecutionOneStep()` 和 `TryExecutionReplan()` 现在使用同一份配置语义，避免不同阶段重复拼装参数。Delay 随机流、日志开关和可视化参数没有放入 Runtime Config，因为它们仍属于 UE 运行适配层，不是可替换执行算法的输入。
+
+### Controller 扩展契约
+
+新增以下轻量类型：
+
+- `FExecutionControllerStepRequest`：有序 Mission、Agent Snapshot、GridMap、Runtime Config 和动态冲突输入。
+- `FExecutionControllerStepCallbacks`：重规划服务、重规划后状态捕获、Final Safety 输入捕获和事件回调。
+- `FExecutionControllerStepResult`：最终 Proposal、重规划请求/成功集合、重规划结果和停止执行决定。
+- `IExecutionController`：所有执行 Controller 的统一 `RunStep(...)` 接口。
+
+`FExecutionControllerRegistry` 根据 `EExecutionControllerType` 创建并调用 Controller。Details 面板新增 `Execution Controller` 选择项，当前只有 `Default Execution Pipeline`，未暴露给 Blueprint。
+
+默认 `FDefaultExecutionController` 的调用链为：
+
+`APathPlanningDemoActor -> FExecutionControllerRegistry -> FDefaultExecutionController -> FExecutionStepPipeline`
+
+以后新增执行算法时，可以增加枚举值、实现 `IExecutionController` 并在 Registry 注册，不需要改写 Actor 的执行控制主流程。
+
+### Pipeline 配置边界
+
+原 Pipeline 专用 Request、Callbacks 和 Result 已替换为 Controller 公共契约。Pipeline 从 `RuntimeConfig` 读取 Alignment、Conflict Resolution、Replan 和 Final Safety 参数；Actor 回调只提供当前时间步的动态状态。Final Safety Gate 输入仍在普通重规划完成后重新捕获，避免读取重规划前的旧路径和索引。
+
+### 保守性说明
+
+- 默认 Controller 只委托现有 Pipeline，执行阶段顺序未修改。
+- Mission 排序、Snapshot 捕获、Delay 判断及随机数消费顺序未修改。
+- Alignment、Conflict Resolution、普通 Replan 和 Final Safety Gate 的参数值保持原定义。
+- `TryExecutionReplan()` 的 local/global 尝试、扩张、targeted retry、计时和日志语义未修改。
+- State Transition、UE 对象写回、停止执行、Summary、冲突统计和可视化流程未修改。
+- 本轮没有新增或修改 StructuredExperimentJSON 字段。
+- UTMEditor Win64 Development 编译通过，后续使用原有 N200 参数实验进行行为回归。

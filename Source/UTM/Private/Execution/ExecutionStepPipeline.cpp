@@ -1,5 +1,9 @@
 #include "Execution/ExecutionStepPipeline.h"
 
+#include "Execution/ExecutionAlignmentPolicy.h"
+#include "Execution/ExecutionStepProposalBuilder.h"
+#include "Execution/ExecutionStepReplanCoordinator.h"
+
 namespace
 {
     void AddMissionIds(
@@ -13,8 +17,8 @@ namespace
     }
 
     void ApplyReplanProposalSync(
-        const FExecutionStepPipelineRequest& Request,
-        const FExecutionStepPipelineCallbacks& Callbacks,
+        const FExecutionControllerStepRequest& Request,
+        const FExecutionControllerStepCallbacks& Callbacks,
         const TSet<int32>& TargetMissionIds,
         const TSet<int32>& ReplannedMissionIds,
         const TCHAR* ReplannedReason,
@@ -40,15 +44,16 @@ namespace
     }
 
     void BuildInitialStepProposals(
-        const FExecutionStepPipelineRequest& Request,
-        FExecutionStepPipelineResult& InOutResult)
+        const FExecutionControllerStepRequest& Request,
+        FExecutionControllerStepResult& InOutResult)
     {
         if (!Request.GridMap)
         {
             return;
         }
 
-        const FExecutionAlignmentPolicy AlignmentPolicy(Request.AlignmentSettings);
+        const FExecutionAlignmentPolicy AlignmentPolicy(
+            Request.RuntimeConfig.Alignment);
         for (const FExecutionAgentSnapshot& AgentSnapshot : Request.OrderedAgentSnapshots)
         {
             if (AgentSnapshot.PlannedCells.Num() <= 0)
@@ -87,18 +92,25 @@ namespace
     }
 }
 
-FExecutionStepPipelineResult FExecutionStepPipeline::Run(
-    const FExecutionStepPipelineRequest& Request,
-    const FExecutionStepPipelineCallbacks& Callbacks)
+FExecutionControllerStepResult FExecutionStepPipeline::Run(
+    const FExecutionControllerStepRequest& Request,
+    const FExecutionControllerStepCallbacks& Callbacks)
 {
-    FExecutionStepPipelineResult Result;
+    FExecutionControllerStepResult Result;
     BuildInitialStepProposals(Request, Result);
 
     if (Request.ConflictResolutionInput)
     {
+        FExecutionConflictResolutionInput ConflictResolutionInput =
+            *Request.ConflictResolutionInput;
+        ConflictResolutionInput.Settings =
+            Request.RuntimeConfig.ConflictResolution;
+        ConflictResolutionInput.Settings.bCheckStaticUTMSafety =
+            Request.RuntimeConfig.bCheckStaticUTMSafety;
+
         const FExecutionConflictResolutionResult ConflictResolutionResult =
             FExecutionConflictResolutionPolicy::Resolve(
-                *Request.ConflictResolutionInput,
+                ConflictResolutionInput,
                 Result.StepProposals);
         AddMissionIds(
             ConflictResolutionResult.ReplanMissionIds,
@@ -116,7 +128,7 @@ FExecutionStepPipelineResult FExecutionStepPipeline::Run(
 
     FExecutionStepReplanCoordinatorRequest StepReplanRequest;
     StepReplanRequest.RequestedMissionIds = Result.RequestedReplanMissionIds;
-    StepReplanRequest.ReplanMode = Request.ReplanMode;
+    StepReplanRequest.ReplanMode = Request.RuntimeConfig.ReplanMode;
 
     FExecutionStepReplanCoordinatorCallbacks StepReplanCallbacks;
     StepReplanCallbacks.RunReplan = Callbacks.RunReplan;
@@ -156,9 +168,12 @@ FExecutionStepPipelineResult FExecutionStepPipeline::Run(
 
     FExecutionFinalSafetyGateInput SafetyGateInput =
         Callbacks.BuildFinalSafetyGateInput();
+    SafetyGateInput.Settings = Request.RuntimeConfig.FinalSafetyGate;
+    SafetyGateInput.Settings.bCheckStaticUTMSafety =
+        Request.RuntimeConfig.bCheckStaticUTMSafety;
     FExecutionFinalSafetyGateCoordinatorRequest SafetyGateRequest;
     SafetyGateRequest.SafetyGateInput = &SafetyGateInput;
-    SafetyGateRequest.ReplanMode = Request.ReplanMode;
+    SafetyGateRequest.ReplanMode = Request.RuntimeConfig.ReplanMode;
 
     FExecutionFinalSafetyGateCoordinatorCallbacks SafetyGateCallbacks;
     SafetyGateCallbacks.RunReplan = Callbacks.RunReplan;

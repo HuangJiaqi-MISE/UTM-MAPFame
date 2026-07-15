@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Execution/DiscreteAlignmentManager.h"
+#include "Execution/ExecutionControllerTypes.h"
 #include "Execution/ExecutionReplanAttemptTypes.h"
 #include "Execution/ExecutionTypes.h"
 #include "GameFramework/Actor.h"
@@ -403,6 +404,7 @@ private:
     bool IsForcedDelayStep(const FExecutionAgentState& State, int32 TimeStep) const;
     FIntVector GetObservedExecutionCell(const FExecutionAgentState& State) const;
     FDiscreteAlignmentSettings BuildDiscreteAlignmentSettings() const;
+    FExecutionRuntimeConfig BuildExecutionRuntimeConfig() const;
     int32 ComputeFirstMismatchTime(const FExecutionAgentState& State) const;
     void BuildExecutionSummary();
     void LogExecutionSummary() const;
@@ -519,6 +521,10 @@ public:
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
     bool bUseCentralizedExecution = true;
+
+    UPROPERTY(EditAnywhere, Category = "Execution", meta = (DisplayName = "Execution Controller"))
+    EExecutionControllerType ExecutionControllerType =
+        EExecutionControllerType::DefaultPipeline;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Execution")
     EExecutionDelayMode DelayMode = EExecutionDelayMode::RandomGlobal;
