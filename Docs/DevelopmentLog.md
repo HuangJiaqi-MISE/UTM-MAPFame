@@ -1816,3 +1816,84 @@ Actor 新增本地适配函数，在执行结束时将 `FExecutionAgentState`、
 - Summary 字段、日志模板、StructuredExperimentJSON 字段和 Reporter 映射未修改。
 - 所有 Mission/No-Fly Zone/City EUW `UFUNCTION` 名称、签名、Category 和 Actor 所有权未修改。
 - UTMEditor Win64 Development 编译通过；UHT 成功生成外移 Summary 类型的反射代码，后续使用原有 N200 参数实验核对 JSON 结果。
+
+## 2026-07-15 Editor Grid Service 与 Mission Editor Service 拆分
+
+### 背景
+
+`APathPlanningDemoActor` 原本直接实现 Mission 编辑网格构建、随机任务生成、Marker 查找/生成/清理、任务校验和 Marker 回读。EUW 依赖 Actor 上的 6 个 `BlueprintCallable` 函数，因此不能通过删除、改名或改变签名的方式直接迁移接口。
+
+本轮采用稳定门面方式：EUW 继续调用原 Actor 函数，Actor 将 Details/World 状态组装为明确 Request，再委托 Editor Service 执行。
+
+### 新增文件
+
+- `Source/UTM/Public/EditorServices/EditorGridService.h`
+- `Source/UTM/Private/EditorServices/EditorGridService.cpp`
+- `Source/UTM/Public/EditorServices/MissionEditorService.h`
+- `Source/UTM/Private/EditorServices/MissionEditorService.cpp`
+
+### 修改文件
+
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Editor Grid Service
+
+`FEditorGridService::BuildGridForMissionEditing(...)` 现在负责：
+
+- 将 Grid Origin、Grid Dimension 和 Cell Size 写入目标 `FGridMap3D`。
+- 使用调用方提供的 World、Ignore Actor 集合和 Debug 参数构建 Occupancy Grid。
+- 保留原 `EditorBuildGridForMissionEditing done` 日志。
+
+Actor 继续负责把自身加入 Ignore Actor 集合；`FMissionEditorService::AppendMissionMarkerActors(...)` 将所有带 `MissionMarker` Tag 的 Marker 追加到该集合。因此网格构建仍忽略 Demo Actor 和已有 Mission Marker。
+
+### Mission Editor Service
+
+`FMissionEditorService` 现在负责：
+
+- 按原 Tag 规则查找 Mission Marker。
+- 使用原随机种子、Grid 范围和重复 Start/Goal 设置生成 Mission Config。
+- 使用 `FUTMSafetyModel` 检查新任务与已生成任务的 Start/Goal 静态安全冲突。
+- 清理已有 Mission Marker。
+- 按 MissionConfigs 生成 Start/Goal Marker，设置 Owner、Tag、Mission ID、Marker Type 和 Cell。
+- 使用原 `FPlanningInputValidator` 校验 Mission Config，并报告重复 ID/Start/Goal。
+- 将 Marker 世界坐标扣除显示偏移、对齐到 Grid，并回写按 Mission ID 排序的 MissionConfigs。
+
+服务使用按操作划分的 Request，只接收所需的 World、Grid、Validator、MarkerClass、MissionConfigs 和 Details 参数，不接收或包含 `APathPlanningDemoActor`。
+
+### EUW 稳定门面
+
+以下 6 个 Actor `UFUNCTION(BlueprintCallable, Category = "Mission Editor")` 名称、签名、Category 和所有权保持不变：
+
+- `EditorBuildGridForMissionEditing()`
+- `EditorGenerateRandomMissionConfigs()`
+- `EditorSpawnMissionMarkers()`
+- `EditorClearMissionMarkers()`
+- `EditorValidateMissionConfigs()`
+- `EditorReadMissionMarkersToConfigs()`
+
+EUW Blueprint 仍以原方式持有并调用 `APathPlanningDemoActor`。`MissionConfigs`、`MissionMarkerClass`、`MarkerZOffset`、随机种子及所有生成设置仍是 Actor 的原 `UPROPERTY`，无需修改 EUW 资源。
+
+### 保守性说明
+
+- `EditorGenerateRandomMissionConfigs()` 仍先构建 Grid，再清空并生成 MissionConfigs。
+- 每个 Mission 的 Start/Goal 仍分别最多尝试 500 次，Mission ID 仍从 1 开始。
+- `FRandomStream` 构造、RandRange 调用位置和失败后继续处理下一 Mission 的顺序未修改。
+- 静态 UTM Start/Goal 冲突检查仍按当前 MissionConfigs 顺序执行。
+- MarkerClass 为空时仍在清理旧 Marker 前返回。
+- Spawn 仍先清理旧 Marker，再检查 World，并为 Start 后 Goal 的顺序生成 Marker。
+- Marker Tag、Owner、位置偏移、Collision Handling 和 `UpdateVisual()` 调用未修改。
+- Marker 回读仍将非 Start 类型视为 Goal，仍跳过缺少 Goal 的 Mission，最终仍按 Mission ID 排序。
+- 原 Mission Editor 日志文本和输出时机保持不变。
+- No-Fly Zone 与 City EUW 接口尚未迁移；它们调用 `EditorBuildGridForMissionEditing()` 时会通过新的 Grid Service 使用相同参数。
+- UTMEditor Win64 Development 编译通过，UHT 报告 0 个反射代码改动。编译中的 `PBSPlanner.cpp` `RemoveAt` 弃用警告为既有问题，与本轮修改无关。
+
+### EUW 手动回归清单
+
+1. 在原 EUW 中执行 Build Grid，确认完成日志和占用网格显示正常。
+2. 使用固定 RandomSeed 生成随机 Mission，确认数量以及 Start/Goal 配置可重复。
+3. Spawn Mission Markers，确认每个 Mission 生成一对 Start/Goal Marker。
+4. 移动 Marker 后执行 Read Markers，确认 MissionConfigs 坐标对齐到 Grid 且按 Mission ID 排序。
+5. 执行 Validate Missions，确认合法任务、重复 ID/Start/Goal 日志正常。
+6. 执行 Clear Mission Markers，确认 Marker 全部删除且删除数量日志正确。
+7. 再运行一次原 N200 参数实验，确认 Editor Service 拆分没有影响运行期规划和执行流程。

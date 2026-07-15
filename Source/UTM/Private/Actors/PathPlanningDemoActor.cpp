@@ -18,13 +18,14 @@
 #include "Execution/ExecutionReplanProposalSynchronizer.h"
 #include "Execution/ExecutionStepResultApplier.h"
 #include "Execution/ExecutionStepTypes.h"
+#include "EditorServices/EditorGridService.h"
+#include "EditorServices/MissionEditorService.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
 #include "Planning/PlannerRegistry.h"
 #include "Planning/UTMSafetyModel.h"
 #include "Missions/MissionSourceBuilder.h"
 
-#include "Actors/MissionMarkerActor.h"
 #include "Engine/StaticMeshActor.h"
 #include "Kismet/GameplayStatics.h"
 #include "Reporting/ExperimentMetadataResolver.h"
@@ -2824,397 +2825,76 @@ FString APathPlanningDemoActor::GetPlannerTypeName() const
     return FPlannerRegistry::GetPlannerTypeName(PlannerType);
 }
 
-void APathPlanningDemoActor::GetMissionMarkerActors(TArray<AMissionMarkerActor*>& OutMarkers) const
-{
-    OutMarkers.Reset();
-
-    if (!GetWorld())
-    {
-        return;
-    }
-
-    for (TActorIterator<AMissionMarkerActor> It(GetWorld()); It; ++It)
-    {
-        AMissionMarkerActor* Marker = *It;
-        if (!Marker)
-        {
-            continue;
-        }
-
-        if (Marker->Tags.Contains(FName(TEXT("MissionMarker"))))
-        {
-            OutMarkers.Add(Marker);
-        }
-    }
-}
-
 void APathPlanningDemoActor::EditorBuildGridForMissionEditing()
 {
-    TArray<AActor*> IgnoreActors;
-    IgnoreActors.Add(this);
-
-    TArray<AMissionMarkerActor*> ExistingMarkers;
-    GetMissionMarkerActors(ExistingMarkers);
-
-    for (AMissionMarkerActor* Marker : ExistingMarkers)
-    {
-        if (Marker)
-        {
-            IgnoreActors.Add(Marker);
-        }
-    }
-
-    GridMap.GridOrigin = GridOrigin;
-    GridMap.GridDim = GridDim;
-    GridMap.CellSize = CellSize;
-
-    GridMap.BuildOccupancyGrid(
-        GetWorld(),
-        IgnoreActors,
-        bDrawOccupiedCells,
-        bDrawFreeCells,
-        DebugDrawTime
-    );
-
-    UE_LOG(LogTemp, Warning, TEXT("EditorBuildGridForMissionEditing done"));
-}
-
-bool APathPlanningDemoActor::TryGenerateSingleMission(
-    FRandomStream& RandomStream,
-    int32 MissionId,
-    TSet<FIntVector>& UsedStarts,
-    TSet<FIntVector>& UsedGoals,
-    FDroneMissionConfig& OutMission) const
-{
-    const int32 MaxTryCount = 500;
-
-    const auto HasConflictWithExistingStarts =
-        [this](const FIntVector& CandidateStartCell, const FDroneMissionConfig& CandidateMission)
-        {
-            for (const FDroneMissionConfig& ExistingMission : MissionConfigs)
-            {
-                const FIntVector ExistingStartCell = GridMap.WorldToCell(ExistingMission.StartWorld);
-                if (FUTMSafetyModel::HasStaticUTMConfigConflict(CandidateStartCell, CandidateMission, ExistingStartCell, ExistingMission))
-                {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-    const auto HasConflictWithExistingGoals =
-        [this](const FIntVector& CandidateGoalCell, const FDroneMissionConfig& CandidateMission)
-        {
-            for (const FDroneMissionConfig& ExistingMission : MissionConfigs)
-            {
-                const FIntVector ExistingGoalCell = GridMap.WorldToCell(ExistingMission.GoalWorld);
-                if (FUTMSafetyModel::HasStaticUTMConfigConflict(CandidateGoalCell, CandidateMission, ExistingGoalCell, ExistingMission))
-                {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-    for (int32 TryIndex = 0; TryIndex < MaxTryCount; ++TryIndex)
-    {
-        const FIntVector StartCell(
-            RandomStream.RandRange(0, GridDim.X - 1),
-            RandomStream.RandRange(0, GridDim.Y - 1),
-            RandomStream.RandRange(0, GridDim.Z - 1)
-        );
-
-        if (GridMap.IsBlocked(StartCell.X, StartCell.Y, StartCell.Z))
-        {
-            continue;
-        }
-
-        if (!bAllowDuplicateStartCells && UsedStarts.Contains(StartCell))
-        {
-            continue;
-        }
-
-        for (int32 GoalTry = 0; GoalTry < MaxTryCount; ++GoalTry)
-        {
-            const FIntVector GoalCell(
-                RandomStream.RandRange(0, GridDim.X - 1),
-                RandomStream.RandRange(0, GridDim.Y - 1),
-                RandomStream.RandRange(0, GridDim.Z - 1)
-            );
-
-            if (GridMap.IsBlocked(GoalCell.X, GoalCell.Y, GoalCell.Z))
-            {
-                continue;
-            }
-
-            if (!bAllowDuplicateGoalCells && UsedGoals.Contains(GoalCell))
-            {
-                continue;
-            }
-
-            const int32 ManhattanDist =
-                FMath::Abs(StartCell.X - GoalCell.X) +
-                FMath::Abs(StartCell.Y - GoalCell.Y) +
-                FMath::Abs(StartCell.Z - GoalCell.Z);
-
-            if (ManhattanDist < MinStartGoalCellDistance)
-            {
-                continue;
-            }
-
-            FDroneMissionConfig CandidateMission = OutMission;
-            CandidateMission.MissionId = MissionId;
-            CandidateMission.StartWorld = GridMap.CellToWorld(StartCell);
-            CandidateMission.GoalWorld = GridMap.CellToWorld(GoalCell);
-
-            if (HasConflictWithExistingStarts(StartCell, CandidateMission))
-            {
-                continue;
-            }
-
-            if (HasConflictWithExistingGoals(GoalCell, CandidateMission))
-            {
-                continue;
-            }
-
-            OutMission = CandidateMission;
-            UsedStarts.Add(StartCell);
-            UsedGoals.Add(GoalCell);
-            return true;
-        }
-    }
-
-    return false;
+    FEditorGridBuildRequest Request;
+    Request.World = GetWorld();
+    Request.GridMap = &GridMap;
+    Request.GridOrigin = GridOrigin;
+    Request.GridDim = GridDim;
+    Request.CellSize = CellSize;
+    Request.bDrawOccupiedCells = bDrawOccupiedCells;
+    Request.bDrawFreeCells = bDrawFreeCells;
+    Request.DebugDrawTime = DebugDrawTime;
+    Request.IgnoreActors.Add(this);
+    FMissionEditorService::AppendMissionMarkerActors(
+        Request.World,
+        Request.IgnoreActors);
+    FEditorGridService::BuildGridForMissionEditing(Request);
 }
 
 void APathPlanningDemoActor::EditorGenerateRandomMissionConfigs()
 {
     EditorBuildGridForMissionEditing();
 
-    MissionConfigs.Reset();
-
-    FRandomStream RandomStream(RandomSeed);
-    TSet<FIntVector> UsedStarts;
-    TSet<FIntVector> UsedGoals;
-
-    for (int32 i = 0; i < RandomMissionCount; ++i)
-    {
-        FDroneMissionConfig NewMission;
-        const int32 MissionId = i + 1;
-
-        if (!TryGenerateSingleMission(RandomStream, MissionId, UsedStarts, UsedGoals, NewMission))
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("Failed to generate mission %d under current random-space and UTM safety constraints. Consider reducing RandomMissionCount or shrinking mission footprints."),
-                MissionId);
-            continue;
-        }
-
-        MissionConfigs.Add(NewMission);
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("Generated random missions: %d"), MissionConfigs.Num());
+    FMissionEditorGenerateRandomRequest Request;
+    Request.GridMap = &GridMap;
+    Request.GridDim = GridDim;
+    Request.RandomMissionCount = RandomMissionCount;
+    Request.RandomSeed = RandomSeed;
+    Request.MinStartGoalCellDistance = MinStartGoalCellDistance;
+    Request.bAllowDuplicateStartCells = bAllowDuplicateStartCells;
+    Request.bAllowDuplicateGoalCells = bAllowDuplicateGoalCells;
+    Request.MissionConfigs = &MissionConfigs;
+    FMissionEditorService::GenerateRandomMissionConfigs(Request);
 }
 
 void APathPlanningDemoActor::EditorClearMissionMarkers()
 {
-    TArray<AMissionMarkerActor*> Markers;
-    GetMissionMarkerActors(Markers);
-
-    int32 DeleteCount = 0;
-
-    for (AMissionMarkerActor* Marker : Markers)
-    {
-        if (!Marker)
-        {
-            continue;
-        }
-
-        Marker->Destroy();
-        DeleteCount++;
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("EditorClearMissionMarkers deleted %d markers"), DeleteCount);
+    FMissionEditorService::ClearMissionMarkers(GetWorld());
 }
 
 void APathPlanningDemoActor::EditorSpawnMissionMarkers()
 {
-    if (!MissionMarkerClass)
-    {
-        UE_LOG(LogTemp, Error, TEXT("MissionMarkerClass is null"));
-        return;
-    }
-
-    EditorClearMissionMarkers();
-
-    UWorld* World = GetWorld();
-    if (!World)
-    {
-        return;
-    }
-
-    FActorSpawnParameters SpawnParams;
-    SpawnParams.Owner = this;
-    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-    for (const FDroneMissionConfig& Mission : MissionConfigs)
-    {
-        const FIntVector StartCell = GridMap.WorldToCell(Mission.StartWorld);
-        const FIntVector GoalCell = GridMap.WorldToCell(Mission.GoalWorld);
-
-        {
-            const FVector SpawnLocation = Mission.StartWorld + FVector(0.f, 0.f, MarkerZOffset);
-            AMissionMarkerActor* StartMarker = World->SpawnActor<AMissionMarkerActor>(
-                MissionMarkerClass,
-                SpawnLocation,
-                FRotator::ZeroRotator,
-                SpawnParams
-            );
-
-            if (StartMarker)
-            {
-                StartMarker->MissionId = Mission.MissionId;
-                StartMarker->MarkerType = EMissionMarkerType::Start;
-                StartMarker->Cell = StartCell;
-                StartMarker->Tags.Add(FName(TEXT("MissionMarker")));
-                StartMarker->UpdateVisual();
-            }
-        }
-
-        {
-            const FVector SpawnLocation = Mission.GoalWorld + FVector(0.f, 0.f, MarkerZOffset);
-            AMissionMarkerActor* GoalMarker = World->SpawnActor<AMissionMarkerActor>(
-                MissionMarkerClass,
-                SpawnLocation,
-                FRotator::ZeroRotator,
-                SpawnParams
-            );
-
-            if (GoalMarker)
-            {
-                GoalMarker->MissionId = Mission.MissionId;
-                GoalMarker->MarkerType = EMissionMarkerType::Goal;
-                GoalMarker->Cell = GoalCell;
-                GoalMarker->Tags.Add(FName(TEXT("MissionMarker")));
-                GoalMarker->UpdateVisual();
-            }
-        }
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("EditorSpawnMissionMarkers done. Mission count=%d"), MissionConfigs.Num());
+    FMissionEditorSpawnMarkersRequest Request;
+    Request.World = GetWorld();
+    Request.Owner = this;
+    Request.GridMap = &GridMap;
+    Request.MarkerClass = MissionMarkerClass;
+    Request.MarkerZOffset = MarkerZOffset;
+    Request.MissionConfigs = &MissionConfigs;
+    FMissionEditorService::SpawnMissionMarkers(Request);
 }
 
 void APathPlanningDemoActor::EditorValidateMissionConfigs()
 {
     EditorBuildGridForMissionEditing();
 
-    UE_LOG(LogTemp, Warning, TEXT("========== Validate MissionConfigs begin. Count=%d  =========="), MissionConfigs.Num());
-
-    TSet<int32> MissionIds;
-    TSet<FIntVector> StartCells;
-    TSet<FIntVector> GoalCells;
-
-    for (const FDroneMissionConfig& Mission : MissionConfigs)
-    {
-        if (MissionIds.Contains(Mission.MissionId))
-        {
-            UE_LOG(LogTemp, Error, TEXT("Duplicate MissionId=%d"), Mission.MissionId);
-        }
-        MissionIds.Add(Mission.MissionId);
-
-        const bool bValid = InputValidator.ValidateStartGoalPair(
-            GridMap,
-            Mission.StartWorld,
-            Mission.GoalWorld,
-            Mission.MissionId,
-            nullptr,
-            nullptr
-        );
-
-        const FIntVector StartCell = GridMap.WorldToCell(Mission.StartWorld);
-        const FIntVector GoalCell = GridMap.WorldToCell(Mission.GoalWorld);
-
-        if (StartCells.Contains(StartCell))
-        {
-            UE_LOG(LogTemp, Warning, TEXT("Duplicate StartCell in Mission %d: (%d,%d,%d)"),
-                Mission.MissionId, StartCell.X, StartCell.Y, StartCell.Z);
-        }
-        StartCells.Add(StartCell);
-
-        if (GoalCells.Contains(GoalCell))
-        {
-            UE_LOG(LogTemp, Warning, TEXT("Duplicate GoalCell in Mission %d: (%d,%d,%d)"),
-                Mission.MissionId, GoalCell.X, GoalCell.Y, GoalCell.Z);
-        }
-        GoalCells.Add(GoalCell);
-
-        if (bValid)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("Mission %d valid"), Mission.MissionId);
-        }
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("========== Validate MissionConfigs end  =========="));
+    FMissionEditorValidateRequest Request;
+    Request.GridMap = &GridMap;
+    Request.InputValidator = &InputValidator;
+    Request.MissionConfigs = &MissionConfigs;
+    FMissionEditorService::ValidateMissionConfigs(Request);
 }
 
 void APathPlanningDemoActor::EditorReadMissionMarkersToConfigs()
 {
-    TArray<AMissionMarkerActor*> Markers;
-    GetMissionMarkerActors(Markers);
-
-    TMap<int32, FVector> StartMap;
-    TMap<int32, FVector> GoalMap;
-
-    for (AMissionMarkerActor* Marker : Markers)
-    {
-        if (!Marker)
-        {
-            continue;
-        }
-
-        const FVector MarkerWorld = Marker->GetActorLocation() - FVector(0.f, 0.f, MarkerZOffset);
-        const FIntVector Cell = GridMap.WorldToCell(MarkerWorld);
-        const FVector SnappedWorld = GridMap.CellToWorld(Cell);
-
-        if (Marker->MarkerType == EMissionMarkerType::Start)
-        {
-            StartMap.Add(Marker->MissionId, SnappedWorld);
-        }
-        else
-        {
-            GoalMap.Add(Marker->MissionId, SnappedWorld);
-        }
-    }
-
-    MissionConfigs.Reset();
-
-    TArray<int32> MissionIds;
-    StartMap.GetKeys(MissionIds);
-
-    for (int32 MissionId : MissionIds)
-    {
-        if (!GoalMap.Contains(MissionId))
-        {
-            UE_LOG(LogTemp, Warning, TEXT("Mission %d has start marker but no goal marker"), MissionId);
-            continue;
-        }
-
-        FDroneMissionConfig Mission;
-        Mission.MissionId = MissionId;
-        Mission.StartWorld = StartMap[MissionId];
-        Mission.GoalWorld = GoalMap[MissionId];
-
-        MissionConfigs.Add(Mission);
-    }
-
-    MissionConfigs.Sort([](const FDroneMissionConfig& A, const FDroneMissionConfig& B)
-        {
-            return A.MissionId < B.MissionId;
-        });
-
-    UE_LOG(LogTemp, Warning, TEXT("EditorReadMissionMarkersToConfigs done. Mission count=%d"), MissionConfigs.Num());
+    FMissionEditorReadMarkersRequest Request;
+    Request.World = GetWorld();
+    Request.GridMap = &GridMap;
+    Request.MarkerZOffset = MarkerZOffset;
+    Request.MissionConfigs = &MissionConfigs;
+    FMissionEditorService::ReadMissionMarkersToConfigs(Request);
 }
 
 

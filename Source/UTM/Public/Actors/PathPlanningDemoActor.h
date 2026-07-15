@@ -591,14 +591,6 @@ public:
 
     // UI导入起点、终点配置
 private:
-    bool TryGenerateSingleMission(
-        FRandomStream& RandomStream,
-        int32 MissionId,
-        TSet<FIntVector>& UsedStarts,
-        TSet<FIntVector>& UsedGoals,
-        FDroneMissionConfig& OutMission) const;
-
-    void GetMissionMarkerActors(TArray<AMissionMarkerActor*>& OutMarkers) const;
     void GetNoFlyZoneMarkerActors(TArray<ANoFlyZoneMarkerActor*>& OutMarkers) const;
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mission Editor")
