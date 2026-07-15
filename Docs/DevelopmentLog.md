@@ -1476,3 +1476,84 @@ Actor 中的适配层现在负责：
 - Proposal 标志、最终动作和两种 `ResolutionReason` 文本保持不变。
 - Final Safety Gate 仍在普通 execution replan 之后执行，其 Coordinator 和复检逻辑未修改。
 - 日志、状态统计、Summary 和 StructuredExperimentJSON 指标定义未修改。
+
+## 2026-07-15 Execution Replan Proposal Synchronizer 与 Step Pipeline 抽取
+
+### 背景
+
+普通 execution replan 和 Final Safety Gate 在成功重规划后，都需要根据最新执行路径修改本时间步 `FExecutionStepProposal`。两处逻辑原本分别位于 `APathPlanningDemoActor::AdvanceExecutionOneStep()`，字段写入高度相似，但同步范围和原因文本不同。同时，Actor 仍直接串联 Conflict Resolution、普通 Step Replan 和 Final Safety Gate，导致已经独立的 Execution 组件仍缺少统一的中层调用入口。
+
+本轮在一次优化中完成两个相互依赖的阶段：先统一重规划后的 Proposal 同步规则，再建立第一阶段 Execution Step Pipeline。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionReplanProposalSynchronizer.h`
+- `Source/UTM/Private/Execution/ExecutionReplanProposalSynchronizer.cpp`
+- `Source/UTM/Public/Execution/ExecutionStepPipeline.h`
+- `Source/UTM/Private/Execution/ExecutionStepPipeline.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Proposal Synchronizer 当前职责
+
+`FExecutionReplanProposalSynchronizer::Apply(...)` 现在负责：
+
+- 按排序后的 Mission ID 顺序处理指定同步集合。
+- 使用重规划完成后重新捕获的 `ExecutedPlanIndex` 和路径长度计算 Reference/Proposed Index。
+- 将目标 Proposal 标记为 valid、`HoldForReplan`，并清除 predicted-conflict hold 和 replan request 标志。
+- 实际重规划 Mission 的 Proposed Index 前进一格，纯同步 Mission 保持当前 Reference Index。
+- 根据 Mission 是否实际重规划写入调用方提供的两种 `ResolutionReason`。
+
+普通重规划将全部 Mission 作为同步目标；Final Safety Gate 只将 Hold Mission 与 Replanned Mission 的并集作为同步目标。该差异由请求数据表达，不再维护两套字段写入代码。
+
+### Step Pipeline 当前职责
+
+`FExecutionStepPipeline::Run(...)` 当前统一编排：
+
+1. 调用 `FExecutionConflictResolutionPolicy::Resolve(...)`，合并冲突仲裁产生的重规划请求并转发事件。
+2. 调用 `FExecutionStepReplanCoordinator::Run(...)` 执行普通 local/global step replan。
+3. 在普通重规划完成后，通过回调重新捕获最新执行状态并调用 Proposal Synchronizer。
+4. 在普通重规划及其状态写回完成后，通过回调构造最新的 Final Safety Gate 输入。
+5. 调用 `FExecutionFinalSafetyGateCoordinator::Run(...)`，并在成功时复用 Proposal Synchronizer。
+6. 合并普通重规划和 Safety Gate 的 requested/successful Mission ID，返回总体重规划成功状态和停止执行决定。
+
+### Actor 当前职责
+
+`APathPlanningDemoActor::AdvanceExecutionOneStep()` 继续负责：
+
+- 更新时间步并读取 Drone 实际位置。
+- 按原顺序生成随机或脚本延迟。
+- 调用 Alignment Policy 和 Proposal Builder 产生初始 Proposal。
+- 将 UE/Actor 状态适配为 Conflict Resolution、Proposal Synchronizer 和 Final Safety Gate 的轻量输入。
+- 通过回调调用原有 `TryExecutionReplan(...)`，并输出 Conflict Resolution 与 Final Safety Gate 日志。
+- 根据 Pipeline Result 执行停止/Summary，随后计算并提交 State Transition。
+- 执行冲突统计、结束判断和可视化。
+
+`AdvanceExecutionOneStep()` 从约 368 行降至约 269 行。减少的主要是组件调用、结果合并和重复 Proposal 写回，不是简单移动 UE 日志或可视化代码。
+
+### Pipeline 当前边界
+
+当前第一阶段 Pipeline 的范围是：
+
+`Prebuilt Proposals -> Conflict Resolution -> Ordinary Step Replan -> Final Safety Gate -> Pipeline Result`
+
+以下内容尚未进入 Pipeline：
+
+- Drone 位置读取和 `CaptureExecutionSnapshot()`。
+- Delay Policy、Alignment Policy 调用和初始 Proposal 构建。
+- `TryExecutionReplan(...)` 内部实现与路径缓存写回。
+- State Transition 计算结果写回 `FExecutionAgentState`。
+- UE 日志、停止执行、Summary、冲突统计和可视化。
+
+### 保守性说明
+
+- Mission 排序、Delay 随机数消费位置和 Alignment 调用顺序未修改。
+- Conflict Resolution 仍发生在普通 Step Replan 之前，事件输出顺序未修改。
+- 普通 replan 的 Disabled、configured local、configured global 和 local 失败升级 global 语义未修改。
+- 普通重规划成功后仍暂停全部有效 Proposal；Safety Gate 仍只同步 Hold/Replanned 集合。
+- Proposal 字段、索引规则和四种 `ResolutionReason` 文本保持不变。
+- Final Safety Gate 输入在普通重规划之后构造，避免读取重规划前的旧路径下标或状态。
+- Final Safety Gate 的 Hold 扩张、local/global 升级、最终复检和停止执行规则未修改。
+- `TryExecutionReplan(...)`、attempt timing、路径整合、状态统计、Summary 和 StructuredExperimentJSON 指标定义未修改。

@@ -14,9 +14,10 @@
 #include "Execution/ExecutionReplanAttemptRunner.h"
 #include "Execution/ExecutionReplanCoordinator.h"
 #include "Execution/ExecutionReplanPathIntegrator.h"
+#include "Execution/ExecutionReplanProposalSynchronizer.h"
 #include "Execution/ExecutionStateTransition.h"
+#include "Execution/ExecutionStepPipeline.h"
 #include "Execution/ExecutionStepProposalBuilder.h"
-#include "Execution/ExecutionStepReplanCoordinator.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
@@ -502,6 +503,30 @@ namespace
         State.DisplayToCell = Result.CommittedCell;
         State.LastAlignmentAction = FExecutionAlignmentPolicy::LexToString(Proposal.FinalAction);
         State.ActualCells.Add(Result.CommittedCell);
+    }
+
+    TMap<int32, FExecutionReplanProposalAgentState> CaptureReplanProposalAgentStates(
+        const TArray<int32>& OrderedMissionIds,
+        const TMap<int32, FExecutionAgentState>& ExecutionStates)
+    {
+        TMap<int32, FExecutionReplanProposalAgentState> AgentStatesByMissionId;
+        AgentStatesByMissionId.Reserve(OrderedMissionIds.Num());
+
+        for (const int32 MissionId : OrderedMissionIds)
+        {
+            const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+            if (!State)
+            {
+                continue;
+            }
+
+            FExecutionReplanProposalAgentState AgentState;
+            AgentState.ExecutedPlanIndex = State->ExecutedPlanIndex;
+            AgentState.PlannedCellCount = State->PlannedCells.Num();
+            AgentStatesByMissionId.Add(MissionId, AgentState);
+        }
+
+        return AgentStatesByMissionId;
     }
 }
 
@@ -1548,180 +1573,81 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         ConflictResolutionInput.AgentStatesByMissionId.Add(MissionId, AgentState);
     }
 
-    const FExecutionConflictResolutionResult ConflictResolutionResult =
-        FExecutionConflictResolutionPolicy::Resolve(ConflictResolutionInput, StepProposals);
-    for (const int32 MissionId : ConflictResolutionResult.ReplanMissionIds)
-    {
-        RequestedReplanMissionIds.Add(MissionId);
-    }
+    FExecutionStepPipelineRequest PipelineRequest;
+    PipelineRequest.OrderedMissionIds = MissionIds;
+    PipelineRequest.InitialRequestedReplanMissionIds = RequestedReplanMissionIds;
+    PipelineRequest.ConflictResolutionInput = &ConflictResolutionInput;
+    PipelineRequest.ReplanMode = ToExecutionPolicyReplanMode(ExecutionReplanMode);
 
+    FExecutionStepPipelineCallbacks PipelineCallbacks;
+    PipelineCallbacks.RunReplan =
+        [this](
+            const TSet<int32>& RequestedMissionIds,
+            bool bGlobalReplan,
+            TSet<int32>& ReplannedMissionIds) -> bool
+        {
+            return TryExecutionReplan(
+                RequestedMissionIds,
+                bGlobalReplan,
+                ReplannedMissionIds);
+        };
+    PipelineCallbacks.CaptureReplanProposalAgentStates =
+        [this, &MissionIds]()
+        {
+            return CaptureReplanProposalAgentStates(MissionIds, ExecutionStates);
+        };
+    PipelineCallbacks.BuildFinalSafetyGateInput =
+        [this, &MissionIds]()
+        {
+            FExecutionFinalSafetyGateInput SafetyGateInput;
+            SafetyGateInput.OrderedMissionIds = MissionIds;
+            SafetyGateInput.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
+            SafetyGateInput.Settings.bEnabled = bEnableFinalSafetyGate;
+            SafetyGateInput.Settings.bCheckStaticUTMSafety =
+                (PlannerType == EPlannerType::LaCAMUTM);
+            SafetyGateInput.Settings.MaxHoldSteps = FinalSafetyGateMaxHoldSteps;
+
+            for (const int32 MissionId : MissionIds)
+            {
+                const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+                if (!State)
+                {
+                    continue;
+                }
+
+                FExecutionFinalSafetyGateAgentState AgentState;
+                AgentState.ConsecutiveSafetyGateHoldCount =
+                    State->ConsecutiveSafetyGateHoldCount;
+                SafetyGateInput.AgentStatesByMissionId.Add(MissionId, AgentState);
+            }
+
+            return SafetyGateInput;
+        };
     if (bLogConflictPredictionEvents)
     {
-        for (const FExecutionConflictResolutionEvent& Event : ConflictResolutionResult.Events)
-        {
-            LogExecutionConflictResolutionEvent(Event, CurrentExecutionTimeStep);
-        }
-    }
-
-    FExecutionStepReplanCoordinatorRequest StepReplanRequest;
-    StepReplanRequest.RequestedMissionIds = RequestedReplanMissionIds;
-    StepReplanRequest.ReplanMode = ToExecutionPolicyReplanMode(ExecutionReplanMode);
-
-    FExecutionStepReplanCoordinatorCallbacks StepReplanCallbacks;
-    StepReplanCallbacks.RunReplan =
-        [this](
-            const TSet<int32>& RequestedMissionIds,
-            bool bGlobalReplan,
-            TSet<int32>& ReplannedMissionIds) -> bool
-        {
-            return TryExecutionReplan(
-                RequestedMissionIds,
-                bGlobalReplan,
-                ReplannedMissionIds);
-        };
-    StepReplanCallbacks.ApplyReplanResult =
-        [this, &MissionIds](
-            const TSet<int32>& ReplannedMissionIds,
-            TMap<int32, FExecutionStepProposal>& InOutProposals)
-        {
-            for (const int32 MissionId : MissionIds)
+        PipelineCallbacks.OnConflictResolutionEvent =
+            [this](const FExecutionConflictResolutionEvent& Event)
             {
-                FExecutionStepProposal* Proposal = InOutProposals.Find(MissionId);
-                FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-                if (!Proposal || !State || State->PlannedCells.Num() <= 0)
-                {
-                    continue;
-                }
-
-                Proposal->bValid = true;
-                Proposal->bHeldForReplan = true;
-                Proposal->bHeldForPredictedConflict = false;
-                Proposal->bRequiresReplan = false;
-                Proposal->FinalAction = EExecutionPolicyAction::HoldForReplan;
-                Proposal->ReferencePlanIndex = FMath::Clamp(State->ExecutedPlanIndex, 0, State->PlannedCells.Num() - 1);
-                Proposal->ProposedPlanIndex = ReplannedMissionIds.Contains(MissionId)
-                    ? FMath::Min(Proposal->ReferencePlanIndex + 1, State->PlannedCells.Num() - 1)
-                    : Proposal->ReferencePlanIndex;
-                Proposal->ProposedCell = Proposal->ObservedCell;
-                Proposal->ResolutionReason = ReplannedMissionIds.Contains(MissionId)
-                    ? TEXT("hold while applying replanned trajectory")
-                    : TEXT("hold to synchronize with replanned agents");
-            }
-        };
-
-    const FExecutionStepReplanCoordinatorResult StepReplanResult =
-        FExecutionStepReplanCoordinator::Run(
-            StepReplanRequest,
-            StepReplanCallbacks,
-            StepProposals);
-
-    TSet<int32> SuccessfulReplanMissionIds = StepReplanResult.ReplannedMissionIds;
-    bool bReplanSucceeded = StepReplanResult.bSuccess;
-
-    bool bStopExecutionForSafetyGate = false;
-
-    FExecutionFinalSafetyGateInput SafetyGateInput;
-    SafetyGateInput.OrderedMissionIds = MissionIds;
-    SafetyGateInput.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
-    SafetyGateInput.Settings.bEnabled = bEnableFinalSafetyGate;
-    SafetyGateInput.Settings.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
-    SafetyGateInput.Settings.MaxHoldSteps = FinalSafetyGateMaxHoldSteps;
-
-    for (const int32 MissionId : MissionIds)
-    {
-        const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-        if (!State)
-        {
-            continue;
-        }
-
-        FExecutionFinalSafetyGateAgentState AgentState;
-        AgentState.ConsecutiveSafetyGateHoldCount = State->ConsecutiveSafetyGateHoldCount;
-        SafetyGateInput.AgentStatesByMissionId.Add(MissionId, AgentState);
+                LogExecutionConflictResolutionEvent(Event, CurrentExecutionTimeStep);
+            };
     }
-
-    FExecutionFinalSafetyGateCoordinatorRequest SafetyGateRequest;
-    SafetyGateRequest.SafetyGateInput = &SafetyGateInput;
-    SafetyGateRequest.ReplanMode = ToExecutionPolicyReplanMode(ExecutionReplanMode);
-
-    FExecutionFinalSafetyGateCoordinatorCallbacks SafetyGateCallbacks;
-    SafetyGateCallbacks.RunReplan =
-        [this](
-            const TSet<int32>& RequestedMissionIds,
-            bool bGlobalReplan,
-            TSet<int32>& ReplannedMissionIds) -> bool
-        {
-            return TryExecutionReplan(
-                RequestedMissionIds,
-                bGlobalReplan,
-                ReplannedMissionIds);
-        };
-    SafetyGateCallbacks.ApplyReplanResult =
-        [this, &MissionIds](
-            const TSet<int32>& HoldMissionIds,
-            const TSet<int32>& ReplannedMissionIds,
-            TMap<int32, FExecutionStepProposal>& InOutProposals)
-        {
-            for (const int32 MissionId : MissionIds)
-            {
-                FExecutionStepProposal* Proposal = InOutProposals.Find(MissionId);
-                FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-                if (!Proposal || !State || State->PlannedCells.Num() <= 0)
-                {
-                    continue;
-                }
-
-                if (!HoldMissionIds.Contains(MissionId) &&
-                    !ReplannedMissionIds.Contains(MissionId))
-                {
-                    continue;
-                }
-
-                Proposal->bValid = true;
-                Proposal->bHeldForReplan = true;
-                Proposal->bHeldForPredictedConflict = false;
-                Proposal->bRequiresReplan = false;
-                Proposal->FinalAction = EExecutionPolicyAction::HoldForReplan;
-                Proposal->ReferencePlanIndex = FMath::Clamp(
-                    State->ExecutedPlanIndex,
-                    0,
-                    State->PlannedCells.Num() - 1);
-                Proposal->ProposedPlanIndex = ReplannedMissionIds.Contains(MissionId)
-                    ? FMath::Min(Proposal->ReferencePlanIndex + 1, State->PlannedCells.Num() - 1)
-                    : Proposal->ReferencePlanIndex;
-                Proposal->ProposedCell = Proposal->ObservedCell;
-                Proposal->ResolutionReason = ReplannedMissionIds.Contains(MissionId)
-                    ? TEXT("hold while applying safety-gate replanned trajectory")
-                    : TEXT("hold to synchronize with safety-gate replanned agents");
-            }
-        };
-    SafetyGateCallbacks.OnEvent =
+    PipelineCallbacks.OnFinalSafetyGateEvent =
         [this](const FExecutionFinalSafetyGateEvent& Event)
         {
             LogExecutionFinalSafetyGateEvent(Event, CurrentExecutionTimeStep);
         };
 
-    const FExecutionFinalSafetyGateCoordinatorResult SafetyGateCoordinatorResult =
-        FExecutionFinalSafetyGateCoordinator::Run(
-            SafetyGateRequest,
-            SafetyGateCallbacks,
+    const FExecutionStepPipelineResult PipelineResult =
+        FExecutionStepPipeline::Run(
+            PipelineRequest,
+            PipelineCallbacks,
             StepProposals);
 
-    for (const int32 MissionId : SafetyGateCoordinatorResult.RequestedReplanMissionIds)
-    {
-        RequestedReplanMissionIds.Add(MissionId);
-    }
-
-    if (SafetyGateCoordinatorResult.bReplanSucceeded)
-    {
-        bReplanSucceeded = true;
-        for (const int32 MissionId : SafetyGateCoordinatorResult.SuccessfulReplanMissionIds)
-        {
-            SuccessfulReplanMissionIds.Add(MissionId);
-        }
-    }
-
-    bStopExecutionForSafetyGate = SafetyGateCoordinatorResult.bStopExecution;
+    RequestedReplanMissionIds = PipelineResult.RequestedReplanMissionIds;
+    const TSet<int32> SuccessfulReplanMissionIds =
+        PipelineResult.SuccessfulReplanMissionIds;
+    const bool bReplanSucceeded = PipelineResult.bReplanSucceeded;
+    const bool bStopExecutionForSafetyGate = PipelineResult.bStopExecution;
 
     if (bStopExecutionForSafetyGate)
     {
