@@ -1428,3 +1428,51 @@ Actor 中的适配层现在负责：
 - 初始 replan 条件仍为 `bRequiresReplan || bInitialAlignmentInvalid`。
 - Conflict Resolution、普通 Execution Replan、Final Safety Gate 和 State Transition 未修改。
 - 日志、replan timing、状态统计和 JSON 指标定义未修改。
+
+## 2026-07-15 Execution Step Replan Coordinator 抽取
+
+### 背景
+
+`APathPlanningDemoActor::AdvanceExecutionOneStep()` 在收集 Alignment 和 Conflict Resolution 产生的重规划请求后，仍直接维护普通 execution replan 的模式分派、local 失败后的 global 回退，以及成功后所有 Proposal 的同步暂停。该控制流属于单个执行时间步的重规划编排，不需要直接依赖 UE 场景对象。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionStepReplanCoordinator.h`
+- `Source/UTM/Private/Execution/ExecutionStepReplanCoordinator.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Coordinator 当前职责
+
+`FExecutionStepReplanCoordinator::Run(...)` 现在负责：
+
+- 没有重规划请求或 replan mode 为 `Disabled` 时直接跳过。
+- `GlobalUnfinished` 模式下直接执行一次 global replan。
+- `LocalConflictSet` 模式下先执行 local replan；失败后使用同一请求集合升级为 global replan。
+- 重规划成功后，通过同步回调将成功结果应用到本时间步 Proposal。
+- 返回本时间步普通重规划是否成功以及实际重规划的 Mission ID 集合。
+
+### 两层 Coordinator 的职责区别
+
+- `FExecutionStepReplanCoordinator` 是外层的“单步分派器”，只决定本时间步调用 local 还是 global replan，以及 local 失败后是否升级。
+- 已有 `FExecutionReplanCoordinator` 是 `TryExecutionReplan(...)` 内部的“重规划尝试编排器”，继续负责 candidate selection、local 扩张、多轮 attempt、PostCheck targeted retry 和 attempt timing。
+- 两者不是重复实现：前者决定一次执行步如何调用重规划服务，后者负责一次重规划服务调用内部如何求解。
+
+### Actor 继续保留的职责
+
+- 通过 `RunReplan` 回调调用原有 `TryExecutionReplan(...)`。
+- 通过 `ApplyReplanResult` 回调读取 `ExecutionStates`，同步更新本步全部有效 Proposal。
+- 继续维护 Final Safety Gate、执行状态提交、日志、Summary 和可视化。
+
+### 保守性说明
+
+- Alignment 和 Conflict Resolution 产生的请求集合及合并顺序未修改。
+- `Disabled`、configured global、configured local 和 local 失败升级 global 的分支顺序保持不变。
+- `TryExecutionReplan(...)` 的实现、调用参数、内部 attempt 次数和 timing 范围未修改。
+- 普通重规划成功后仍暂停本步全部有效 Proposal，使未重规划的 Agent 与新轨迹同步。
+- 实际重规划 Mission 的 Proposed Index 仍前进一格，其他 Mission 仍保持当前 Reference Index。
+- Proposal 标志、最终动作和两种 `ResolutionReason` 文本保持不变。
+- Final Safety Gate 仍在普通 execution replan 之后执行，其 Coordinator 和复检逻辑未修改。
+- 日志、状态统计、Summary 和 StructuredExperimentJSON 指标定义未修改。

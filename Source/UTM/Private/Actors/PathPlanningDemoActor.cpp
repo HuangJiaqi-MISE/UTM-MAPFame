@@ -16,6 +16,7 @@
 #include "Execution/ExecutionReplanPathIntegrator.h"
 #include "Execution/ExecutionStateTransition.h"
 #include "Execution/ExecutionStepProposalBuilder.h"
+#include "Execution/ExecutionStepReplanCoordinator.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
@@ -1562,23 +1563,30 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         }
     }
 
-    TSet<int32> SuccessfulReplanMissionIds;
-    bool bReplanSucceeded = false;
-    if (RequestedReplanMissionIds.Num() > 0 && ExecutionReplanMode != EExecutionReplanMode::Disabled)
-    {
-        const bool bUseGlobalReplan = (ExecutionReplanMode == EExecutionReplanMode::GlobalUnfinished);
-        bReplanSucceeded = TryExecutionReplan(RequestedReplanMissionIds, bUseGlobalReplan, SuccessfulReplanMissionIds);
+    FExecutionStepReplanCoordinatorRequest StepReplanRequest;
+    StepReplanRequest.RequestedMissionIds = RequestedReplanMissionIds;
+    StepReplanRequest.ReplanMode = ToExecutionPolicyReplanMode(ExecutionReplanMode);
 
-        if (!bReplanSucceeded && ExecutionReplanMode == EExecutionReplanMode::LocalConflictSet)
+    FExecutionStepReplanCoordinatorCallbacks StepReplanCallbacks;
+    StepReplanCallbacks.RunReplan =
+        [this](
+            const TSet<int32>& RequestedMissionIds,
+            bool bGlobalReplan,
+            TSet<int32>& ReplannedMissionIds) -> bool
         {
-            bReplanSucceeded = TryExecutionReplan(RequestedReplanMissionIds, true, SuccessfulReplanMissionIds);
-        }
-
-        if (bReplanSucceeded)
+            return TryExecutionReplan(
+                RequestedMissionIds,
+                bGlobalReplan,
+                ReplannedMissionIds);
+        };
+    StepReplanCallbacks.ApplyReplanResult =
+        [this, &MissionIds](
+            const TSet<int32>& ReplannedMissionIds,
+            TMap<int32, FExecutionStepProposal>& InOutProposals)
         {
             for (const int32 MissionId : MissionIds)
             {
-                FExecutionStepProposal* Proposal = StepProposals.Find(MissionId);
+                FExecutionStepProposal* Proposal = InOutProposals.Find(MissionId);
                 FExecutionAgentState* State = ExecutionStates.Find(MissionId);
                 if (!Proposal || !State || State->PlannedCells.Num() <= 0)
                 {
@@ -1591,16 +1599,24 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                 Proposal->bRequiresReplan = false;
                 Proposal->FinalAction = EExecutionPolicyAction::HoldForReplan;
                 Proposal->ReferencePlanIndex = FMath::Clamp(State->ExecutedPlanIndex, 0, State->PlannedCells.Num() - 1);
-                Proposal->ProposedPlanIndex = SuccessfulReplanMissionIds.Contains(MissionId)
+                Proposal->ProposedPlanIndex = ReplannedMissionIds.Contains(MissionId)
                     ? FMath::Min(Proposal->ReferencePlanIndex + 1, State->PlannedCells.Num() - 1)
                     : Proposal->ReferencePlanIndex;
                 Proposal->ProposedCell = Proposal->ObservedCell;
-                Proposal->ResolutionReason = SuccessfulReplanMissionIds.Contains(MissionId)
+                Proposal->ResolutionReason = ReplannedMissionIds.Contains(MissionId)
                     ? TEXT("hold while applying replanned trajectory")
                     : TEXT("hold to synchronize with replanned agents");
             }
-        }
-    }
+        };
+
+    const FExecutionStepReplanCoordinatorResult StepReplanResult =
+        FExecutionStepReplanCoordinator::Run(
+            StepReplanRequest,
+            StepReplanCallbacks,
+            StepProposals);
+
+    TSet<int32> SuccessfulReplanMissionIds = StepReplanResult.ReplannedMissionIds;
+    bool bReplanSucceeded = StepReplanResult.bSuccess;
 
     bool bStopExecutionForSafetyGate = false;
 
