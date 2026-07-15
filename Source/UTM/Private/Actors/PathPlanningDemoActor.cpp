@@ -29,6 +29,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Reporting/ExperimentMetadataResolver.h"
 #include "Reporting/ExperimentReporter.h"
+#include "Reporting/ExecutionSummaryBuilder.h"
 
 // 障碍物建筑构建
 #include "Components/StaticMeshComponent.h"
@@ -531,6 +532,47 @@ namespace
         State.DisplayToCell = Result.CommittedCell;
         State.LastAlignmentAction = FExecutionAlignmentPolicy::LexToString(Proposal.FinalAction);
         State.ActualCells.Add(Result.CommittedCell);
+    }
+
+    FExecutionSummaryBuildRequest CaptureExecutionSummaryBuildRequest(
+        const TMap<int32, FExecutionAgentState>& ExecutionStates,
+        const TArray<FExecutionConflict>& ExecutionConflicts,
+        const TMap<int32, FDroneMissionConfig>& MissionConfigsByMissionId)
+    {
+        FExecutionSummaryBuildRequest Request;
+        Request.AgentStatesByMissionId.Reserve(ExecutionStates.Num());
+        for (const TPair<int32, FExecutionAgentState>& Pair : ExecutionStates)
+        {
+            const FExecutionAgentState& State = Pair.Value;
+            FExecutionSummaryAgentInput Agent;
+            Agent.MissionId = State.MissionId;
+            Agent.PlannedCells = State.PlannedCells;
+            Agent.ActualCells = State.ActualCells;
+            Agent.TotalDelaySteps = State.TotalDelaySteps;
+            Agent.AlignmentCorrectionCount = State.AlignmentCorrectionCount;
+            Agent.AlignmentHoldCount = State.AlignmentHoldCount;
+            Agent.AlignmentConflictHoldCount = State.AlignmentConflictHoldCount;
+            Agent.AlignmentSnapCount = State.AlignmentSnapCount;
+            Agent.AlignmentReplanRequestCount = State.AlignmentReplanRequestCount;
+            Agent.AlignmentSuccessfulReplanCount =
+                State.AlignmentSuccessfulReplanCount;
+            Agent.MaxAlignmentSpatialError = State.MaxAlignmentSpatialError;
+            Agent.MaxAlignmentTemporalError = State.MaxAlignmentTemporalError;
+            Agent.bAlignmentLost = State.bAlignmentLost;
+            Request.AgentStatesByMissionId.Add(Pair.Key, MoveTemp(Agent));
+        }
+
+        Request.Conflicts.Reserve(ExecutionConflicts.Num());
+        for (const FExecutionConflict& Conflict : ExecutionConflicts)
+        {
+            FExecutionSummaryConflictInput ConflictInput;
+            ConflictInput.TimeStep = Conflict.TimeStep;
+            ConflictInput.bIsEdgeConflict = Conflict.bIsEdgeConflict;
+            Request.Conflicts.Add(ConflictInput);
+        }
+
+        Request.MissionConfigsByMissionId = MissionConfigsByMissionId;
+        return Request;
     }
 
     TMap<int32, FExecutionReplanProposalAgentState> CaptureReplanProposalAgentStates(
@@ -1752,163 +1794,13 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
     bExecutionRunning = true;
 }
 
-int32 APathPlanningDemoActor::ComputeFirstMismatchTime(const FExecutionAgentState& State) const
-{
-    const int32 MaxSteps = FMath::Max(State.PlannedCells.Num(), State.ActualCells.Num());
-
-    for (int32 T = 0; T < MaxSteps; ++T)
-    {
-        const FIntVector PlannedCell = GetCellAtTime(State.PlannedCells, T);
-        const FIntVector ActualCell = GetCellAtTime(State.ActualCells, T);
-
-        if (PlannedCell != ActualCell)
-        {
-            return T;
-        }
-    }
-
-    return -1;
-}
-
 void APathPlanningDemoActor::BuildExecutionSummary()
 {
-    LastExecutionSummary = FExecutionSummary();
-    LastExecutionSummary.AgentCount = ExecutionStates.Num();
-
-    for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
-    {
-        const FExecutionAgentState& State = KVP.Value;
-
-        FExecutionAgentSummary Item;
-        Item.MissionId = State.MissionId;
-        Item.PlannedCellCount = State.PlannedCells.Num();
-        Item.ActualCellCount = State.ActualCells.Num();
-        Item.PlannedMakespan = FMath::Max(0, State.PlannedCells.Num() - 1);
-        Item.ActualMakespan = FMath::Max(0, State.ActualCells.Num() - 1);
-        Item.TotalDelaySteps = State.TotalDelaySteps;
-        Item.FirstMismatchTime = ComputeFirstMismatchTime(State);
-        Item.bReachedGoal =
-            (State.PlannedCells.Num() > 0) &&
-            (State.ActualCells.Num() > 0) &&
-            (State.PlannedCells.Last() == State.ActualCells.Last());
-        Item.AlignmentCorrectionCount = State.AlignmentCorrectionCount;
-        Item.AlignmentHoldCount = State.AlignmentHoldCount;
-        Item.AlignmentConflictHoldCount = State.AlignmentConflictHoldCount;
-        Item.AlignmentSnapCount = State.AlignmentSnapCount;
-        Item.AlignmentReplanRequestCount = State.AlignmentReplanRequestCount;
-        Item.AlignmentSuccessfulReplanCount = State.AlignmentSuccessfulReplanCount;
-        Item.MaxAlignmentSpatialError = State.MaxAlignmentSpatialError;
-        Item.MaxAlignmentTemporalError = State.MaxAlignmentTemporalError;
-        Item.bAlignmentLost = State.bAlignmentLost;
-
-        if (Item.bReachedGoal)
-        {
-            LastExecutionSummary.CompletedAgentCount++;
-        }
-
-        LastExecutionSummary.PlannedMakespan =
-            FMath::Max(LastExecutionSummary.PlannedMakespan, Item.PlannedMakespan);
-
-        LastExecutionSummary.ActualMakespan =
-            FMath::Max(LastExecutionSummary.ActualMakespan, Item.ActualMakespan);
-
-        LastExecutionSummary.TotalDelaySteps += Item.TotalDelaySteps;
-        LastExecutionSummary.AlignmentCorrectionCount += Item.AlignmentCorrectionCount;
-        LastExecutionSummary.AlignmentHoldCount += Item.AlignmentHoldCount;
-        LastExecutionSummary.AlignmentConflictHoldCount += Item.AlignmentConflictHoldCount;
-        LastExecutionSummary.AlignmentSnapCount += Item.AlignmentSnapCount;
-        LastExecutionSummary.AlignmentReplanRequestCount += Item.AlignmentReplanRequestCount;
-        LastExecutionSummary.AlignmentSuccessfulReplanCount += Item.AlignmentSuccessfulReplanCount;
-        LastExecutionSummary.AgentSummaries.Add(Item);
-    }
-
-    for (const FExecutionConflict& Conflict : ExecutionConflicts)
-    {
-        if (Conflict.bIsEdgeConflict)
-        {
-            LastExecutionSummary.EdgeConflictCount++;
-        }
-        else
-        {
-            LastExecutionSummary.VertexConflictCount++;
-        }
-
-        if (LastExecutionSummary.FirstConflictTime < 0 ||
-            Conflict.TimeStep < LastExecutionSummary.FirstConflictTime)
-        {
-            LastExecutionSummary.FirstConflictTime = Conflict.TimeStep;
-        }
-    }
-
-    TArray<int32> ExecutionMissionIds;
-    ExecutionStates.GetKeys(ExecutionMissionIds);
-    ExecutionMissionIds.Sort();
-
-    for (int32 TimeStep = 0; TimeStep <= LastExecutionSummary.ActualMakespan; ++TimeStep)
-    {
-        for (int32 I = 0; I < ExecutionMissionIds.Num(); ++I)
-        {
-            const int32 MissionIdA = ExecutionMissionIds[I];
-            const FExecutionAgentState* StateA = ExecutionStates.Find(MissionIdA);
-            const FDroneMissionConfig* ConfigA = ExecutionMissionConfigsByMissionId.Find(MissionIdA);
-            if (!StateA || !ConfigA || StateA->ActualCells.Num() <= 0)
-            {
-                continue;
-            }
-
-            const FIntVector CellA = GetCellAtTime(StateA->ActualCells, TimeStep);
-
-            for (int32 J = I + 1; J < ExecutionMissionIds.Num(); ++J)
-            {
-                const int32 MissionIdB = ExecutionMissionIds[J];
-                const FExecutionAgentState* StateB = ExecutionStates.Find(MissionIdB);
-                const FDroneMissionConfig* ConfigB = ExecutionMissionConfigsByMissionId.Find(MissionIdB);
-                if (!StateB || !ConfigB || StateB->ActualCells.Num() <= 0)
-                {
-                    continue;
-                }
-
-                const FIntVector CellB = GetCellAtTime(StateB->ActualCells, TimeStep);
-
-                const EStaticUTMConflictType UTMConflictType =
-                    FUTMSafetyModel::GetStaticUTMConfigConflictType(CellA, *ConfigA, CellB, *ConfigB);
-
-                if (UTMConflictType == EStaticUTMConflictType::None)
-                {
-                    continue;
-                }
-
-                LastExecutionSummary.UTMStaticConflictCount++;
-
-                if (UTMConflictType == EStaticUTMConflictType::ProtectionFootprint)
-                {
-                    LastExecutionSummary.UTMProtectionConflictCount++;
-                }
-                else if (UTMConflictType == EStaticUTMConflictType::Downwash)
-                {
-                    LastExecutionSummary.UTMDownwashConflictCount++;
-                }
-
-                if (LastExecutionSummary.FirstUTMConflictTime < 0 ||
-                    TimeStep < LastExecutionSummary.FirstUTMConflictTime)
-                {
-                    LastExecutionSummary.FirstUTMConflictTime = TimeStep;
-                }
-
-                if (LastExecutionSummary.FirstConflictTime < 0 ||
-                    TimeStep < LastExecutionSummary.FirstConflictTime)
-                {
-                    LastExecutionSummary.FirstConflictTime = TimeStep;
-                }
-            }
-        }
-    }
-
-    LastExecutionSummary.AgentSummaries.Sort(
-        [](const FExecutionAgentSummary& A, const FExecutionAgentSummary& B)
-        {
-            return A.MissionId < B.MissionId;
-        });
+    LastExecutionSummary = FExecutionSummaryBuilder::Build(
+        CaptureExecutionSummaryBuildRequest(
+            ExecutionStates,
+            ExecutionConflicts,
+            ExecutionMissionConfigsByMissionId));
 }
 
 void APathPlanningDemoActor::LogExecutionSummary() const

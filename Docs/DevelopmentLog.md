@@ -1751,3 +1751,68 @@ Actor 在 Controller 完成及可能的重规划路径写回后，捕获最新�
 - Delay 与 Alignment 日志仍在 UE 状态提交后按相同条件和顺序输出。
 - 冲突统计、执行结束处理、Summary、可视化和 StructuredExperimentJSON 指标定义未修改。
 - UTMEditor Win64 Development 编译通过，后续使用原有 N200 参数实验进行行为回归。
+
+## 2026-07-15 Execution Summary Builder 抽取
+
+### 背景
+
+`APathPlanningDemoActor::BuildExecutionSummary()` 原本直接生成单 Agent 摘要、聚合 makespan/Delay/Alignment 指标、统计离散冲突，并重新扫描实际轨迹计算静态 UTM 冲突。该过程约 140 行，全部是确定性数据计算，不需要访问 UE 场景对象，但长期隐藏在 Actor 中。
+
+本轮按 Summary Builder 与 Editor Services 的分阶段计划，先完成 Summary Builder 稳定节点，暂未修改任何 EUW Editor Service 入口。
+
+### 新增文件
+
+- `Source/UTM/Public/Reporting/ExecutionSummaryTypes.h`
+- `Source/UTM/Public/Reporting/ExecutionSummaryBuilder.h`
+- `Source/UTM/Private/Reporting/ExecutionSummaryBuilder.cpp`
+
+### 修改文件
+
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Summary 类型外移
+
+`FExecutionAgentSummary` 和 `FExecutionSummary` 从 `PathPlanningDemoActor.h` 移到 `Reporting/ExecutionSummaryTypes.h`。两个类型的名称、`USTRUCT(BlueprintType)`、所有 `UPROPERTY` 字段、默认值和 Category 均保持不变。Actor 继续通过原 `LastExecutionSummary` 属性向 Details/Blueprint 暴露相同类型。
+
+### Builder 输入
+
+`FExecutionSummaryBuildRequest` 使用轻量数据表达 Summary 所需的完整输入：
+
+- `AgentStatesByMissionId`：路径、实际轨迹、Delay、Alignment、Replan 和误差统计。
+- `Conflicts`：冲突时间步及 vertex/edge 类型。
+- `MissionConfigsByMissionId`：静态 UTM 安全检查所需的 Mission 配置。
+
+Actor 新增本地适配函数，在执行结束时将 `FExecutionAgentState`、`FExecutionConflict` 和 Mission Config 缓存转换为上述输入。该转换不访问或复制 Drone Actor。
+
+### Builder 当前职责
+
+`FExecutionSummaryBuilder::Build(...)` 现在负责：
+
+- 计算每个 Agent 的 planned/actual cell count 和 makespan。
+- 使用原时间轴补齐规则计算 first mismatch time。
+- 根据规划终点与实际轨迹终点判断是否到达目标。
+- 汇总完成数量、Delay、Alignment 和 Replan 指标。
+- 统计已有 vertex/edge execution conflict 及首次冲突时间。
+- 按排序后的 Execution State Map key 扫描所有实际轨迹时间步。
+- 复用 `FUTMSafetyModel` 统计静态、Protection Footprint 和 Downwash 冲突。
+- 更新首次 UTM 冲突时间和总体首次冲突时间。
+- 按 Mission ID 排序最终 Agent Summary。
+
+`APathPlanningDemoActor::BuildExecutionSummary()` 现在只捕获请求并调用 Builder，将返回值写入 `LastExecutionSummary`。
+
+### 模块边界
+
+- Builder 不依赖 `APathPlanningDemoActor`、`FExecutionAgentState`、`FExecutionConflict`、`ADroneActor`、`UWorld`、`DrawDebug` 或 `UE_LOG`。
+- `LogExecutionSummary()` 和 StructuredExperimentJSON 组装继续保留在现有 Actor/Reporter 边界。
+- Summary 类型仍是 UE 反射数据类型，但 Summary 计算过程只依赖轻量值数据和 `FUTMSafetyModel`。
+
+### 保守性说明
+
+- AgentCount 仍等于 Execution State Map 的元素数量。
+- TMap key 与 `State.MissionId` 的原有区别被保留：UTM 扫描使用 Map key，Agent Summary 使用 State 中的 Mission ID。
+- 空路径、轨迹超出长度后停留在最后格子、first mismatch 和 reached-goal 规则未修改。
+- execution conflict 计数、UTM 冲突扫描时间范围、Mission 配对顺序及首次冲突更新时间条件未修改。
+- Summary 字段、日志模板、StructuredExperimentJSON 字段和 Reporter 映射未修改。
+- 所有 Mission/No-Fly Zone/City EUW `UFUNCTION` 名称、签名、Category 和 Actor 所有权未修改。
+- UTMEditor Win64 Development 编译通过；UHT 成功生成外移 Summary 类型的反射代码，后续使用原有 N200 参数实验核对 JSON 结果。
