@@ -17,7 +17,6 @@
 #include "Execution/ExecutionReplanProposalSynchronizer.h"
 #include "Execution/ExecutionStateTransition.h"
 #include "Execution/ExecutionStepPipeline.h"
-#include "Execution/ExecutionStepProposalBuilder.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
@@ -1490,14 +1489,12 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
     CurrentExecutionTimeStep++;
 
 
-    const FExecutionAlignmentPolicy AlignmentPolicy(BuildDiscreteAlignmentSettings());
-
     TArray<int32> MissionIds;
     ExecutionStates.GetKeys(MissionIds);
     MissionIds.Sort();
 
-    TMap<int32, FExecutionStepProposal> StepProposals;
-    TSet<int32> RequestedReplanMissionIds;
+    TArray<FExecutionAgentSnapshot> OrderedAgentSnapshots;
+    OrderedAgentSnapshots.Reserve(MissionIds.Num());
 
     for (const int32 MissionId : MissionIds)
     {
@@ -1523,32 +1520,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         AgentSnapshot.ConsecutiveConflictHoldCount = State->ConsecutiveConflictHoldCount;
         AgentSnapshot.ConsecutiveSafetyGateHoldCount = State->ConsecutiveSafetyGateHoldCount;
         AgentSnapshot.PlannedCells = State->PlannedCells;
-
-        const FExecutionStepDecision AlignmentDecision =
-            AlignmentPolicy.Decide(GridMap, AgentSnapshot);
-
-        FExecutionStepProposalBuildInput ProposalBuildInput;
-        ProposalBuildInput.MissionId = MissionId;
-        ProposalBuildInput.ObservedCell = ObservedCell;
-        ProposalBuildInput.bDelayRequested = bDelay;
-        ProposalBuildInput.CurrentPlanIndex = State->ExecutedPlanIndex;
-        ProposalBuildInput.PlannedCellCount = State->PlannedCells.Num();
-
-        const FExecutionStepProposalBuildResult ProposalBuildResult =
-            FExecutionStepProposalBuilder::Build(
-                ProposalBuildInput,
-                AlignmentDecision);
-        if (!ProposalBuildResult.bSuccess)
-        {
-            continue;
-        }
-
-        if (ProposalBuildResult.bRequestsReplan)
-        {
-            RequestedReplanMissionIds.Add(MissionId);
-        }
-
-        StepProposals.Add(MissionId, ProposalBuildResult.Proposal);
+        OrderedAgentSnapshots.Add(MoveTemp(AgentSnapshot));
     }
 
     FExecutionConflictResolutionInput ConflictResolutionInput;
@@ -1575,7 +1547,9 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
 
     FExecutionStepPipelineRequest PipelineRequest;
     PipelineRequest.OrderedMissionIds = MissionIds;
-    PipelineRequest.InitialRequestedReplanMissionIds = RequestedReplanMissionIds;
+    PipelineRequest.OrderedAgentSnapshots = MoveTemp(OrderedAgentSnapshots);
+    PipelineRequest.GridMap = &GridMap;
+    PipelineRequest.AlignmentSettings = BuildDiscreteAlignmentSettings();
     PipelineRequest.ConflictResolutionInput = &ConflictResolutionInput;
     PipelineRequest.ReplanMode = ToExecutionPolicyReplanMode(ExecutionReplanMode);
 
@@ -1637,14 +1611,16 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             LogExecutionFinalSafetyGateEvent(Event, CurrentExecutionTimeStep);
         };
 
-    const FExecutionStepPipelineResult PipelineResult =
+    FExecutionStepPipelineResult PipelineResult =
         FExecutionStepPipeline::Run(
             PipelineRequest,
-            PipelineCallbacks,
-            StepProposals);
+            PipelineCallbacks);
 
-    RequestedReplanMissionIds = PipelineResult.RequestedReplanMissionIds;
-    const TSet<int32> SuccessfulReplanMissionIds =
+    TMap<int32, FExecutionStepProposal>& StepProposals =
+        PipelineResult.StepProposals;
+    const TSet<int32>& RequestedReplanMissionIds =
+        PipelineResult.RequestedReplanMissionIds;
+    const TSet<int32>& SuccessfulReplanMissionIds =
         PipelineResult.SuccessfulReplanMissionIds;
     const bool bReplanSucceeded = PipelineResult.bReplanSucceeded;
     const bool bStopExecutionForSafetyGate = PipelineResult.bStopExecution;

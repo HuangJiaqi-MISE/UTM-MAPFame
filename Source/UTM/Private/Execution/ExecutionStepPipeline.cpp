@@ -38,22 +38,68 @@ namespace
             SyncRequest,
             InOutStepProposals);
     }
+
+    void BuildInitialStepProposals(
+        const FExecutionStepPipelineRequest& Request,
+        FExecutionStepPipelineResult& InOutResult)
+    {
+        if (!Request.GridMap)
+        {
+            return;
+        }
+
+        const FExecutionAlignmentPolicy AlignmentPolicy(Request.AlignmentSettings);
+        for (const FExecutionAgentSnapshot& AgentSnapshot : Request.OrderedAgentSnapshots)
+        {
+            if (AgentSnapshot.PlannedCells.Num() <= 0)
+            {
+                continue;
+            }
+
+            const FExecutionStepDecision AlignmentDecision =
+                AlignmentPolicy.Decide(*Request.GridMap, AgentSnapshot);
+
+            FExecutionStepProposalBuildInput ProposalBuildInput;
+            ProposalBuildInput.MissionId = AgentSnapshot.MissionId;
+            ProposalBuildInput.ObservedCell = AgentSnapshot.ObservedCell;
+            ProposalBuildInput.bDelayRequested = AgentSnapshot.bDelayRequested;
+            ProposalBuildInput.CurrentPlanIndex = AgentSnapshot.ExecutedPlanIndex;
+            ProposalBuildInput.PlannedCellCount = AgentSnapshot.PlannedCells.Num();
+
+            const FExecutionStepProposalBuildResult ProposalBuildResult =
+                FExecutionStepProposalBuilder::Build(
+                    ProposalBuildInput,
+                    AlignmentDecision);
+            if (!ProposalBuildResult.bSuccess)
+            {
+                continue;
+            }
+
+            if (ProposalBuildResult.bRequestsReplan)
+            {
+                InOutResult.RequestedReplanMissionIds.Add(AgentSnapshot.MissionId);
+            }
+
+            InOutResult.StepProposals.Add(
+                AgentSnapshot.MissionId,
+                ProposalBuildResult.Proposal);
+        }
+    }
 }
 
 FExecutionStepPipelineResult FExecutionStepPipeline::Run(
     const FExecutionStepPipelineRequest& Request,
-    const FExecutionStepPipelineCallbacks& Callbacks,
-    TMap<int32, FExecutionStepProposal>& InOutStepProposals)
+    const FExecutionStepPipelineCallbacks& Callbacks)
 {
     FExecutionStepPipelineResult Result;
-    Result.RequestedReplanMissionIds = Request.InitialRequestedReplanMissionIds;
+    BuildInitialStepProposals(Request, Result);
 
     if (Request.ConflictResolutionInput)
     {
         const FExecutionConflictResolutionResult ConflictResolutionResult =
             FExecutionConflictResolutionPolicy::Resolve(
                 *Request.ConflictResolutionInput,
-                InOutStepProposals);
+                Result.StepProposals);
         AddMissionIds(
             ConflictResolutionResult.ReplanMissionIds,
             Result.RequestedReplanMissionIds);
@@ -99,7 +145,7 @@ FExecutionStepPipelineResult FExecutionStepPipeline::Run(
         FExecutionStepReplanCoordinator::Run(
             StepReplanRequest,
             StepReplanCallbacks,
-            InOutStepProposals);
+            Result.StepProposals);
     Result.bReplanSucceeded = StepReplanResult.bSuccess;
     Result.SuccessfulReplanMissionIds = StepReplanResult.ReplannedMissionIds;
 
@@ -139,7 +185,7 @@ FExecutionStepPipelineResult FExecutionStepPipeline::Run(
         FExecutionFinalSafetyGateCoordinator::Run(
             SafetyGateRequest,
             SafetyGateCallbacks,
-            InOutStepProposals);
+            Result.StepProposals);
     AddMissionIds(
         SafetyGateResult.RequestedReplanMissionIds,
         Result.RequestedReplanMissionIds);

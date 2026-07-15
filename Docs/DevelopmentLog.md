@@ -1557,3 +1557,71 @@ Actor 中的适配层现在负责：
 - Final Safety Gate 输入在普通重规划之后构造，避免读取重规划前的旧路径下标或状态。
 - Final Safety Gate 的 Hold 扩张、local/global 升级、最终复检和停止执行规则未修改。
 - `TryExecutionReplan(...)`、attempt timing、路径整合、状态统计、Summary 和 StructuredExperimentJSON 指标定义未修改。
+
+## 2026-07-15 Execution Step Pipeline 第二阶段
+
+### 背景
+
+第一阶段 `FExecutionStepPipeline` 已经统一编排 Conflict Resolution、普通 Step Replan 和 Final Safety Gate，但调用方仍需自行调用 Alignment Policy 与 Proposal Builder，并将预构建的 `StepProposals` 作为可变参数传入。这意味着其他研究者使用执行 Pipeline 时仍需了解内部 Proposal 构造规则，尚未形成完整的执行决策入口。
+
+第二阶段将 Pipeline 左边界扩展到有序的 `FExecutionAgentSnapshot`。Actor 只捕获 UE 观察和 Delay 结果，Alignment 与初始 Proposal 生成移入 Pipeline。
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionStepPipeline.h`
+- `Source/UTM/Private/Execution/ExecutionStepPipeline.cpp`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Pipeline Request 变化
+
+`FExecutionStepPipelineRequest` 新增：
+
+- `OrderedAgentSnapshots`：Actor 按排序 Mission ID 捕获的执行 Agent 快照。
+- `GridMap`：供 Alignment Policy 执行离散对齐。
+- `AlignmentSettings`：由 Actor 的 Details 配置转换得到的纯 Alignment 设置。
+
+原有 `InitialRequestedReplanMissionIds` 已移除。初始重规划请求现在由 Pipeline 根据 Alignment Decision 和 Proposal Builder 结果自行产生。
+
+### Pipeline Result 变化
+
+`FExecutionStepPipelineResult` 新增 `StepProposals`。Pipeline 不再要求调用方提供可变 Proposal Map，而是完整返回经过以下阶段处理的最终 Proposal：
+
+`Ordered Agent Snapshots -> Alignment Policy -> Proposal Builder -> Conflict Resolution -> Ordinary Step Replan -> Final Safety Gate -> Pipeline Result`
+
+### Pipeline 新增职责
+
+`FExecutionStepPipeline::Run(...)` 在原有第一阶段职责之前新增：
+
+1. 按 `OrderedAgentSnapshots` 的顺序逐个调用 `FExecutionAlignmentPolicy::Decide(...)`。
+2. 在 Alignment 前跳过空规划路径，与旧 Actor 的入口保护一致。
+3. 直接从 Agent Snapshot 构造 `FExecutionStepProposalBuildInput`。
+4. 调用 `FExecutionStepProposalBuilder::Build(...)` 生成初始 Proposal。
+5. 跳过 Proposal Builder 返回失败的 Agent，与旧 Actor 流程一致。
+6. 合并 `bRequiresReplan || bInitialAlignmentInvalid` 产生的初始重规划请求。
+7. 将初始 Proposal Map 继续传入 Conflict Resolution、普通 Replan 和 Final Safety Gate。
+
+### Actor 当前职责
+
+`APathPlanningDemoActor::AdvanceExecutionOneStep()` 现在继续负责：
+
+- 更新时间步并按 Mission ID 排序。
+- 从 Drone 或执行状态读取 Observed Cell，并更新 `LastObservedCell` 和 `DisplayFromCell`。
+- 保留 `bCanAdvance && ShouldDelayThisStep(...)` 的原有短路调用，产生 Delay 结果。
+- 将 Actor 状态复制为有序 `FExecutionAgentSnapshot`。
+- 构造 Conflict Resolution 输入和 Pipeline 回调。
+- 调用 Pipeline，并使用其返回的 Proposal Map、重规划集合和停止决定。
+- 计算并提交 State Transition，输出日志、Summary、冲突统计和可视化。
+
+Actor 已不再直接调用 `FExecutionAlignmentPolicy::Decide(...)` 或 `FExecutionStepProposalBuilder::Build(...)`。`AdvanceExecutionOneStep()` 从上一阶段约 269 行进一步降至约 246 行。
+
+### 保守性说明
+
+- Observed Cell 的读取、`LastObservedCell` 和 `DisplayFromCell` 写入位置未修改。
+- Mission ID 排序及 Snapshot 添加顺序保持不变。
+- `ShouldDelayThisStep(...)` 仍只在 Agent 可以前进时调用，调用次数和随机流消费顺序未修改。
+- Alignment Policy 仍按同一 Mission 顺序执行，Settings、GridMap 和 Snapshot 字段保持不变。
+- Proposal Builder 的输入字段、失败跳过条件和初始 replan 条件未修改。
+- Alignment 和 Proposal Builder 均不修改 Actor 状态或 `FRandomStream`；统一移入 Pipeline 不改变后续 Conflict/Safety 输入。
+- Conflict Resolution、普通 Step Replan、Proposal Synchronizer 和 Final Safety Gate 的调用顺序与实现未修改。
+- Final Safety Gate 输入仍在普通重规划及路径写回完成后通过回调重新捕获。
+- State Transition、UE 状态写回、日志、Summary、replan timing 和 StructuredExperimentJSON 指标定义未修改。
