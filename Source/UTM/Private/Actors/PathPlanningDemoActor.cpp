@@ -10,8 +10,10 @@
 
 #include "Execution/ConflictPredictionPolicy.h"
 #include "Execution/ExecutionAlignmentPolicy.h"
+#include "Execution/ExecutionConflictResolutionPolicy.h"
 #include "Execution/ExecutionReplanAttemptRunner.h"
 #include "Execution/ExecutionReplanCoordinator.h"
+#include "Execution/ExecutionStepTypes.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
 #include "Planning/PlannerRegistry.h"
@@ -36,24 +38,6 @@ namespace
     constexpr int32 MaxDebugDrawPathPoints = 2048;
     constexpr int32 MaxSpawnableDronePathPoints = 20000;
 
-    struct FExecutionStepProposal
-    {
-        int32 MissionId = INDEX_NONE;
-        FIntVector ObservedCell = FIntVector::ZeroValue;
-        FIntVector ProposedCell = FIntVector::ZeroValue;
-        int32 ReferencePlanIndex = 0;
-        int32 ProposedPlanIndex = 0;
-        bool bDelayRequested = false;
-        bool bValid = false;
-        bool bRequiresReplan = false;
-        bool bInitialAlignmentInvalid = false;
-        bool bHeldForPredictedConflict = false;
-        bool bHeldForReplan = false;
-        FExecutionStepDecision AlignmentDecision;
-        EExecutionPolicyAction FinalAction = EExecutionPolicyAction::FollowPlan;
-        FString ResolutionReason;
-    };
-
     const TCHAR* LexToString(EExecutionPredictedConflictType Type)
     {
         switch (Type)
@@ -68,6 +52,50 @@ namespace
             return TEXT("Downwash");
         default:
             return TEXT("None");
+        }
+    }
+
+    void LogExecutionConflictResolutionEvent(
+        const FExecutionConflictResolutionEvent& Event,
+        int32 TimeStep)
+    {
+        switch (Event.Type)
+        {
+        case EExecutionConflictResolutionEventType::UnresolvedConflict:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[AlignmentConflictPrediction] t=%d unresolved predicted %s conflict between Mission %d and Mission %d, escalate to replan"),
+                TimeStep,
+                LexToString(Event.Conflict.Type),
+                Event.Conflict.AgentA,
+                Event.Conflict.AgentB);
+            break;
+
+        case EExecutionConflictResolutionEventType::YieldApplied:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[AlignmentConflictPrediction] t=%d Mission=%d hold for predicted %s conflict with Mission=%d at Cell=(%d,%d,%d)"),
+                TimeStep,
+                Event.YieldMissionId,
+                LexToString(Event.Conflict.Type),
+                Event.KeepMissionId,
+                Event.Conflict.Cell.X,
+                Event.Conflict.Cell.Y,
+                Event.Conflict.Cell.Z);
+            break;
+
+        case EExecutionConflictResolutionEventType::RemainingConflict:
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[AlignmentConflictPrediction] t=%d remaining predicted %s conflict between Mission %d and Mission %d after arbitration"),
+                TimeStep,
+                LexToString(Event.Conflict.Type),
+                Event.Conflict.AgentA,
+                Event.Conflict.AgentB);
+            break;
         }
     }
 
@@ -1343,8 +1371,45 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         StepProposals.Add(MissionId, Proposal);
     }
 
-    const FConflictPredictionPolicy ConflictPredictionPolicy;
+    FExecutionConflictResolutionInput ConflictResolutionInput;
+    ConflictResolutionInput.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
+    ConflictResolutionInput.Settings.bEnabled = bEnableConflictAwareAlignment;
+    ConflictResolutionInput.Settings.bCheckStaticUTMSafety = (PlannerType == EPlannerType::LaCAMUTM);
+    ConflictResolutionInput.Settings.MaxResolutionPasses = AlignmentConflictResolutionPasses;
+    ConflictResolutionInput.Settings.ConflictHoldThresholdForReplan =
+        AlignmentConflictHoldThresholdForReplan;
 
+    for (const int32 MissionId : MissionIds)
+    {
+        const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+        if (!State)
+        {
+            continue;
+        }
+
+        FExecutionConflictResolutionAgentState AgentState;
+        AgentState.bFinished = State->bFinished;
+        AgentState.ConsecutiveConflictHoldCount = State->ConsecutiveConflictHoldCount;
+        ConflictResolutionInput.AgentStatesByMissionId.Add(MissionId, AgentState);
+    }
+
+    const FExecutionConflictResolutionResult ConflictResolutionResult =
+        FExecutionConflictResolutionPolicy::Resolve(ConflictResolutionInput, StepProposals);
+    for (const int32 MissionId : ConflictResolutionResult.ReplanMissionIds)
+    {
+        RequestedReplanMissionIds.Add(MissionId);
+    }
+
+    if (bLogConflictPredictionEvents)
+    {
+        for (const FExecutionConflictResolutionEvent& Event : ConflictResolutionResult.Events)
+        {
+            LogExecutionConflictResolutionEvent(Event, CurrentExecutionTimeStep);
+        }
+    }
+
+    // Final Safety Gate remains in the Actor and rechecks the proposals after any replan.
+    const FConflictPredictionPolicy ConflictPredictionPolicy;
     auto BuildConflictPredictionInput =
         [&]() -> FExecutionConflictPredictionInput
         {
@@ -1372,14 +1437,6 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             return Input;
         };
 
-    auto FindFirstPredictedConflict =
-        [&](FExecutionPredictedConflict& OutConflict) -> bool
-        {
-            return ConflictPredictionPolicy.FindFirstConflict(
-                BuildConflictPredictionInput(),
-                OutConflict);
-        };
-
     auto CollectProposalConflictEndpoints =
         [&](TSet<int32>& OutMissionIds, FExecutionPredictedConflict& OutFirstConflict) -> bool
         {
@@ -1401,168 +1458,6 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
 
             return bFoundConflict;
         };
-
-    auto ChooseYieldingMissionId =
-        [&](const FExecutionStepProposal& ProposalA,
-            const FExecutionStepProposal& ProposalB) -> int32
-        {
-            const bool bAStays = (ProposalA.ProposedCell == ProposalA.ObservedCell);
-            const bool bBStays = (ProposalB.ProposedCell == ProposalB.ObservedCell);
-            if (bAStays != bBStays)
-            {
-                return bAStays ? ProposalB.MissionId : ProposalA.MissionId;
-            }
-
-            const FExecutionAgentState* StateA = ExecutionStates.Find(ProposalA.MissionId);
-            const FExecutionAgentState* StateB = ExecutionStates.Find(ProposalB.MissionId);
-            const bool bAGoalHold = StateA && (StateA->bFinished || ProposalA.FinalAction == EExecutionPolicyAction::GoalHold);
-            const bool bBGoalHold = StateB && (StateB->bFinished || ProposalB.FinalAction == EExecutionPolicyAction::GoalHold);
-            if (bAGoalHold != bBGoalHold)
-            {
-                return bAGoalHold ? ProposalB.MissionId : ProposalA.MissionId;
-            }
-
-            return ProposalA.MissionId > ProposalB.MissionId
-                ? ProposalA.MissionId
-                : ProposalB.MissionId;
-        };
-
-    if (bEnableConflictAwareAlignment && StepProposals.Num() > 1)
-    {
-        const int32 MaxPasses = FMath::Max(1, AlignmentConflictResolutionPasses);
-        bool bNeedsAnotherPass = true;
-
-        for (int32 Pass = 0; Pass < MaxPasses && bNeedsAnotherPass; ++Pass)
-        {
-            bNeedsAnotherPass = false;
-
-            FExecutionPredictedConflict Conflict;
-            if (!FindFirstPredictedConflict(Conflict))
-            {
-                break;
-
-            }
-
-            FExecutionStepProposal* ProposalA = StepProposals.Find(Conflict.AgentA);
-            FExecutionStepProposal* ProposalB = StepProposals.Find(Conflict.AgentB);
-            if (!ProposalA || !ProposalB)
-            {
-                RequestedReplanMissionIds.Add(Conflict.AgentA);
-                RequestedReplanMissionIds.Add(Conflict.AgentB);
-                break;
-            }
-
-            const int32 YieldMissionId = ChooseYieldingMissionId(*ProposalA, *ProposalB);
-            FExecutionStepProposal* YieldProposal = StepProposals.Find(YieldMissionId);
-            const int32 KeepMissionId = (YieldMissionId == Conflict.AgentA) ? Conflict.AgentB : Conflict.AgentA;
-
-            if (!YieldProposal)
-            {
-                RequestedReplanMissionIds.Add(Conflict.AgentA);
-                RequestedReplanMissionIds.Add(Conflict.AgentB);
-                break;
-
-            }
-
-            const bool bAlreadyHolding =
-                (YieldProposal->ProposedCell == YieldProposal->ObservedCell) &&
-                (YieldProposal->FinalAction == EExecutionPolicyAction::HoldForPredictedConflict);
-
-            if (bAlreadyHolding)
-            {
-                RequestedReplanMissionIds.Add(Conflict.AgentA);
-                RequestedReplanMissionIds.Add(Conflict.AgentB);
-
-                if (bLogConflictPredictionEvents)
-                {
-                    UE_LOG(
-                        LogTemp,
-                        Warning,
-                        TEXT("[AlignmentConflictPrediction] t=%d unresolved predicted %s conflict between Mission %d and Mission %d, escalate to replan"),
-                        CurrentExecutionTimeStep,
-                        LexToString(Conflict.Type),
-                        Conflict.AgentA,
-                        Conflict.AgentB);
-                }
-                break;
-            }
-
-            YieldProposal->ProposedCell = YieldProposal->ObservedCell;
-            YieldProposal->ProposedPlanIndex = YieldProposal->ReferencePlanIndex;
-            YieldProposal->bHeldForPredictedConflict = true;
-            YieldProposal->FinalAction = EExecutionPolicyAction::HoldForPredictedConflict;
-            YieldProposal->ResolutionReason = FString::Printf(
-                TEXT("yield to Mission %d for predicted %s conflict"),
-                KeepMissionId,
-                LexToString(Conflict.Type));
-
-            if (bLogConflictPredictionEvents)
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[AlignmentConflictPrediction] t=%d Mission=%d hold for predicted %s conflict with Mission=%d at Cell=(%d,%d,%d)"),
-                    CurrentExecutionTimeStep,
-                    YieldProposal->MissionId,
-                    LexToString(Conflict.Type),
-                    KeepMissionId,
-                    Conflict.Cell.X,
-                    Conflict.Cell.Y,
-                    Conflict.Cell.Z);
-
-
-
-
-
-
-
-
-
-
-            }
-
-            bNeedsAnotherPass = true;
-        }
-
-        FExecutionPredictedConflict RemainingConflict;
-        if (FindFirstPredictedConflict(RemainingConflict))
-        {
-            RequestedReplanMissionIds.Add(RemainingConflict.AgentA);
-            RequestedReplanMissionIds.Add(RemainingConflict.AgentB);
-
-
-
-            if (bLogConflictPredictionEvents)
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[AlignmentConflictPrediction] t=%d remaining predicted %s conflict between Mission %d and Mission %d after arbitration"),
-                    CurrentExecutionTimeStep,
-                    LexToString(RemainingConflict.Type),
-                    RemainingConflict.AgentA,
-                    RemainingConflict.AgentB);
-
-
-            }
-        }
-
-        const int32 ConflictHoldBudget = FMath::Max(1, AlignmentConflictHoldThresholdForReplan);
-        for (const int32 MissionId : MissionIds)
-        {
-            const FExecutionStepProposal* Proposal = StepProposals.Find(MissionId);
-            const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-            if (!Proposal || !State || !Proposal->bHeldForPredictedConflict)
-            {
-                continue;
-            }
-
-            if (State->ConsecutiveConflictHoldCount + 1 >= ConflictHoldBudget)
-            {
-                RequestedReplanMissionIds.Add(MissionId);
-            }
-        }
-    }
 
     TSet<int32> SuccessfulReplanMissionIds;
     bool bReplanSucceeded = false;

@@ -1122,3 +1122,60 @@ Actor 继续通过回调负责：
 - Runner、PostCheck 日志、targeted retry、成功写回和成功日志仍位于 attempt 计时作用域内。
 - 原有 `[AlignmentReplan]` 日志模板逐项比对一致。
 - 没有修改 JSON 字段或 execution replan timing 指标定义。
+
+## 2026-07-15 Execution Conflict Resolution Policy 抽取
+
+### 背景
+
+执行对齐已经通过 `FExecutionAlignmentPolicy` 生成单步 proposal，但 `APathPlanningDemoActor::AdvanceExecutionOneStep()` 仍然直接负责预测冲突后的让行选择、多轮冲突消解和连续 Hold 触发重规划。这部分属于可替换的执行期冲突仲裁策略，不需要 UE 场景对象。
+
+本轮只拆冲突仲裁，Final Safety Gate 继续保留在 Actor 中。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionStepTypes.h`
+- `Source/UTM/Public/Execution/ExecutionConflictResolutionPolicy.h`
+- `Source/UTM/Private/Execution/ExecutionConflictResolutionPolicy.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 当前职责划分
+
+`FExecutionStepProposal` 已从 Actor `.cpp` 的匿名命名空间外移到 `ExecutionStepTypes.h`，作为 Alignment、冲突仲裁、重规划和 Safety Gate 之间共享的单步 proposal 数据结构。
+
+`FExecutionConflictResolutionPolicy::Resolve(...)` 现在负责：
+
+- 将当前 proposals 转换为统一的 conflict prediction input。
+- 复用 `FConflictPredictionPolicy` 检查 vertex、edge 和可选 UTM 静态安全冲突。
+- 按原规则选择 yielding mission：优先让移动方避让静止方，再保护 finished/GoalHold，最后由较大 Mission ID 让行。
+- 在配置的 resolution passes 内重复执行冲突消解。
+- 将 yielding proposal 改成 `HoldForPredictedConflict`。
+- 无法继续消解或仍有剩余冲突时返回需要重规划的 Mission ID。
+- 根据连续 conflict hold 次数和阈值触发重规划请求。
+- 返回结构化事件，由 Actor 输出原有日志。
+
+`APathPlanningDemoActor::AdvanceExecutionOneStep()` 现在负责：
+
+- 从 `ExecutionStates` 构造轻量 agent 完成状态和连续 Hold 计数。
+- 调用 `FExecutionConflictResolutionPolicy::Resolve(...)`。
+- 将 Policy 返回的 Mission ID 合并到已有 alignment replan 请求。
+- 根据返回事件输出 `[AlignmentConflictPrediction]` 日志。
+
+### Final Safety Gate 保持不变
+
+- `CollectProposalConflictEndpoints(...)` 仍然留在 Actor。
+- Safety Gate Hold 集合扩张逻辑未移动。
+- Safety Gate local/global replan 和失败停止逻辑未移动。
+- Safety Gate 仍会在普通冲突仲裁和可能的重规划之后重新检查最终 proposals。
+
+### 保守性说明
+
+- proposal conflict item 仍按排序后的 Mission ID 构造。
+- 冲突预测时仍将 proposal item 标记为 valid。
+- yielding mission 的选择顺序和 Mission ID tie-break 未修改。
+- resolution pass 上限仍使用 `Max(1, AlignmentConflictResolutionPasses)`。
+- conflict hold 阈值仍使用 `State.ConsecutiveConflictHoldCount + 1` 判断。
+- `ResolutionReason` 文本和三种 `[AlignmentConflictPrediction]` 日志模板保持不变。
+- 没有修改随机延迟、Alignment Policy、Execution Replan Coordinator 或 Final Safety Gate。
