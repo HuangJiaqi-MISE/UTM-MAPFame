@@ -16,7 +16,7 @@
 #include "Execution/ExecutionReplanCoordinator.h"
 #include "Execution/ExecutionReplanPathIntegrator.h"
 #include "Execution/ExecutionReplanProposalSynchronizer.h"
-#include "Execution/ExecutionStateTransition.h"
+#include "Execution/ExecutionStepResultApplier.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
@@ -478,6 +478,35 @@ namespace
         TransitionState.ConsecutiveConflictHoldCount = State.ConsecutiveConflictHoldCount;
         TransitionState.ConsecutiveSafetyGateHoldCount = State.ConsecutiveSafetyGateHoldCount;
         return TransitionState;
+    }
+
+    TMap<int32, FExecutionStepResultApplyAgentState>
+        CaptureExecutionStepResultApplyAgentStates(
+            const TArray<int32>& OrderedMissionIds,
+            const TMap<int32, FExecutionAgentState>& ExecutionStates)
+    {
+        TMap<int32, FExecutionStepResultApplyAgentState> AgentStatesByMissionId;
+        AgentStatesByMissionId.Reserve(OrderedMissionIds.Num());
+
+        for (const int32 MissionId : OrderedMissionIds)
+        {
+            const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+            if (!State)
+            {
+                continue;
+            }
+
+            FExecutionStepResultApplyAgentState AgentState;
+            AgentState.CurrentState = CaptureExecutionStateTransitionState(*State);
+            AgentState.PlannedCellCount = State->PlannedCells.Num();
+            if (AgentState.PlannedCellCount > 0)
+            {
+                AgentState.FinalPlannedCell = State->PlannedCells.Last();
+            }
+            AgentStatesByMissionId.Add(MissionId, MoveTemp(AgentState));
+        }
+
+        return AgentStatesByMissionId;
     }
 
     void CommitExecutionStateTransition(
@@ -1630,16 +1659,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             ControllerRequest,
             ControllerCallbacks);
 
-    TMap<int32, FExecutionStepProposal>& StepProposals =
-        ControllerResult.StepProposals;
-    const TSet<int32>& RequestedReplanMissionIds =
-        ControllerResult.RequestedReplanMissionIds;
-    const TSet<int32>& SuccessfulReplanMissionIds =
-        ControllerResult.SuccessfulReplanMissionIds;
-    const bool bReplanSucceeded = ControllerResult.bReplanSucceeded;
-    const bool bStopExecutionForSafetyGate = ControllerResult.bStopExecution;
-
-    if (bStopExecutionForSafetyGate)
+    if (ControllerResult.bStopExecution)
     {
         bExecutionRunning = false;
         BuildExecutionSummary();
@@ -1650,34 +1670,28 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         return;
     }
 
-    bool bAnyActive = false;
+    FExecutionStepResultApplyRequest ApplyRequest;
+    ApplyRequest.OrderedMissionIds = MissionIds;
+    ApplyRequest.AgentStatesByMissionId =
+        CaptureExecutionStepResultApplyAgentStates(MissionIds, ExecutionStates);
+    const FExecutionStepResultApplyResult ApplyResult =
+        FExecutionStepResultApplier::Apply(ApplyRequest, ControllerResult);
 
-    for (const int32 MissionId : MissionIds)
+    for (const FExecutionStepAppliedAgent& AppliedAgent : ApplyResult.AppliedAgents)
     {
+        const int32 MissionId = AppliedAgent.MissionId;
         FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-        FExecutionStepProposal* Proposal = StepProposals.Find(MissionId);
-        if (!State || State->PlannedCells.Num() <= 0 || !Proposal)
+        const FExecutionStepProposal* Proposal =
+            ControllerResult.StepProposals.Find(MissionId);
+        if (!State || !Proposal)
         {
             continue;
         }
 
-        const bool bReplanRequestedForState =
-            RequestedReplanMissionIds.Contains(MissionId) ||
-            SuccessfulReplanMissionIds.Contains(MissionId);
-        const bool bReplannedForState = SuccessfulReplanMissionIds.Contains(MissionId);
-
-        FExecutionStateTransitionInput TransitionInput;
-        TransitionInput.CurrentState = CaptureExecutionStateTransitionState(*State);
-        TransitionInput.PlannedCellCount = State->PlannedCells.Num();
-        TransitionInput.FinalPlannedCell = State->PlannedCells.Last();
-        TransitionInput.bReplanRequestedForState = bReplanRequestedForState;
-        TransitionInput.bOriginallyRequestedForReplan = RequestedReplanMissionIds.Contains(MissionId);
-        TransitionInput.bReplannedForState = bReplannedForState;
-        TransitionInput.bReplanSucceeded = bReplanSucceeded;
-
-        const FExecutionStateTransitionResult TransitionResult =
-            FExecutionStateTransition::Compute(TransitionInput, *Proposal);
-        CommitExecutionStateTransition(*State, *Proposal, TransitionResult);
+        CommitExecutionStateTransition(
+            *State,
+            *Proposal,
+            AppliedAgent.TransitionResult);
 
         if (Proposal->bDelayRequested && bLogExecutionDelay)
         {
@@ -1714,19 +1728,14 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                 Proposal->ProposedCell.Z,
                 Proposal->AlignmentDecision.SpatialErrorCells,
                 Proposal->AlignmentDecision.TemporalErrorSteps,
-                bReplanRequestedForState ? TEXT("true") : TEXT("false"),
+                AppliedAgent.bReplanRequestedForState ? TEXT("true") : TEXT("false"),
                 *Proposal->ResolutionReason);
-        }
-
-        if (!State->bFinished)
-        {
-            bAnyActive = true;
         }
     }
 
     DetectExecutionConflictsAtStep(CurrentExecutionTimeStep);
 
-    if (!bAnyActive)
+    if (!ApplyResult.bAnyActive)
     {
         bExecutionRunning = false;
         UpdateExecutionVisuals(1.f);

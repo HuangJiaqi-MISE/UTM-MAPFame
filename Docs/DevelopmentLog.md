@@ -1691,3 +1691,63 @@ Actor 新增 `BuildExecutionRuntimeConfig()`，只在 UE 配置边界读取 Deta
 - State Transition、UE 对象写回、停止执行、Summary、冲突统计和可视化流程未修改。
 - 本轮没有新增或修改 StructuredExperimentJSON 字段。
 - UTMEditor Win64 Development 编译通过，后续使用原有 N200 参数实验进行行为回归。
+
+## 2026-07-15 Execution Step Result Applier 抽取
+
+### 背景
+
+Execution Controller 已经统一输出本时间步的 Proposal、重规划请求/成功集合和停止决定，但 `APathPlanningDemoActor::AdvanceExecutionOneStep()` 仍逐 Mission 解释这些集合、构造 `FExecutionStateTransitionInput`、调用单 Agent State Transition，并汇总是否仍有 Agent 未完成。这些规则属于 Benchmark 固定的结果提交语义，不应隐藏在 UE Actor 中，也不应由不同 Controller 各自实现。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionStepResultApplier.h`
+- `Source/UTM/Private/Execution/ExecutionStepResultApplier.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Applier 当前职责
+
+`FExecutionStepResultApplier::Apply(...)` 现在负责：
+
+- 按调用方提供的有序 Mission ID 逐 Agent 处理，保持确定性顺序。
+- 跳过缺少轻量状态、规划路径为空或缺少 Proposal 的 Mission。
+- 统一计算 `RequestedReplanMissionIds` 与 `SuccessfulReplanMissionIds` 对单 Agent 状态的含义。
+- 构造标准 `FExecutionStateTransitionInput`。
+- 调用 `FExecutionStateTransition::Compute(...)` 计算每个 Agent 的下一状态。
+- 返回有序的 `FExecutionStepAppliedAgent` 结果，其中包含 Mission ID、重规划标志和 Transition Result。
+- 根据所有成功应用的下一状态统一计算 `bAnyActive`。
+
+因此模块层级现在为：
+
+`Execution Controller -> Execution Step Result Applier -> Single-Agent State Transition`
+
+Controller 决定本步动作，Applier 固定整个时间步的批量提交规则，State Transition 固定单 Agent 的状态更新规则。
+
+### Actor 当前职责
+
+Actor 在 Controller 完成及可能的重规划路径写回后，捕获最新的轻量状态、路径长度和最终路径格子，再调用 Applier。Applier 返回后，Actor 继续负责：
+
+- 将纯 Transition Result 写回 `FExecutionAgentState`。
+- 更新 `DisplayToCell`、`ActualCells` 和 `LastAlignmentAction`。
+- 输出原有 Execution Delay 与 Alignment 日志。
+- 执行冲突统计、结束判断、Summary 和可视化。
+
+`FExecutionAgentState` 仍保留在 Actor 层，因为它包含 `TObjectPtr<ADroneActor>` 和 UE 反射字段。Applier 不依赖 `APathPlanningDemoActor`、`ADroneActor`、`UWorld`、`DrawDebug` 或 `UPROPERTY`。
+
+### Benchmark 边界
+
+`ExecutionStepResultApplier` 是固定的 Benchmark Host 组件，不是新的执行算法，也不是 Controller Registry 中的可替换策略。其他研究者只需让 Controller 输出统一 Proposal 和重规划集合；平台始终使用同一个 Applier 更新路径进度、完成状态和统计字段，保证不同执行算法使用相同实验口径。
+
+### 保守性说明
+
+- Controller、Conflict Resolution、普通 Replan 和 Final Safety Gate 的执行顺序未修改。
+- Safety Gate 要求停止执行时仍在应用任何 Transition 前生成 Summary 并返回。
+- Applier 的轻量状态在 Controller 和重规划完成后捕获，继续使用可能已更新的路径长度、终点和执行下标。
+- Mission 处理顺序、空路径/缺少 Proposal 的跳过条件保持不变。
+- 请求重规划标志仍等于 requested 与 successful 集合的并集；originally requested 和 replanned 标志保持原定义。
+- 单 Agent 状态计算仍复用原 `FExecutionStateTransition::Compute(...)`，字段更新和完成判断未修改。
+- Delay 与 Alignment 日志仍在 UE 状态提交后按相同条件和顺序输出。
+- 冲突统计、执行结束处理、Summary、可视化和 StructuredExperimentJSON 指标定义未修改。
+- UTMEditor Win64 Development 编译通过，后续使用原有 N200 参数实验进行行为回归。
