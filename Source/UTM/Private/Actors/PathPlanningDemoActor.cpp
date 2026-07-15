@@ -13,6 +13,7 @@
 #include "Execution/ExecutionFinalSafetyGateCoordinator.h"
 #include "Execution/ExecutionReplanAttemptRunner.h"
 #include "Execution/ExecutionReplanCoordinator.h"
+#include "Execution/ExecutionReplanPathIntegrator.h"
 #include "Execution/ExecutionStateTransition.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "Planning/MissionSchedulerRegistry.h"
@@ -2840,40 +2841,36 @@ bool APathPlanningDemoActor::ApplyExecutionReplanAttemptResult(
         FExecutionAgentState* State = ExecutionStates.Find(MissionId);
         const FDroneMissionConfig* MissionConfig = ExecutionMissionConfigsByMissionId.Find(MissionId);
         const TArray<FIntVector>* ReplannedCellPath = Result.ReplannedCellPathsByMission.Find(MissionId);
-        if (!State || !MissionConfig || !ReplannedCellPath || ReplannedCellPath->Num() <= 0)
+        if (!State || !MissionConfig || !ReplannedCellPath)
         {
             return false;
         }
 
-        TArray<FIntVector> TimelineCells = State->ActualCells;
-        if (TimelineCells.Num() <= 0 || TimelineCells.Last() != State->LastObservedCell)
+        const FExecutionReplanPathIntegrationResult IntegrationResult =
+            FExecutionReplanPathIntegrator::Integrate(
+                State->ActualCells,
+                State->LastObservedCell,
+                *ReplannedCellPath);
+        if (!IntegrationResult.bSuccess)
         {
-            TimelineCells.Add(State->LastObservedCell);
-        }
-
-        // Reserve the current execution step for the replan hold itself.
-        TimelineCells.Add(State->LastObservedCell);
-
-        for (int32 Index = 1; Index < ReplannedCellPath->Num(); ++Index)
-        {
-            TimelineCells.Add((*ReplannedCellPath)[Index]);
+            return false;
         }
 
         TArray<FVector> TimelineWorld;
-        TimelineWorld.Reserve(TimelineCells.Num());
-        for (const FIntVector& Cell : TimelineCells)
+        TimelineWorld.Reserve(IntegrationResult.TimelineCells.Num());
+        for (const FIntVector& Cell : IntegrationResult.TimelineCells)
         {
             TimelineWorld.Add(GridMap.CellToWorld(Cell));
         }
 
-        State->PlannedCells = TimelineCells;
-        State->ExecutedPlanIndex = FMath::Max(0, State->ActualCells.Num() - 1);
-        State->GoalCell = ReplannedCellPath->Last();
+        State->PlannedCells = IntegrationResult.TimelineCells;
+        State->ExecutedPlanIndex = IntegrationResult.ExecutedPlanIndex;
+        State->GoalCell = IntegrationResult.GoalCell;
         State->GoalWorld = MissionConfig->GoalWorld;
         State->ConsecutiveConflictHoldCount = 0;
         State->bAlignmentLost = false;
 
-        PlannedCellPathsByMission.Add(MissionId, TimelineCells);
+        PlannedCellPathsByMission.Add(MissionId, IntegrationResult.TimelineCells);
         LastPlannedPathsByMission.Add(MissionId, TimelineWorld);
         OutReplannedMissionIds.Add(MissionId);
     }

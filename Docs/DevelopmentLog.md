@@ -1336,3 +1336,49 @@ Actor 中的适配层现在负责：
 - 最终冲突复检仍发生在 proposal 同步之后，并检查全部 Mission proposals。
 - 日志仍由 Actor 输出，9 条日志模板、级别和触发顺序保持不变。
 - Summary、状态提交、随机延迟、replan timing 和 JSON 指标定义未修改。
+
+## 2026-07-15 Execution Replan Path Integrator 抽取
+
+### 背景
+
+`APathPlanningDemoActor::ApplyExecutionReplanAttemptResult(...)` 在收到成功的 replanned cell path 后，仍直接拼接实际执行轨迹、当前观测位置、replan Hold 时间步和新的规划路径。该时间线拼接规则属于执行期重规划语义，不需要访问 UE 场景对象或 Actor 路径缓存。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionReplanPathIntegrator.h`
+- `Source/UTM/Private/Execution/ExecutionReplanPathIntegrator.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Integrator 当前职责
+
+`FExecutionReplanPathIntegrator::Integrate(...)` 现在负责：
+
+- 复制当前 `ActualCells` 作为新的执行时间线前缀。
+- 当实际轨迹末尾不是 `LastObservedCell` 时补入当前观测位置。
+- 再加入一次 `LastObservedCell`，保留当前 execution replan Hold 时间步。
+- 从下标 1 开始追加 replanned cell path，避免重复加入其起点。
+- 按旧规则使用 `Max(0, ActualCells.Num() - 1)` 计算新的 `ExecutedPlanIndex`。
+- 使用 replanned cell path 的最后一个单元格作为 `GoalCell`。
+- 对空 replanned path 返回失败，不产生可应用结果。
+
+### Actor 继续保留的职责
+
+- 校验 Mission 对应的 `FExecutionAgentState`、Mission 配置和 replanned path 是否存在。
+- 调用 Integrator 并处理失败结果。
+- 使用 `GridMap.CellToWorld(...)` 生成 world timeline。
+- 更新 `FExecutionAgentState`、`PlannedCellPathsByMission` 和 `LastPlannedPathsByMission`。
+- 重置 conflict Hold 和 Alignment Lost 状态，并记录成功重规划的 Mission ID。
+
+### 保守性说明
+
+- 仍按 `Result.CandidateMissionIds` 原顺序逐 Mission 计算并立即写回，没有改成批量事务提交。
+- `LastObservedCell` 的条件补入规则保持不变。
+- replan Hold 使用的重复观测单元格是时间轴等待动作，没有使用 `AddUnique()` 去重。
+- replanned cell path 仍从下标 1 开始追加。
+- `ExecutedPlanIndex` 没有改为根据新 timeline 长度重新计算。
+- world 坐标转换、Actor 状态字段和路径缓存写入顺序保持不变。
+- `PathMergePolicy` 本轮未修改、未删除，也没有接入执行期时间线整合流程。
+- Replan Runner、Coordinator、attempt 计时、状态统计和 JSON 指标定义未修改。
