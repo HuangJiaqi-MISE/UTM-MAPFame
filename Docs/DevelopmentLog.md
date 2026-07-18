@@ -1897,3 +1897,149 @@ EUW Blueprint 仍以原方式持有并调用 `APathPlanningDemoActor`。`Mission
 5. 执行 Validate Missions，确认合法任务、重复 ID/Start/Goal 日志正常。
 6. 执行 Clear Mission Markers，确认 Marker 全部删除且删除数量日志正确。
 7. 再运行一次原 N200 参数实验，确认 Editor Service 拆分没有影响运行期规划和执行流程。
+
+## 2026-07-18 No-Fly Zone Editor Service 拆分
+
+### 背景
+
+`APathPlanningDemoActor` 原本直接实现 No-Fly Zone Config 新增与随机生成、Marker 查找/生成/清理、Marker 回读以及配置校验。为继续减轻 Actor 职责，本轮只拆分 No-Fly Zone 编辑逻辑；City Editor 保持原状，等待本轮 6 个 EUW 接口回归通过后再单独迁移。
+
+### 新增文件
+
+- `Source/UTM/Public/EditorServices/NoFlyZoneEditorService.h`
+- `Source/UTM/Private/EditorServices/NoFlyZoneEditorService.cpp`
+
+### 修改文件
+
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### No-Fly Zone Editor Service
+
+`FNoFlyZoneEditorService` 现在负责：
+
+- 根据 Grid 中心、默认尺寸和默认持续时间新增 No-Fly Zone Config。
+- 按 `NoFlyZoneMarker` Tag 查找并清理 Marker。
+- 规范化并限制 Min/Max Cell 后，按 Config 生成 Marker、设置 Owner、Tag、Box Extent 和显示状态。
+- 将 Marker 的位置与 Box Extent 转换回 Grid Cell，回写并按 Zone ID 排序 NoFlyZoneConfigs。
+- 校验重复 Zone ID、Grid 边界、时间窗口以及区域中的阻塞 Cell 数量。
+- 使用固定随机种子和原有尝试次数生成包含至少一个可用 Cell 的随机 No-Fly Zone Config。
+
+服务通过按操作划分的 Request 接收 World、Grid、Marker Class、NoFlyZoneConfigs 和 Details 参数，不包含或反向依赖 `APathPlanningDemoActor`。服务本身仍是 UE-aware Editor Service，可以使用 `UWorld`、Actor、Component 和 Spawn API。
+
+### EUW 稳定门面
+
+以下 6 个 Actor `UFUNCTION(BlueprintCallable, Category = "No-Fly Zone Editor")` 的名称、签名、Category 和所有权保持不变：
+
+- `EditorGenerateRandomNoFlyZoneConfigs()`
+- `EditorAddNoFlyZoneConfig()`
+- `EditorSpawnNoFlyZoneMarkers()`
+- `EditorClearNoFlyZoneMarkers()`
+- `EditorReadNoFlyZoneMarkersToConfigs()`
+- `EditorValidateNoFlyZones()`
+
+EUW 仍调用原 Actor 接口。Actor 负责读取自身 `UPROPERTY`、在需要时先调用 `EditorBuildGridForMissionEditing()`，然后组装 Request 并转发给 Service；因此无需修改 EUW Blueprint 资源。
+
+### 保守性说明
+
+- Add 操作仍使用当前最大 Zone ID 加 1，并保留原 Grid 中心、默认尺寸和时间窗口计算。
+- Spawn 操作仍先检查 Marker Class 和 World，再清理旧 Marker；Config 遍历顺序、Cell 规范化、位置偏移、Collision Handling 和 `UpdateVisual()` 调用未修改。
+- Clear 和 Read 仍只处理带 `NoFlyZoneMarker` Tag 的 Marker。
+- Read 仍扣除 `MarkerZOffset`、按半 Cell 修正 Box 边界、限制到 Grid，并按 Zone ID 排序。
+- Validate 和随机生成仍先通过原 Actor 接口构建 Grid。
+- 随机生成仍使用相同 `FRandomStream` 种子、RandRange 调用顺序、每个 Zone 最多 200 次尝试以及至少一个 Free Cell 的接受条件。
+- 原 No-Fly Zone 日志文本和主要输出时机保持不变。
+- City Editor 的函数、属性和实现未修改。
+
+### EUW 手动回归清单
+
+1. 执行 Generate Random No-Fly Zones，使用固定种子确认数量、Cell 范围和时间窗口可重复。
+2. 执行 Add No-Fly Zone，确认新增 Zone ID、默认区域和时间窗口正确。
+3. 执行 Spawn No-Fly Zone Markers，确认每个 Config 生成对应 Marker，位置与 Box 尺寸正确。
+4. 移动或缩放 Marker 后执行 Read No-Fly Zone Markers，确认 Config 回写、Grid 对齐和 Zone ID 排序正确。
+5. 执行 Validate No-Fly Zones，确认正常配置及重复 ID、越界、无效时间窗口日志与原版本一致。
+6. 执行 Clear No-Fly Zone Markers，确认带目标 Tag 的 Marker 全部清理且删除数量日志正确。
+7. 六个接口通过后，再运行原 N200 参数实验，确认规划和执行流程未受 Editor Service 拆分影响。
+
+### 回归结果
+
+- 2026-07-18：上述 6 个 No-Fly Zone EUW 接口已依次完成人工测试，未发现异常。在该稳定基础上继续拆分 City Editor Service。
+
+## 2026-07-18 City Editor Service 拆分
+
+### 背景
+
+`APathPlanningDemoActor` 原本直接负责清理城市建筑、加载 Cube Mesh、设置 Static Mesh/碰撞/缩放，并实现 Manhattan、Residential、Industrial 和 Mixed 四种布局的随机生成循环。为继续减轻 Benchmark Host 的 UE 编辑器职责，本轮将这些实现迁入独立的 UE-aware City Editor Service，同时保留 Actor 上的原 EUW 门面和实验元数据状态。
+
+### 新增文件
+
+- `Source/UTM/Public/EditorServices/CityEditorService.h`
+- `Source/UTM/Private/EditorServices/CityEditorService.cpp`
+
+### 修改文件
+
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### City Editor Service
+
+`FCityEditorGenerateRequest` 显式保存一次城市生成所需的输入：World、Grid Origin、City Seed、Block 数量与尺寸、Road Width，以及建筑 Width/Depth/Height 范围。它不包含或反向依赖 `APathPlanningDemoActor`。
+
+`FCityEditorService` 现在负责：
+
+- 按 `CityBuilding` Tag 遍历并清理城市建筑 Actor。
+- Spawn `AStaticMeshActor`，加载原 Engine Cube Mesh，设置 Static Mobility、BlockAll 碰撞和 Actor Scale。
+- 使用固定 City Seed 生成 Manhattan 布局。
+- 使用固定 City Seed 生成 Residential 布局。
+- 使用固定 City Seed 生成 Industrial 布局。
+- 使用固定 City Seed 为每个 Block 选择子区域类型并生成 Mixed 布局。
+
+Service 可以直接依赖 `UWorld`、`AStaticMeshActor`、`UStaticMeshComponent` 和 UE Spawn/LoadObject API，因为它属于 Editor Services，而不是纯算法模块；但它不持有 Actor 状态，所有生成输入都由 Request 提供。
+
+### Actor 保留职责
+
+Actor 继续负责：
+
+- 保留 Details 面板中的全部 City Generator `UPROPERTY`。
+- 保留各 EUW 入口原有的 World、Block Count 和 Manhattan Block Size 校验。
+- 在生成前写回 `CityLayoutType`，确保后续 Planning Stats 和 StructuredExperimentJSON 的 `map_type` 行为不变。
+- 根据 `bAutoRebuildGridAfterCityGenerate` 调用原 `EditorBuildGridForMissionEditing()`。
+- 保留各布局生成完成的原 EUW 日志。
+
+Actor 内原 `SpawnCityBuilding(...)` 和四个 `GenerateCityLayout_*()` 私有函数已删除。Actor 的城市生成入口现在只负责构造 Request、维持 Host 状态和编排 Service。
+
+### EUW 稳定门面
+
+以下 5 个 Actor `UFUNCTION(BlueprintCallable, Category = "City Generator")` 的名称、签名、Category 和所有权保持不变：
+
+- `EditorGenerateManhattanCity()`
+- `EditorGenerateResidentialDistrict()`
+- `EditorGenerateIndustrialPark()`
+- `EditorGenerateMixedUrbanArea()`
+- `EditorClearCityEnvironment()`
+
+EUW Blueprint 仍以原方式调用 `APathPlanningDemoActor`，无需修改现有 EUW 资源。
+
+### 保守性说明
+
+- 每种布局仍在生成前清理带 `CityBuilding` Tag 的旧建筑。
+- `FRandomStream` 仍在清理后使用相同 `CitySeed` 构造。
+- 四种布局的 Block 遍历顺序、BuildingCount 范围、尺寸缩放系数、Margin、位置随机顺序和 Z 中心计算未修改。
+- 原实现与新 Service 中的随机调用结构均为 7 处 `RandRange` 和 20 处 `FRandRange`，各布局内部的调用顺序保持一致。
+- Manhattan 仍额外检查 `CityBlockSize > 0`；其他三种布局仍只检查 World 和 Block Count，未借重构改变既有校验规则。
+- 建筑 Tag、Cube Mesh 路径、Mobility、Collision Profile、位置和缩放规则未修改。
+- `CityLayoutType`、自动 Grid 重建时机、完成日志和 Map Type 实验元数据来源未修改。
+
+### EUW 手动回归清单
+
+1. 使用固定 CitySeed 执行 Generate Manhattan City，确认建筑数量日志、位置、高度和重复生成结果与原版本一致。
+2. 执行 Generate Residential District，确认建筑较矮、数量与分布正常，并替换旧城市建筑。
+3. 执行 Generate Industrial Park，确认建筑数量较少、体积较大，并替换旧城市建筑。
+4. 执行 Generate Mixed Urban Area，确认三种子区域风格能够混合生成，并替换旧城市建筑。
+5. 检查每次生成后的 `CityLayoutType` 和自动 Build Grid 行为，确认日志及 Occupancy Grid 正常。
+6. 执行 Clear City Environment，确认所有带 `CityBuilding` Tag 的建筑被清理，删除数量日志正确。
+7. 再运行原 N200 参数实验，确认 `map_type`、规划和执行结果未受 Editor Service 拆分影响。
+
+### 回归结果
+
+- 2026-07-18：上述 City Generator EUW 接口已完成人工测试，原 N200 参数回归实验也已完成，均未发现异常。

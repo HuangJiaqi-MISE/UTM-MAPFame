@@ -21,7 +21,6 @@ class USceneComponent;
 class ADroneActor;
 class AMissionMarkerActor;
 class ANoFlyZoneMarkerActor;
-class AStaticMeshActor;
 struct FMultiAgentPlanningPipelineResult;
 
 
@@ -591,7 +590,6 @@ public:
 
     // UI导入起点、终点配置
 private:
-    void GetNoFlyZoneMarkerActors(TArray<ANoFlyZoneMarkerActor*>& OutMarkers) const;
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mission Editor")
     TSubclassOf<AMissionMarkerActor> MissionMarkerClass;
@@ -708,14 +706,6 @@ public:
 
 
     // 静态障碍物生成与编辑
-private:
-    void SpawnCityBuilding(const FVector& Center, const FVector& Extent);
-    void GenerateCityLayout_Manhattan(FRandomStream& RandomStream);
-    void GenerateCityLayout_Residential(FRandomStream& RandomStream);
-    void GenerateCityLayout_Industrial(FRandomStream& RandomStream);
-    void GenerateCityLayout_Mixed(FRandomStream& RandomStream);
-
-
 public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Generator")
     int32 CitySeed = 12345;

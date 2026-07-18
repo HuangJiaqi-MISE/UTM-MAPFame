@@ -18,23 +18,20 @@
 #include "Execution/ExecutionReplanProposalSynchronizer.h"
 #include "Execution/ExecutionStepResultApplier.h"
 #include "Execution/ExecutionStepTypes.h"
+#include "EditorServices/CityEditorService.h"
 #include "EditorServices/EditorGridService.h"
 #include "EditorServices/MissionEditorService.h"
+#include "EditorServices/NoFlyZoneEditorService.h"
 #include "Planning/MissionSchedulerRegistry.h"
 #include "Planning/PlanningPipeline.h"
 #include "Planning/PlannerRegistry.h"
 #include "Planning/UTMSafetyModel.h"
 #include "Missions/MissionSourceBuilder.h"
 
-#include "Engine/StaticMeshActor.h"
 #include "Kismet/GameplayStatics.h"
 #include "Reporting/ExperimentMetadataResolver.h"
 #include "Reporting/ExperimentReporter.h"
 #include "Reporting/ExecutionSummaryBuilder.h"
-
-// 障碍物建筑构建
-#include "Components/StaticMeshComponent.h"
-#include "Engine/StaticMesh.h"
 
 #include "HAL/PlatformTime.h"
 namespace
@@ -2901,154 +2898,37 @@ void APathPlanningDemoActor::EditorReadMissionMarkersToConfigs()
 //负责删除所有由城市生成器生成的建筑 Actor
 void APathPlanningDemoActor::EditorClearCityEnvironment()
 {
-    UWorld* World = GetWorld();
-    if (!World)
-    {
-        UE_LOG(LogTemp, Error, TEXT("EditorClearCityEnvironment: World is null"));
-        return;
-    }
-
-    int32 DeleteCount = 0;
-
-    for (TActorIterator<AActor> It(World); It; ++It)
-    {
-        AActor* Actor = *It;
-        if (!Actor)
-        {
-            continue;
-        }
-
-        if (Actor->Tags.Contains(FName(TEXT("CityBuilding"))))
-        {
-            Actor->Destroy();
-            DeleteCount++;
-        }
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("EditorClearCityEnvironment deleted %d actors"), DeleteCount);
+    FCityEditorService::ClearCityEnvironment(GetWorld());
 }
 
-// 负责生成一个建筑块
-void APathPlanningDemoActor::SpawnCityBuilding(const FVector& Center, const FVector& Extent)
+namespace
 {
-    UWorld* World = GetWorld();
-    if (!World)
+    FCityEditorGenerateRequest BuildCityEditorGenerateRequest(
+        const APathPlanningDemoActor& Actor)
     {
-        UE_LOG(LogTemp, Error, TEXT("SpawnCityBuilding: World is null"));
-        return;
+        FCityEditorGenerateRequest Request;
+        Request.World = Actor.GetWorld();
+        Request.GridOrigin = Actor.GridOrigin;
+        Request.CitySeed = Actor.CitySeed;
+        Request.CityBlocksX = Actor.CityBlocksX;
+        Request.CityBlocksY = Actor.CityBlocksY;
+        Request.CityBlockSize = Actor.CityBlockSize;
+        Request.CityRoadWidth = Actor.CityRoadWidth;
+        Request.BuildingWidthMin = Actor.BuildingWidthMin;
+        Request.BuildingWidthMax = Actor.BuildingWidthMax;
+        Request.BuildingDepthMin = Actor.BuildingDepthMin;
+        Request.BuildingDepthMax = Actor.BuildingDepthMax;
+        Request.BuildingHeightMin = Actor.BuildingHeightMin;
+        Request.BuildingHeightMax = Actor.BuildingHeightMax;
+        return Request;
     }
-
-    AStaticMeshActor* Building = World->SpawnActor<AStaticMeshActor>(
-        AStaticMeshActor::StaticClass(),
-        Center,
-        FRotator::ZeroRotator
-    );
-
-    if (!Building)
-    {
-        UE_LOG(LogTemp, Error, TEXT("SpawnCityBuilding: Failed to spawn building actor"));
-        return;
-    }
-
-    Building->Tags.Add(FName(TEXT("CityBuilding")));
-
-    UStaticMeshComponent* MeshComp = Building->GetStaticMeshComponent();
-    if (!MeshComp)
-    {
-        UE_LOG(LogTemp, Error, TEXT("SpawnCityBuilding: MeshComp is null"));
-        Building->Destroy();
-        return;
-    }
-
-    static UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-    if (!CubeMesh)
-    {
-        UE_LOG(LogTemp, Error, TEXT("SpawnCityBuilding: Failed to load Cube mesh"));
-        Building->Destroy();
-        return;
-    }
-
-    MeshComp->SetStaticMesh(CubeMesh);
-    MeshComp->SetMobility(EComponentMobility::Static);
-    MeshComp->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-    MeshComp->SetCollisionProfileName(TEXT("BlockAll"));
-
-    Building->SetActorLocation(Center);
-    Building->SetActorScale3D(FVector(
-        Extent.X / 50.f,
-        Extent.Y / 50.f,
-        Extent.Z / 50.f
-    ));
 }
-
-// ManhattanCity生成器在指定区域内生成一个个建筑块，形成一个简单的城市环境
-void APathPlanningDemoActor::GenerateCityLayout_Manhattan(FRandomStream& RandomStream)
-{
-    const float Pitch = CityBlockSize + CityRoadWidth;
-
-    const float WidthMin = FMath::Min(BuildingWidthMin, BuildingWidthMax);
-    const float WidthMax = FMath::Max(BuildingWidthMin, BuildingWidthMax);
-
-    const float DepthMin = FMath::Min(BuildingDepthMin, BuildingDepthMax);
-    const float DepthMax = FMath::Max(BuildingDepthMin, BuildingDepthMax);
-
-    const float HeightMin = FMath::Max(FMath::Min(BuildingHeightMin, BuildingHeightMax), 600.f);
-    const float HeightMax = FMath::Max(FMath::Max(BuildingHeightMin, BuildingHeightMax), 900.f);
-
-    int32 SpawnedBuildingCount = 0;
-
-    for (int32 ix = 0; ix < CityBlocksX; ++ix)
-    {
-        for (int32 iy = 0; iy < CityBlocksY; ++iy)
-        {
-            const FVector BlockCenter(
-                GridOrigin.X + ix * Pitch,
-                GridOrigin.Y + iy * Pitch,
-                0.f
-            );
-
-            // 曼哈顿街区：每个 block 里 1~4 个中高层建筑
-            const int32 BuildingCount = RandomStream.RandRange(1, 4);
-
-            for (int32 k = 0; k < BuildingCount; ++k)
-            {
-                const float Width = RandomStream.FRandRange(WidthMin, WidthMax);
-                const float Depth = RandomStream.FRandRange(DepthMin, DepthMax);
-                const float Height = RandomStream.FRandRange(HeightMin, HeightMax);
-
-                // 留一点边距，避免建筑冲出 block
-                const float Margin = 40.f;
-
-                const float OffsetXLimit = FMath::Max(0.f, CityBlockSize * 0.5f - Width * 0.5f - Margin);
-                const float OffsetYLimit = FMath::Max(0.f, CityBlockSize * 0.5f - Depth * 0.5f - Margin);
-
-                const FVector BuildingCenter(
-                    BlockCenter.X + RandomStream.FRandRange(-OffsetXLimit, OffsetXLimit),
-                    BlockCenter.Y + RandomStream.FRandRange(-OffsetYLimit, OffsetYLimit),
-                    Height * 0.5f
-                );
-
-                const FVector BuildingExtent(
-                    Width * 0.5f,
-                    Depth * 0.5f,
-                    Height * 0.5f
-                );
-
-                SpawnCityBuilding(BuildingCenter, BuildingExtent);
-                SpawnedBuildingCount++;
-            }
-        }
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("GenerateCityLayout_Manhattan done. Buildings=%d"), SpawnedBuildingCount);
-}
-
-
 
 void APathPlanningDemoActor::EditorGenerateManhattanCity()
 {
-    UWorld* World = GetWorld();
-    if (!World)
+    const FCityEditorGenerateRequest Request =
+        BuildCityEditorGenerateRequest(*this);
+    if (!Request.World)
     {
         UE_LOG(LogTemp, Error, TEXT("EditorGenerateManhattanCity: World is null"));
         return;
@@ -3067,11 +2947,8 @@ void APathPlanningDemoActor::EditorGenerateManhattanCity()
     }
 
     CityLayoutType = ECityLayoutType::Manhattan;
-
-    EditorClearCityEnvironment();
-
-    FRandomStream RandomStream(CitySeed);
-    GenerateCityLayout_Manhattan(RandomStream);
+    FCityEditorService::ClearCityEnvironment(Request.World);
+    FCityEditorService::GenerateManhattanLayout(Request);
 
     if (bAutoRebuildGridAfterCityGenerate)
     {
@@ -3082,68 +2959,11 @@ void APathPlanningDemoActor::EditorGenerateManhattanCity()
 }
 
 
-/*
-住宅片区：GenerateCityLayout_Residential
-特征:住宅区应该体现：建筑较矮建筑较小建筑更多但更分散,道路和空地相对宽松,整体更开阔
-*/
-void APathPlanningDemoActor::GenerateCityLayout_Residential(FRandomStream& RandomStream)
-{
-    const float Pitch = CityBlockSize + CityRoadWidth;
-
-    const float WidthMin = FMath::Min(BuildingWidthMin, BuildingWidthMax);
-    const float WidthMax = FMath::Max(BuildingWidthMin, BuildingWidthMax) * 0.8f;
-
-    const float DepthMin = FMath::Min(BuildingDepthMin, BuildingDepthMax);
-    const float DepthMax = FMath::Max(BuildingDepthMin, BuildingDepthMax) * 0.8f;
-
-    const float HeightMin = FMath::Min(BuildingHeightMin, BuildingHeightMax) * 0.4f;
-    const float HeightMax = FMath::Max(BuildingHeightMin, BuildingHeightMax) * 0.75f;
-
-    for (int32 ix = 0; ix < CityBlocksX; ++ix)
-    {
-        for (int32 iy = 0; iy < CityBlocksY; ++iy)
-        {
-            const FVector BlockCenter(
-                GridOrigin.X + ix * Pitch,
-                GridOrigin.Y + iy * Pitch,
-                0.f
-            );
-
-            const int32 BuildingCount = RandomStream.RandRange(2, 5);
-
-            for (int32 k = 0; k < BuildingCount; ++k)
-            {
-                const float Width = RandomStream.FRandRange(WidthMin, WidthMax);
-                const float Depth = RandomStream.FRandRange(DepthMin, DepthMax);
-                const float Height = RandomStream.FRandRange(HeightMin, HeightMax);
-
-                const float Margin = 70.f;
-
-                const float OffsetXLimit = FMath::Max(0.f, CityBlockSize * 0.5f - Width * 0.5f - Margin);
-                const float OffsetYLimit = FMath::Max(0.f, CityBlockSize * 0.5f - Depth * 0.5f - Margin);
-
-                const FVector BuildingCenter(
-                    BlockCenter.X + RandomStream.FRandRange(-OffsetXLimit, OffsetXLimit),
-                    BlockCenter.Y + RandomStream.FRandRange(-OffsetYLimit, OffsetYLimit),
-                    Height * 0.5f
-                );
-
-                const FVector BuildingExtent(
-                    Width * 0.5f,
-                    Depth * 0.5f,
-                    Height * 0.5f
-                );
-
-                SpawnCityBuilding(BuildingCenter, BuildingExtent);
-            }
-        }
-    }
-}
-
 void APathPlanningDemoActor::EditorGenerateResidentialDistrict()
 {
-    UWorld* World = GetWorld();
-    if (!World)
+    const FCityEditorGenerateRequest Request =
+        BuildCityEditorGenerateRequest(*this);
+    if (!Request.World)
     {
         UE_LOG(LogTemp, Error, TEXT("EditorGenerateResidentialDistrict: World is null"));
         return;
@@ -3156,11 +2976,8 @@ void APathPlanningDemoActor::EditorGenerateResidentialDistrict()
     }
 
     CityLayoutType = ECityLayoutType::Residential;
-
-    EditorClearCityEnvironment();
-
-    FRandomStream RandomStream(CitySeed);
-    GenerateCityLayout_Residential(RandomStream);
+    FCityEditorService::ClearCityEnvironment(Request.World);
+    FCityEditorService::GenerateResidentialLayout(Request);
 
     if (bAutoRebuildGridAfterCityGenerate)
     {
@@ -3170,68 +2987,11 @@ void APathPlanningDemoActor::EditorGenerateResidentialDistrict()
     UE_LOG(LogTemp, Warning, TEXT("EditorGenerateResidentialDistrict done"));
 }
 
-/*
-工业园区：GenerateCityLayout_Industrial
-特征:工业区应该体现,建筑数量少,单体建筑大高度中等,留大面积开阔区,更适合测试大尺度绕行
-*/
-void APathPlanningDemoActor::GenerateCityLayout_Industrial(FRandomStream& RandomStream)
-{
-    const float Pitch = CityBlockSize + CityRoadWidth;
-
-    const float WidthMin = FMath::Min(BuildingWidthMin, BuildingWidthMax) * 1.4f;
-    const float WidthMax = FMath::Max(BuildingWidthMin, BuildingWidthMax) * 2.0f;
-
-    const float DepthMin = FMath::Min(BuildingDepthMin, BuildingDepthMax) * 1.4f;
-    const float DepthMax = FMath::Max(BuildingDepthMin, BuildingDepthMax) * 2.0f;
-
-    const float HeightMin = FMath::Min(BuildingHeightMin, BuildingHeightMax) * 0.7f;
-    const float HeightMax = FMath::Max(BuildingHeightMin, BuildingHeightMax) * 1.0f;
-
-    for (int32 ix = 0; ix < CityBlocksX; ++ix)
-    {
-        for (int32 iy = 0; iy < CityBlocksY; ++iy)
-        {
-            const FVector BlockCenter(
-                GridOrigin.X + ix * Pitch,
-                GridOrigin.Y + iy * Pitch,
-                0.f
-            );
-
-            const int32 BuildingCount = RandomStream.RandRange(1, 2);
-
-            for (int32 k = 0; k < BuildingCount; ++k)
-            {
-                const float Width = RandomStream.FRandRange(WidthMin, WidthMax);
-                const float Depth = RandomStream.FRandRange(DepthMin, DepthMax);
-                const float Height = RandomStream.FRandRange(HeightMin, HeightMax);
-
-                const float Margin = 50.f;
-
-                const float OffsetXLimit = FMath::Max(0.f, CityBlockSize * 0.5f - Width * 0.5f - Margin);
-                const float OffsetYLimit = FMath::Max(0.f, CityBlockSize * 0.5f - Depth * 0.5f - Margin);
-
-                const FVector BuildingCenter(
-                    BlockCenter.X + RandomStream.FRandRange(-OffsetXLimit, OffsetXLimit),
-                    BlockCenter.Y + RandomStream.FRandRange(-OffsetYLimit, OffsetYLimit),
-                    Height * 0.5f
-                );
-
-                const FVector BuildingExtent(
-                    Width * 0.5f,
-                    Depth * 0.5f,
-                    Height * 0.5f
-                );
-
-                SpawnCityBuilding(BuildingCenter, BuildingExtent);
-            }
-        }
-    }
-}
-
 void APathPlanningDemoActor::EditorGenerateIndustrialPark()
 {
-    UWorld* World = GetWorld();
-    if (!World)
+    const FCityEditorGenerateRequest Request =
+        BuildCityEditorGenerateRequest(*this);
+    if (!Request.World)
     {
         UE_LOG(LogTemp, Error, TEXT("EditorGenerateIndustrialPark: World is null"));
         return;
@@ -3244,11 +3004,8 @@ void APathPlanningDemoActor::EditorGenerateIndustrialPark()
     }
 
     CityLayoutType = ECityLayoutType::Industrial;
-
-    EditorClearCityEnvironment();
-
-    FRandomStream RandomStream(CitySeed);
-    GenerateCityLayout_Industrial(RandomStream);
+    FCityEditorService::ClearCityEnvironment(Request.World);
+    FCityEditorService::GenerateIndustrialLayout(Request);
 
     if (bAutoRebuildGridAfterCityGenerate)
     {
@@ -3258,104 +3015,11 @@ void APathPlanningDemoActor::EditorGenerateIndustrialPark()
     UE_LOG(LogTemp, Warning, TEXT("EditorGenerateIndustrialPark done"));
 }
 
-/*
-混合城区：GenerateCityLayout_Mixed
-特征:一部分高楼密集,一部分低矮住宅,一部分大体量工业建筑,整体异质性高
-*/
-
-void APathPlanningDemoActor::GenerateCityLayout_Mixed(FRandomStream& RandomStream)
-{
-    const float Pitch = CityBlockSize + CityRoadWidth;
-
-    for (int32 ix = 0; ix < CityBlocksX; ++ix)
-    {
-        for (int32 iy = 0; iy < CityBlocksY; ++iy)
-        {
-            const FVector BlockCenter(
-                GridOrigin.X + ix * Pitch,
-                GridOrigin.Y + iy * Pitch,
-                0.f
-            );
-
-            const int32 DistrictType = RandomStream.RandRange(0, 2);
-
-            int32 BuildingCount = 0;
-            float WidthMin = 0.f;
-            float WidthMax = 0.f;
-            float DepthMin = 0.f;
-            float DepthMax = 0.f;
-            float HeightMin = 0.f;
-            float HeightMax = 0.f;
-            float Margin = 50.f;
-
-            if (DistrictType == 0)
-            {
-                // 曼哈顿风格
-                BuildingCount = RandomStream.RandRange(1, 4);
-                WidthMin = BuildingWidthMin;
-                WidthMax = BuildingWidthMax;
-                DepthMin = BuildingDepthMin;
-                DepthMax = BuildingDepthMax;
-                HeightMin = FMath::Max(FMath::Min(BuildingHeightMin, BuildingHeightMax), 600.f);
-                HeightMax = FMath::Max(FMath::Max(BuildingHeightMin, BuildingHeightMax), 900.f);
-                Margin = 40.f;
-            }
-            else if (DistrictType == 1)
-            {
-                // 住宅风格
-                BuildingCount = RandomStream.RandRange(2, 5);
-                WidthMin = FMath::Min(BuildingWidthMin, BuildingWidthMax);
-                WidthMax = FMath::Max(BuildingWidthMin, BuildingWidthMax) * 0.8f;
-                DepthMin = FMath::Min(BuildingDepthMin, BuildingDepthMax);
-                DepthMax = FMath::Max(BuildingDepthMin, BuildingDepthMax) * 0.8f;
-                HeightMin = FMath::Min(BuildingHeightMin, BuildingHeightMax) * 0.4f;
-                HeightMax = FMath::Max(BuildingHeightMin, BuildingHeightMax) * 0.75f;
-                Margin = 70.f;
-            }
-            else
-            {
-                // 工业风格
-                BuildingCount = RandomStream.RandRange(1, 2);
-                WidthMin = FMath::Min(BuildingWidthMin, BuildingWidthMax) * 1.4f;
-                WidthMax = FMath::Max(BuildingWidthMin, BuildingWidthMax) * 2.0f;
-                DepthMin = FMath::Min(BuildingDepthMin, BuildingDepthMax) * 1.4f;
-                DepthMax = FMath::Max(BuildingDepthMin, BuildingDepthMax) * 2.0f;
-                HeightMin = FMath::Min(BuildingHeightMin, BuildingHeightMax) * 0.7f;
-                HeightMax = FMath::Max(BuildingHeightMin, BuildingHeightMax) * 1.0f;
-                Margin = 50.f;
-            }
-
-            for (int32 k = 0; k < BuildingCount; ++k)
-            {
-                const float Width = RandomStream.FRandRange(WidthMin, WidthMax);
-                const float Depth = RandomStream.FRandRange(DepthMin, DepthMax);
-                const float Height = RandomStream.FRandRange(HeightMin, HeightMax);
-
-                const float OffsetXLimit = FMath::Max(0.f, CityBlockSize * 0.5f - Width * 0.5f - Margin);
-                const float OffsetYLimit = FMath::Max(0.f, CityBlockSize * 0.5f - Depth * 0.5f - Margin);
-
-                const FVector BuildingCenter(
-                    BlockCenter.X + RandomStream.FRandRange(-OffsetXLimit, OffsetXLimit),
-                    BlockCenter.Y + RandomStream.FRandRange(-OffsetYLimit, OffsetYLimit),
-                    Height * 0.5f
-                );
-
-                const FVector BuildingExtent(
-                    Width * 0.5f,
-                    Depth * 0.5f,
-                    Height * 0.5f
-                );
-
-                SpawnCityBuilding(BuildingCenter, BuildingExtent);
-            }
-        }
-    }
-}
-
 void APathPlanningDemoActor::EditorGenerateMixedUrbanArea()
 {
-    UWorld* World = GetWorld();
-    if (!World)
+    const FCityEditorGenerateRequest Request =
+        BuildCityEditorGenerateRequest(*this);
+    if (!Request.World)
     {
         UE_LOG(LogTemp, Error, TEXT("EditorGenerateMixedUrbanArea: World is null"));
         return;
@@ -3368,11 +3032,8 @@ void APathPlanningDemoActor::EditorGenerateMixedUrbanArea()
     }
 
     CityLayoutType = ECityLayoutType::Mixed;
-
-    EditorClearCityEnvironment();
-
-    FRandomStream RandomStream(CitySeed);
-    GenerateCityLayout_Mixed(RandomStream);
+    FCityEditorService::ClearCityEnvironment(Request.World);
+    FCityEditorService::GenerateMixedLayout(Request);
 
     if (bAutoRebuildGridAfterCityGenerate)
     {
@@ -3539,389 +3200,74 @@ FString APathPlanningDemoActor::GetCityLayoutTypeName() const
 }
 
 
-#include "Actors/NoFlyZoneMarkerActor.h"
-#include "Components/BoxComponent.h"
-
-namespace
-{
-    static FIntVector NormalizeMinCell(const FIntVector& A, const FIntVector& B)
-    {
-        return FIntVector(
-            FMath::Min(A.X, B.X),
-            FMath::Min(A.Y, B.Y),
-            FMath::Min(A.Z, B.Z));
-    }
-
-    static FIntVector NormalizeMaxCell(const FIntVector& A, const FIntVector& B)
-    {
-        return FIntVector(
-            FMath::Max(A.X, B.X),
-            FMath::Max(A.Y, B.Y),
-            FMath::Max(A.Z, B.Z));
-    }
-
-    static FIntVector ClampCellToGrid(const FIntVector& Cell, const FIntVector& GridDim)
-    {
-        return FIntVector(
-            FMath::Clamp(Cell.X, 0, FMath::Max(0, GridDim.X - 1)),
-            FMath::Clamp(Cell.Y, 0, FMath::Max(0, GridDim.Y - 1)),
-            FMath::Clamp(Cell.Z, 0, FMath::Max(0, GridDim.Z - 1)));
-    }
-}
-
-void APathPlanningDemoActor::GetNoFlyZoneMarkerActors(TArray<ANoFlyZoneMarkerActor*>& OutMarkers) const
-{
-    OutMarkers.Reset();
-
-    UWorld* World = GetWorld();
-    if (!World)
-    {
-        return;
-    }
-
-    for (TActorIterator<ANoFlyZoneMarkerActor> It(World); It; ++It)
-    {
-        ANoFlyZoneMarkerActor* Marker = *It;
-        if (!Marker)
-        {
-            continue;
-        }
-
-        if (Marker->Tags.Contains(FName(TEXT("NoFlyZoneMarker"))))
-        {
-            OutMarkers.Add(Marker);
-        }
-    }
-}
-
 void APathPlanningDemoActor::EditorAddNoFlyZoneConfig()
 {
-    FTemporalNoFlyZoneConfig Zone;
-
-    int32 NextZoneId = 1;
-    for (const FTemporalNoFlyZoneConfig& ExistingZone : NoFlyZoneConfigs)
-    {
-        NextZoneId = FMath::Max(NextZoneId, ExistingZone.ZoneId + 1);
-    }
-
-    const FIntVector GridCenter(
-        FMath::Max(0, GridDim.X / 2),
-        FMath::Max(0, GridDim.Y / 2),
-        FMath::Max(0, GridDim.Z / 2));
-
-    const int32 HalfSpan = FMath::Max(0, DefaultNoFlyZoneSizeCells - 1) / 2;
-    Zone.ZoneId = NextZoneId;
-    Zone.bEnabled = true;
-    Zone.MinCell = ClampCellToGrid(GridCenter - FIntVector(HalfSpan, HalfSpan, 0), GridDim);
-    Zone.MaxCell = ClampCellToGrid(
-        Zone.MinCell + FIntVector(
-            FMath::Max(0, DefaultNoFlyZoneSizeCells - 1),
-            FMath::Max(0, DefaultNoFlyZoneSizeCells - 1),
-            0),
-        GridDim);
-    Zone.StartTimeStep = 0;
-    Zone.EndTimeStep = FMath::Max(Zone.StartTimeStep, DefaultNoFlyZoneDuration - 1);
-
-    NoFlyZoneConfigs.Add(Zone);
-
-    UE_LOG(LogTemp, Warning, TEXT("EditorAddNoFlyZoneConfig added ZoneId=%d Min=(%d,%d,%d) Max=(%d,%d,%d) Time=[%d,%d]"),
-        Zone.ZoneId,
-        Zone.MinCell.X, Zone.MinCell.Y, Zone.MinCell.Z,
-        Zone.MaxCell.X, Zone.MaxCell.Y, Zone.MaxCell.Z,
-        Zone.StartTimeStep, Zone.EndTimeStep);
+    FNoFlyZoneEditorAddConfigRequest Request;
+    Request.GridDim = GridDim;
+    Request.DefaultSizeCells = DefaultNoFlyZoneSizeCells;
+    Request.DefaultDuration = DefaultNoFlyZoneDuration;
+    Request.ZoneConfigs = &NoFlyZoneConfigs;
+    FNoFlyZoneEditorService::AddNoFlyZoneConfig(Request);
 }
 
 void APathPlanningDemoActor::EditorClearNoFlyZoneMarkers()
 {
-    TArray<ANoFlyZoneMarkerActor*> Markers;
-    GetNoFlyZoneMarkerActors(Markers);
-
-    int32 DeleteCount = 0;
-    for (ANoFlyZoneMarkerActor* Marker : Markers)
-    {
-        if (!Marker)
-        {
-            continue;
-        }
-
-        Marker->Destroy();
-        DeleteCount++;
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("EditorClearNoFlyZoneMarkers deleted %d markers"), DeleteCount);
+    FNoFlyZoneEditorService::ClearNoFlyZoneMarkers(GetWorld());
 }
 
 void APathPlanningDemoActor::EditorSpawnNoFlyZoneMarkers()
 {
-    if (!NoFlyZoneMarkerClass)
-    {
-        UE_LOG(LogTemp, Error, TEXT("NoFlyZoneMarkerClass is null"));
-        return;
-    }
-
-    UWorld* World = GetWorld();
-    if (!World)
-    {
-        UE_LOG(LogTemp, Error, TEXT("EditorSpawnNoFlyZoneMarkers: World is null"));
-        return;
-    }
-
-    EditorClearNoFlyZoneMarkers();
-
-    GridMap.GridOrigin = GridOrigin;
-    GridMap.GridDim = GridDim;
-    GridMap.CellSize = CellSize;
-
-    FActorSpawnParameters SpawnParams;
-    SpawnParams.Owner = this;
-    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-    for (const FTemporalNoFlyZoneConfig& ZoneConfig : NoFlyZoneConfigs)
-    {
-        FTemporalNoFlyZoneConfig NormalizedZone = ZoneConfig;
-        NormalizedZone.MinCell = ClampCellToGrid(NormalizeMinCell(ZoneConfig.MinCell, ZoneConfig.MaxCell), GridDim);
-        NormalizedZone.MaxCell = ClampCellToGrid(NormalizeMaxCell(ZoneConfig.MinCell, ZoneConfig.MaxCell), GridDim);
-        NormalizedZone.EndTimeStep = FMath::Max(NormalizedZone.StartTimeStep, NormalizedZone.EndTimeStep);
-
-        const FVector MinWorld = GridMap.CellToWorld(NormalizedZone.MinCell);
-        const FVector MaxWorld = GridMap.CellToWorld(NormalizedZone.MaxCell);
-        const FVector MarkerCenter = (MinWorld + MaxWorld) * 0.5f;
-        const FVector MarkerExtent(
-            (NormalizedZone.MaxCell.X - NormalizedZone.MinCell.X + 1) * CellSize * 0.5f,
-            (NormalizedZone.MaxCell.Y - NormalizedZone.MinCell.Y + 1) * CellSize * 0.5f,
-            (NormalizedZone.MaxCell.Z - NormalizedZone.MinCell.Z + 1) * CellSize * 0.5f);
-
-        ANoFlyZoneMarkerActor* Marker = World->SpawnActor<ANoFlyZoneMarkerActor>(
-            NoFlyZoneMarkerClass,
-            MarkerCenter + FVector(0.f, 0.f, MarkerZOffset),
-            FRotator::ZeroRotator,
-            SpawnParams);
-
-        if (!Marker)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("Failed to spawn no-fly-zone marker for ZoneId=%d"), NormalizedZone.ZoneId);
-            continue;
-        }
-
-        Marker->ZoneConfig = NormalizedZone;
-        Marker->Tags.AddUnique(FName(TEXT("NoFlyZoneMarker")));
-        Marker->SetActorScale3D(FVector::OneVector);
-
-        if (Marker->BoxComponent)
-        {
-            Marker->BoxComponent->SetBoxExtent(MarkerExtent, true);
-        }
-
-        Marker->UpdateVisual();
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("EditorSpawnNoFlyZoneMarkers done. Zone count=%d"), NoFlyZoneConfigs.Num());
+    FNoFlyZoneEditorSpawnMarkersRequest Request;
+    Request.World = GetWorld();
+    Request.Owner = this;
+    Request.GridMap = &GridMap;
+    Request.GridOrigin = GridOrigin;
+    Request.GridDim = GridDim;
+    Request.CellSize = CellSize;
+    Request.MarkerZOffset = MarkerZOffset;
+    Request.MarkerClass = NoFlyZoneMarkerClass;
+    Request.ZoneConfigs = &NoFlyZoneConfigs;
+    FNoFlyZoneEditorService::SpawnNoFlyZoneMarkers(Request);
 }
 
 void APathPlanningDemoActor::EditorReadNoFlyZoneMarkersToConfigs()
 {
-    GridMap.GridOrigin = GridOrigin;
-    GridMap.GridDim = GridDim;
-    GridMap.CellSize = CellSize;
-
-    TArray<ANoFlyZoneMarkerActor*> Markers;
-    GetNoFlyZoneMarkerActors(Markers);
-
-    NoFlyZoneConfigs.Reset();
-
-    const FVector HalfCell(CellSize * 0.5f, CellSize * 0.5f, CellSize * 0.5f);
-
-    for (ANoFlyZoneMarkerActor* Marker : Markers)
-    {
-        if (!Marker || !Marker->BoxComponent)
-        {
-            continue;
-        }
-
-        FTemporalNoFlyZoneConfig ZoneConfig = Marker->ZoneConfig;
-        const FVector CenterWorld = Marker->GetActorLocation() - FVector(0.f, 0.f, MarkerZOffset);
-        const FVector Extent = Marker->BoxComponent->GetScaledBoxExtent();
-
-        const FVector MinCornerWorld = CenterWorld - Extent + HalfCell;
-        const FVector MaxCornerWorld = CenterWorld + Extent - HalfCell;
-
-        ZoneConfig.MinCell = ClampCellToGrid(GridMap.WorldToCell(MinCornerWorld), GridDim);
-        ZoneConfig.MaxCell = ClampCellToGrid(GridMap.WorldToCell(MaxCornerWorld), GridDim);
-        ZoneConfig.MinCell = NormalizeMinCell(ZoneConfig.MinCell, ZoneConfig.MaxCell);
-        ZoneConfig.MaxCell = NormalizeMaxCell(ZoneConfig.MinCell, ZoneConfig.MaxCell);
-        ZoneConfig.EndTimeStep = FMath::Max(ZoneConfig.StartTimeStep, ZoneConfig.EndTimeStep);
-
-        NoFlyZoneConfigs.Add(ZoneConfig);
-    }
-
-    NoFlyZoneConfigs.Sort([](const FTemporalNoFlyZoneConfig& A, const FTemporalNoFlyZoneConfig& B)
-        {
-            return A.ZoneId < B.ZoneId;
-        });
-
-    UE_LOG(LogTemp, Warning, TEXT("EditorReadNoFlyZoneMarkersToConfigs done. Zone count=%d"), NoFlyZoneConfigs.Num());
+    FNoFlyZoneEditorReadMarkersRequest Request;
+    Request.World = GetWorld();
+    Request.GridMap = &GridMap;
+    Request.GridOrigin = GridOrigin;
+    Request.GridDim = GridDim;
+    Request.CellSize = CellSize;
+    Request.MarkerZOffset = MarkerZOffset;
+    Request.ZoneConfigs = &NoFlyZoneConfigs;
+    FNoFlyZoneEditorService::ReadNoFlyZoneMarkersToConfigs(Request);
 }
 
 void APathPlanningDemoActor::EditorValidateNoFlyZones()
 {
     EditorBuildGridForMissionEditing();
 
-    UE_LOG(LogTemp, Warning, TEXT("Validate NoFlyZoneConfigs begin. Count=%d"), NoFlyZoneConfigs.Num());
-
-    TSet<int32> ZoneIds;
-
-    for (const FTemporalNoFlyZoneConfig& ZoneConfig : NoFlyZoneConfigs)
-    {
-        if (ZoneIds.Contains(ZoneConfig.ZoneId))
-        {
-            UE_LOG(LogTemp, Error, TEXT("Duplicate ZoneId=%d"), ZoneConfig.ZoneId);
-        }
-        ZoneIds.Add(ZoneConfig.ZoneId);
-
-        const FIntVector MinCell = NormalizeMinCell(ZoneConfig.MinCell, ZoneConfig.MaxCell);
-        const FIntVector MaxCell = NormalizeMaxCell(ZoneConfig.MinCell, ZoneConfig.MaxCell);
-
-        const bool bInside = GridMap.IsInside(MinCell.X, MinCell.Y, MinCell.Z)
-            && GridMap.IsInside(MaxCell.X, MaxCell.Y, MaxCell.Z);
-
-        if (!bInside)
-        {
-            UE_LOG(LogTemp, Error, TEXT("Zone %d out of bounds. Min=(%d,%d,%d) Max=(%d,%d,%d)"),
-                ZoneConfig.ZoneId,
-                MinCell.X, MinCell.Y, MinCell.Z,
-                MaxCell.X, MaxCell.Y, MaxCell.Z);
-            continue;
-        }
-
-        if (ZoneConfig.EndTimeStep < ZoneConfig.StartTimeStep)
-        {
-            UE_LOG(LogTemp, Error, TEXT("Zone %d invalid time window [%d,%d]"),
-                ZoneConfig.ZoneId,
-                ZoneConfig.StartTimeStep,
-                ZoneConfig.EndTimeStep);
-        }
-
-        int32 CellCount = 0;
-        int32 BlockedCount = 0;
-        for (int32 X = MinCell.X; X <= MaxCell.X; ++X)
-        {
-            for (int32 Y = MinCell.Y; Y <= MaxCell.Y; ++Y)
-            {
-                for (int32 Z = MinCell.Z; Z <= MaxCell.Z; ++Z)
-                {
-                    CellCount++;
-                    if (GridMap.IsBlocked(X, Y, Z))
-                    {
-                        BlockedCount++;
-                    }
-                }
-            }
-        }
-
-        UE_LOG(LogTemp, Warning, TEXT("Zone %d Enabled=%s Cells=%d Blocked=%d Min=(%d,%d,%d) Max=(%d,%d,%d) Time=[%d,%d]"),
-            ZoneConfig.ZoneId,
-            ZoneConfig.bEnabled ? TEXT("true") : TEXT("false"),
-            CellCount,
-            BlockedCount,
-            MinCell.X, MinCell.Y, MinCell.Z,
-            MaxCell.X, MaxCell.Y, MaxCell.Z,
-            ZoneConfig.StartTimeStep,
-            ZoneConfig.EndTimeStep);
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("Validate NoFlyZoneConfigs done."));
+    FNoFlyZoneEditorValidateRequest Request;
+    Request.GridMap = &GridMap;
+    Request.ZoneConfigs = &NoFlyZoneConfigs;
+    FNoFlyZoneEditorService::ValidateNoFlyZones(Request);
 }
 void APathPlanningDemoActor::EditorGenerateRandomNoFlyZoneConfigs()
 {
     EditorBuildGridForMissionEditing();
 
-    NoFlyZoneConfigs.Reset();
-
-    if (GridDim.X <= 0 || GridDim.Y <= 0 || GridDim.Z <= 0)
-    {
-        UE_LOG(LogTemp, Error, TEXT("EditorGenerateRandomNoFlyZoneConfigs: invalid grid dimension"));
-        return;
-    }
-
-    const int32 SafeMinSize = FMath::Max(1, FMath::Min(RandomNoFlyZoneMinSizeCells, RandomNoFlyZoneMaxSizeCells));
-    const int32 SafeMaxSize = FMath::Max(SafeMinSize, FMath::Max(RandomNoFlyZoneMinSizeCells, RandomNoFlyZoneMaxSizeCells));
-    const int32 SafeMinStart = FMath::Max(0, FMath::Min(RandomNoFlyZoneMinStartTimeStep, RandomNoFlyZoneMaxStartTimeStep));
-    const int32 SafeMaxStart = FMath::Max(SafeMinStart, FMath::Max(RandomNoFlyZoneMinStartTimeStep, RandomNoFlyZoneMaxStartTimeStep));
-    const int32 SafeMinDuration = FMath::Max(1, FMath::Min(RandomNoFlyZoneMinDuration, RandomNoFlyZoneMaxDuration));
-    const int32 SafeMaxDuration = FMath::Max(SafeMinDuration, FMath::Max(RandomNoFlyZoneMinDuration, RandomNoFlyZoneMaxDuration));
-
-    FRandomStream RandomStream(NoFlyZoneRandomSeed);
-
-    for (int32 ZoneIndex = 0; ZoneIndex < RandomNoFlyZoneCount; ++ZoneIndex)
-    {
-        const int32 ZoneId = ZoneIndex + 1;
-        bool bGenerated = false;
-
-        for (int32 TryIndex = 0; TryIndex < 200; ++TryIndex)
-        {
-            const int32 SizeXY = RandomStream.RandRange(SafeMinSize, SafeMaxSize);
-            const int32 SizeZ = FMath::Min(GridDim.Z, FMath::Max(1, RandomStream.RandRange(1, FMath::Min(2, SizeXY))));
-
-            if (SizeXY > GridDim.X || SizeXY > GridDim.Y || SizeZ > GridDim.Z)
-            {
-                continue;
-            }
-
-            const int32 MinX = RandomStream.RandRange(0, GridDim.X - SizeXY);
-            const int32 MinY = RandomStream.RandRange(0, GridDim.Y - SizeXY);
-            const int32 MinZ = RandomStream.RandRange(0, GridDim.Z - SizeZ);
-
-            FTemporalNoFlyZoneConfig ZoneConfig;
-            ZoneConfig.ZoneId = ZoneId;
-            ZoneConfig.bEnabled = true;
-            ZoneConfig.MinCell = FIntVector(MinX, MinY, MinZ);
-            ZoneConfig.MaxCell = FIntVector(MinX + SizeXY - 1, MinY + SizeXY - 1, MinZ + SizeZ - 1);
-            ZoneConfig.StartTimeStep = RandomStream.RandRange(SafeMinStart, SafeMaxStart);
-
-            const int32 Duration = RandomStream.RandRange(SafeMinDuration, SafeMaxDuration);
-            ZoneConfig.EndTimeStep = ZoneConfig.StartTimeStep + Duration - 1;
-
-            int32 CellCount = 0;
-            int32 FreeCount = 0;
-            for (int32 X = ZoneConfig.MinCell.X; X <= ZoneConfig.MaxCell.X; ++X)
-            {
-                for (int32 Y = ZoneConfig.MinCell.Y; Y <= ZoneConfig.MaxCell.Y; ++Y)
-                {
-                    for (int32 Z = ZoneConfig.MinCell.Z; Z <= ZoneConfig.MaxCell.Z; ++Z)
-                    {
-                        CellCount++;
-                        if (!GridMap.IsBlocked(X, Y, Z))
-                        {
-                            FreeCount++;
-                        }
-                    }
-                }
-            }
-
-            if (CellCount <= 0 || FreeCount <= 0)
-            {
-                continue;
-            }
-
-            NoFlyZoneConfigs.Add(ZoneConfig);
-            bGenerated = true;
-            break;
-        }
-
-        if (!bGenerated)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("Failed to generate no-fly zone %d"), ZoneId);
-        }
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("Generated random no-fly zones: %d (Seed=%d Size=[%d,%d] Start=[%d,%d] Duration=[%d,%d])"),
-        NoFlyZoneConfigs.Num(),
-        NoFlyZoneRandomSeed,
-        SafeMinSize,
-        SafeMaxSize,
-        SafeMinStart,
-        SafeMaxStart,
-        SafeMinDuration,
-        SafeMaxDuration);
+    FNoFlyZoneEditorGenerateRandomRequest Request;
+    Request.GridMap = &GridMap;
+    Request.GridDim = GridDim;
+    Request.ZoneCount = RandomNoFlyZoneCount;
+    Request.RandomSeed = NoFlyZoneRandomSeed;
+    Request.MinSizeCells = RandomNoFlyZoneMinSizeCells;
+    Request.MaxSizeCells = RandomNoFlyZoneMaxSizeCells;
+    Request.MinStartTimeStep = RandomNoFlyZoneMinStartTimeStep;
+    Request.MaxStartTimeStep = RandomNoFlyZoneMaxStartTimeStep;
+    Request.MinDuration = RandomNoFlyZoneMinDuration;
+    Request.MaxDuration = RandomNoFlyZoneMaxDuration;
+    Request.ZoneConfigs = &NoFlyZoneConfigs;
+    FNoFlyZoneEditorService::GenerateRandomNoFlyZoneConfigs(Request);
 }
 
