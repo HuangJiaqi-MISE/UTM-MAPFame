@@ -2043,3 +2043,250 @@ EUW Blueprint 仍以原方式调用 `APathPlanningDemoActor`，无需修改现�
 ### 回归结果
 
 - 2026-07-18：上述 City Generator EUW 接口已完成人工测试，原 N200 参数回归实验也已完成，均未发现异常。
+
+## 2026-07-18 Execution Runtime Session 第一阶段：Runtime State Types 外移
+
+### 背景
+
+建立独立 `Execution Runtime Session` 前，执行期配置和状态类型仍直接定义在 `PathPlanningDemoActor.h`，导致 Execution 模块需要通过 Actor Header 才能了解完整运行状态。本阶段先整理类型所有权，不迁移状态数据和执行逻辑。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeStateTypes.h`
+
+### 外移类型
+
+以下类型从 `PathPlanningDemoActor.h` 原样移动到 `ExecutionRuntimeStateTypes.h`：
+
+- `EExecutionDelayMode`
+- `EExecutionReplanMode`
+- `FExecutionReplanTimingStats`
+- `FExecutionAgentState`
+- `FExecutionConflict`
+- `FAgentDelayConfig`
+
+### Actor 调整
+
+`PathPlanningDemoActor.h` 改为包含 `Execution/ExecutionRuntimeStateTypes.h`。Actor 中的以下成员、函数签名和 Details 属性继续使用原类型名称：
+
+- `ExecutionStates`
+- `ExecutionConflicts`
+- `ExecutionReplanTimingStats`
+- `DelayMode`
+- `AgentDelayConfigs`
+- `ExecutionReplanMode`
+
+### 保守性说明
+
+- 所有 `UENUM`/`USTRUCT` 名称、`BlueprintType`、`UPROPERTY`、Category、Meta、字段顺序和默认值保持不变。
+- `FExecutionAgentState::Drone` 本阶段继续保留，尚未拆分纯 Runtime State 与 UE View Binding。
+- `ResetExecutionCache()`、`InitializeExecutionStates()`、`AdvanceExecutionOneStep()` 和 `TryExecutionReplan()` 均未修改。
+- Execution 状态仍由 `APathPlanningDemoActor` 持有，本阶段只建立后续 Runtime Session 所需的独立类型位置。
+- Delay 随机流、Mission ID 顺序、冲突检测、重规划、Summary 和 StructuredExperimentJSON 行为均未修改。
+
+### 后续计划
+
+下一阶段可在该类型边界上抽取 Session 初始化职责，包括 Reset、Mission Config 缓存、初始 Agent State 构造和 Snapshot 构造；每个阶段继续使用原 N200 参数实验回归。
+
+### 回归结果
+
+- 2026-07-18：Runtime State Types 外移后，原 N200 参数实验回归通过，未发现异常。
+
+## 2026-07-18 Execution Runtime Session 第二阶段：Session Builder
+
+### 背景
+
+第一阶段只移动了类型定义，Mission Config Map、初始 Agent State 和 Execution Snapshot 仍由 `APathPlanningDemoActor` 逐项构造。本阶段新增无 `UWorld` 依赖的 Session Builder，先迁移确定性的纯数据构造，Actor 继续持有状态和执行生命周期。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeSessionBuilder.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeSessionBuilder.cpp`
+
+### Builder 职责
+
+`FExecutionRuntimeSessionBuilder` 现在负责：
+
+- 将 `TArray<FDroneMissionConfig>` 构造为按 Mission ID 索引的 Map。
+- 根据 Planned Cell Paths、Mission Config Map 和 Grid 构造初始 `FExecutionAgentState`。
+- 保留空路径跳过、单点路径立即完成、起点 Actual Cell、Goal Cell/World 和 Alignment 初始状态规则。
+- 根据当前 Agent States、时间步、重规划次数和观察 Cell 回调构造 `FExecutionSnapshot`。
+
+### Actor 保留职责
+
+- 初始化 `ExecutionRandom`、时间步、重规划统计和 Running 状态。
+- 将 Builder 返回的 Agent State 与 `SpawnedDroneByMissionId` 绑定。
+- 将 Drone Actor 放置到初始 Cell。
+- 提供 `GetObservedExecutionCell()` 回调，从 UE Actor 世界位置获取观察 Cell。
+- 执行初始冲突检测、Summary、日志和后续 `AdvanceExecutionOneStep()`。
+
+### 保守性说明
+
+- `ResetExecutionCache()`、Delay 随机判定和 `AdvanceExecutionOneStep()` 本阶段未迁移。
+- `FExecutionAgentState::Drone` 仍由 Actor 写入，Builder 不访问 `ADroneActor`、`UWorld` 或 DrawDebug。
+- 初始状态字段、Mission Config Goal 覆盖规则和 Snapshot 字段逐项保持不变。
+- Planned Path Map 和 Agent State Map 的原 `TMap` 遍历顺序保持不变。
+- 初始 Drone 定位仍发生在冲突检测和执行开始之前。
+- Replan、Summary、StructuredExperimentJSON 和所有指标字段未修改。
+
+### 回归建议
+
+继续运行原 N200 参数实验，重点核对 completed count、makespan、delay、alignment、replan timing、conflict count 和 StructuredExperimentJSON。
+
+### 回归结果
+
+- 2026-07-18：Session Builder 接入后，原 N200 参数实验回归通过，未发现异常。
+
+## 2026-07-18 Execution Runtime Session 第三阶段：Step Processor
+
+### 背景
+
+Session Builder 已负责初始状态和 Snapshot 构造，但 `AdvanceExecutionOneStep()` 仍在 Actor 内逐 Mission 完成排序、观察位置采样、Delay 判定、Controller 输入构造以及标准状态转移写回。本阶段把这些无 `UWorld` 依赖的 Runtime State 操作集中到独立的 Step Processor，继续保留 Actor 作为 UE Benchmark Host。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeSessionStepProcessor.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeSessionStepProcessor.cpp`
+
+### Step Processor 职责
+
+`FExecutionRuntimeSessionStepProcessor` 现在负责：
+
+- 按 Mission ID 排序当前 Agent States。
+- 通过 Actor 提供的观察 Cell 回调更新 `LastObservedCell` 和 `DisplayFromCell`。
+- 通过 Actor 提供的 Delay 回调生成 `FExecutionAgentSnapshot`，保持原随机流调用条件和顺序。
+- 从 Runtime State 构造 `FExecutionConflictResolutionInput`。
+- 从 Runtime State 构造重规划 Proposal 同步输入和 Final Safety Gate 输入。
+- 复用原 `FExecutionStepResultApplier` 计算标准状态转移，并将结果批量写回 `FExecutionAgentState`。
+
+### Actor 保留职责
+
+- 在每个执行步开始时调用 `UpdateExecutionVisuals()` 并推进时间步。
+- 通过 `GetObservedExecutionCell()` 读取 Drone Actor 的世界位置。
+- 使用 `ExecutionRandom` 和 Details 配置执行 Delay 判定。
+- 构造 Runtime Config、选择 Execution Controller，并提供 `TryExecutionReplan()` 回调。
+- 输出 Delay、Alignment、Conflict Resolution 和 Final Safety Gate 日志。
+- 执行实际冲突记录、停止执行、更新显示以及构造 Execution Summary。
+
+### 保守性说明
+
+- Mission ID 排序、Snapshot 字段、Delay 回调调用条件和随机数调用顺序保持不变。
+- Conflict Resolution 和 Final Safety Gate 的输入字段逐项保持不变。
+- `FExecutionStateTransition` 和 `FExecutionStepResultApplier` 未修改，只迁移其输入捕获和结果提交位置。
+- 状态提交仍发生在 Controller 完成之后、Delay/Alignment 日志和实际冲突检测之前。
+- Step Processor 不访问 `ADroneActor`、`UWorld`、Actor Transform、DrawDebug 或 `UE_LOG`。
+- `TryExecutionReplan()`、Final Safety Gate 策略、冲突检测、Summary 和 StructuredExperimentJSON 均未修改。
+
+### 回归建议
+
+继续运行原 N200 参数实验，重点核对 Delay 随机序列、completed count、actual makespan、alignment、Final Safety Gate、replan timing、conflict count 和 StructuredExperimentJSON。
+
+### 回归结果
+
+- 2026-07-18：Session Step Processor 接入后，原 N200 参数实验回归通过，未发现异常。
+
+## 2026-07-18 Execution Runtime Session 第四阶段：Replan Committer
+
+### 背景
+
+执行期重规划的候选选择、Planner 调用、PostCheck 和多轮 Coordinator 已经位于 Execution 模块，但重规划成功后的路径整合字段写回，以及 local/global attempt 耗时和 applied replan 次数累计仍直接写在 Actor 中。本阶段把这些 Runtime Session 写操作集中到独立 Replan Committer。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeSessionReplanCommitter.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeSessionReplanCommitter.cpp`
+
+### Replan Committer 职责
+
+`FExecutionRuntimeSessionReplanCommitter` 现在负责：
+
+- 复用 `FExecutionReplanPathIntegrator` 将新的 Cell Path 合并到当前执行时间线。
+- 写回 `PlannedCells`、`ExecutedPlanIndex`、Goal、Conflict Hold 和 Alignment Lost 状态。
+- 更新按 Mission ID 缓存的 Planned Cell Paths。
+- 返回实际完成写回的 Mission ID 集合。
+- 按 local/global 类型累计 attempt count、total time 和 max time。
+- 累计 `TotalExecutionReplanCount`，继续使用 Coordinator 返回的 `AppliedReplanCount`。
+
+### Actor 保留职责
+
+- 构造 `FExecutionReplanCoordinatorRequest` 和 Planner/Apply/Event 回调。
+- 调用 `TryExecutionReplan()` 并维持原成功、失败和最大重规划次数判断。
+- 将 Committer 已提交的 Cell Path 转为 World Path，更新用于 UE 路径显示的 `LastPlannedPathsByMission`。
+- 输出 Coordinator、Planner 失败和重规划上限日志。
+
+### 保守性说明
+
+- 路径整合继续调用原 `FExecutionReplanPathIntegrator::Integrate()`，时间线 Hold 和 Executed Plan Index 规则未修改。
+- Candidate Mission 遍历顺序、缺失 State/Config/Path 时立即失败以及前序 Mission 部分写回行为保持不变。
+- GoalWorld、Conflict Hold 清零和 Alignment Lost 清除字段保持不变。
+- World Path 仍由 Actor 使用原 `GridMap.CellToWorld()` 逐 Cell 构造。
+- local/global attempt 指标的加法和 max 规则逐项保持不变。
+- Coordinator、Planner、PostCheck、Final Safety Gate、Summary 和 StructuredExperimentJSON 未修改。
+- Replan Committer 不访问 `ADroneActor`、`UWorld`、Actor Transform、DrawDebug 或 `UE_LOG`。
+
+### 回归建议
+
+继续运行原 N200 参数实验，重点核对 applied replan count、local/global attempt count、total/max time、planned/actual makespan、alignment replan success、conflict count 和 StructuredExperimentJSON。
+
+### 回归结果
+
+- 2026-07-18：Session Replan Committer 接入后，原 N200 参数实验回归通过，未发现异常。
+
+## 2026-07-18 Execution Runtime Session 第五阶段：Session 状态所有权集中
+
+### 背景
+
+前四个阶段已经外移 Runtime 类型、初始化构造、标准 Step 状态处理和 Replan 写回，但 Mission Config Map、Agent States、Conflict 历史、随机流、时间步和重规划统计仍是 `APathPlanningDemoActor` 的多个独立成员。本阶段建立真正的 `FExecutionRuntimeSession` 状态对象，统一这些执行期数据的所有权和生命周期。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeSession.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeSession.cpp`
+
+### Session 持有状态
+
+`FExecutionRuntimeSession` 现在集中持有：
+
+- `MissionConfigsById`
+- `AgentStatesByMissionId`
+- `Conflicts`
+- `Random`
+- `bRunning`
+- `TimeStep`
+- `TotalReplanCount`
+- `ReplanTimingStats`
+
+Actor 中原来对应的八个独立成员已删除，替换为单一 `ExecutionSession` 成员。
+
+### Session 生命周期
+
+- `Reset()` 清理 Mission Config、Agent State 和 Conflict，并复位 Running、时间步和重规划统计。
+- `PrepareForExecution()` 保留 Mission Config，清理 Agent State 和 Conflict，按 `ExecutionRandomSeed` 初始化随机流，并复位 Running、时间步和重规划统计。
+- Actor 的 `ResetExecutionCache()` 和 `InitializeExecutionStates()` 分别调用上述两个生命周期入口。
+
+### Actor 保留状态和职责
+
+- `PlannedCellPathsByMission` 和 `LastPlannedPathsByMission` 继续作为规划结果及 UE World Path 显示缓存。
+- `SpawnedDrones` 和 `SpawnedDroneByMissionId` 继续持有 UE 场景对象绑定。
+- `ExecutionAccumulator` 继续由 Tick Host 持有，因为它表示 UE 帧时间累计，而不是离散执行算法状态。
+- `LastExecutionSummary`、Details 配置、日志和 StructuredExperimentJSON 继续留在 Actor/Reporter 边界。
+- Tick、Drone Transform、DrawDebug、Planner 回调和 Summary 输出时机均未修改。
+
+### 保守性说明
+
+- 所有 Runtime 字段类型、默认值和每个执行阶段的读写顺序保持不变。
+- `Reset()` 与旧 `ResetExecutionCache()` 一致，不额外初始化或消耗随机流。
+- `PrepareForExecution()` 与旧 `InitializeExecutionStates()` 一致，在生成执行步 Delay 前使用相同 Seed 初始化随机流。
+- Mission Config 在初始化 Agent State 前保持可用，Reset 与重新缓存顺序未改变。
+- Tick 的 Running 判断、时间步推进、Conflict 记录、Replan 上限判断和统计读取均只改为通过 Session 访问。
+- Summary 和 StructuredExperimentJSON 使用同一组状态和统计值，字段名称及计算公式未修改。
+- `FExecutionRuntimeSession` 不访问 `UWorld`、Drone Transform、DrawDebug 或 `UE_LOG`。
+- `FExecutionAgentState::Drone` 本阶段仍保留，Session 状态与 UE View Binding 的进一步拆分留待后续阶段。
+
+### 回归建议
+
+继续运行原 N200 参数实验，重点核对 Delay 随机序列、completed count、planned/actual makespan、Conflict、Alignment、applied replan count、local/global replan timing 和 StructuredExperimentJSON。
+
+### 回归结果
+
+- 2026-07-18：`FExecutionRuntimeSession` 状态所有权集中后，原 N200 参数实验回归通过，未发现异常。

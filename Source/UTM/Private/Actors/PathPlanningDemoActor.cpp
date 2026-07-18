@@ -14,9 +14,10 @@
 #include "Execution/ExecutionFinalSafetyGateCoordinator.h"
 #include "Execution/ExecutionReplanAttemptRunner.h"
 #include "Execution/ExecutionReplanCoordinator.h"
-#include "Execution/ExecutionReplanPathIntegrator.h"
 #include "Execution/ExecutionReplanProposalSynchronizer.h"
-#include "Execution/ExecutionStepResultApplier.h"
+#include "Execution/ExecutionRuntimeSessionBuilder.h"
+#include "Execution/ExecutionRuntimeSessionReplanCommitter.h"
+#include "Execution/ExecutionRuntimeSessionStepProcessor.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "EditorServices/CityEditorService.h"
 #include "EditorServices/EditorGridService.h"
@@ -458,80 +459,6 @@ namespace
         }
     }
 
-    FExecutionStateTransitionState CaptureExecutionStateTransitionState(
-        const FExecutionAgentState& State)
-    {
-        FExecutionStateTransitionState TransitionState;
-        TransitionState.ExecutedPlanIndex = State.ExecutedPlanIndex;
-        TransitionState.TotalDelaySteps = State.TotalDelaySteps;
-        TransitionState.bFinished = State.bFinished;
-        TransitionState.AlignmentCorrectionCount = State.AlignmentCorrectionCount;
-        TransitionState.AlignmentHoldCount = State.AlignmentHoldCount;
-        TransitionState.AlignmentConflictHoldCount = State.AlignmentConflictHoldCount;
-        TransitionState.AlignmentSnapCount = State.AlignmentSnapCount;
-        TransitionState.AlignmentReplanRequestCount = State.AlignmentReplanRequestCount;
-        TransitionState.AlignmentSuccessfulReplanCount = State.AlignmentSuccessfulReplanCount;
-        TransitionState.MaxAlignmentSpatialError = State.MaxAlignmentSpatialError;
-        TransitionState.MaxAlignmentTemporalError = State.MaxAlignmentTemporalError;
-        TransitionState.bAlignmentLost = State.bAlignmentLost;
-        TransitionState.ConsecutiveConflictHoldCount = State.ConsecutiveConflictHoldCount;
-        TransitionState.ConsecutiveSafetyGateHoldCount = State.ConsecutiveSafetyGateHoldCount;
-        return TransitionState;
-    }
-
-    TMap<int32, FExecutionStepResultApplyAgentState>
-        CaptureExecutionStepResultApplyAgentStates(
-            const TArray<int32>& OrderedMissionIds,
-            const TMap<int32, FExecutionAgentState>& ExecutionStates)
-    {
-        TMap<int32, FExecutionStepResultApplyAgentState> AgentStatesByMissionId;
-        AgentStatesByMissionId.Reserve(OrderedMissionIds.Num());
-
-        for (const int32 MissionId : OrderedMissionIds)
-        {
-            const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-            if (!State)
-            {
-                continue;
-            }
-
-            FExecutionStepResultApplyAgentState AgentState;
-            AgentState.CurrentState = CaptureExecutionStateTransitionState(*State);
-            AgentState.PlannedCellCount = State->PlannedCells.Num();
-            if (AgentState.PlannedCellCount > 0)
-            {
-                AgentState.FinalPlannedCell = State->PlannedCells.Last();
-            }
-            AgentStatesByMissionId.Add(MissionId, MoveTemp(AgentState));
-        }
-
-        return AgentStatesByMissionId;
-    }
-
-    void CommitExecutionStateTransition(
-        FExecutionAgentState& State,
-        const FExecutionStepProposal& Proposal,
-        const FExecutionStateTransitionResult& Result)
-    {
-        State.ExecutedPlanIndex = Result.NextState.ExecutedPlanIndex;
-        State.TotalDelaySteps = Result.NextState.TotalDelaySteps;
-        State.bFinished = Result.NextState.bFinished;
-        State.AlignmentCorrectionCount = Result.NextState.AlignmentCorrectionCount;
-        State.AlignmentHoldCount = Result.NextState.AlignmentHoldCount;
-        State.AlignmentConflictHoldCount = Result.NextState.AlignmentConflictHoldCount;
-        State.AlignmentSnapCount = Result.NextState.AlignmentSnapCount;
-        State.AlignmentReplanRequestCount = Result.NextState.AlignmentReplanRequestCount;
-        State.AlignmentSuccessfulReplanCount = Result.NextState.AlignmentSuccessfulReplanCount;
-        State.MaxAlignmentSpatialError = Result.NextState.MaxAlignmentSpatialError;
-        State.MaxAlignmentTemporalError = Result.NextState.MaxAlignmentTemporalError;
-        State.bAlignmentLost = Result.NextState.bAlignmentLost;
-        State.ConsecutiveConflictHoldCount = Result.NextState.ConsecutiveConflictHoldCount;
-        State.ConsecutiveSafetyGateHoldCount = Result.NextState.ConsecutiveSafetyGateHoldCount;
-        State.DisplayToCell = Result.CommittedCell;
-        State.LastAlignmentAction = FExecutionAlignmentPolicy::LexToString(Proposal.FinalAction);
-        State.ActualCells.Add(Result.CommittedCell);
-    }
-
     FExecutionSummaryBuildRequest CaptureExecutionSummaryBuildRequest(
         const TMap<int32, FExecutionAgentState>& ExecutionStates,
         const TArray<FExecutionConflict>& ExecutionConflicts,
@@ -573,29 +500,6 @@ namespace
         return Request;
     }
 
-    TMap<int32, FExecutionReplanProposalAgentState> CaptureReplanProposalAgentStates(
-        const TArray<int32>& OrderedMissionIds,
-        const TMap<int32, FExecutionAgentState>& ExecutionStates)
-    {
-        TMap<int32, FExecutionReplanProposalAgentState> AgentStatesByMissionId;
-        AgentStatesByMissionId.Reserve(OrderedMissionIds.Num());
-
-        for (const int32 MissionId : OrderedMissionIds)
-        {
-            const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-            if (!State)
-            {
-                continue;
-            }
-
-            FExecutionReplanProposalAgentState AgentState;
-            AgentState.ExecutedPlanIndex = State->ExecutedPlanIndex;
-            AgentState.PlannedCellCount = State->PlannedCells.Num();
-            AgentStatesByMissionId.Add(MissionId, AgentState);
-        }
-
-        return AgentStatesByMissionId;
-    }
 }
 
 APathPlanningDemoActor::APathPlanningDemoActor()
@@ -783,20 +687,22 @@ void APathPlanningDemoActor::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    if (!bExecutionRunning || !IsMultiAgentPlannerType() || !bUseCentralizedExecution)
+    if (!ExecutionSession.bRunning ||
+        !IsMultiAgentPlannerType() ||
+        !bUseCentralizedExecution)
     {
         return;
     }
 
     ExecutionAccumulator += DeltaTime;
 
-    while (bExecutionRunning && ExecutionAccumulator >= CBSStepDuration)
+    while (ExecutionSession.bRunning && ExecutionAccumulator >= CBSStepDuration)
     {
         ExecutionAccumulator -= CBSStepDuration;
         AdvanceExecutionOneStep();
     }
 
-    if (!bExecutionRunning)
+    if (!ExecutionSession.bRunning)
     {
         return;
     }
@@ -1336,87 +1242,51 @@ FIntVector APathPlanningDemoActor::GetCellAtTime(const TArray<FIntVector>& Cells
 void APathPlanningDemoActor::ResetExecutionCache()
 {
     PlannedCellPathsByMission.Reset();
-    ExecutionMissionConfigsByMissionId.Reset();
-    ExecutionStates.Reset();
-    ExecutionConflicts.Reset();
+    ExecutionSession.Reset();
 
     ExecutionAccumulator = 0.f;
-    CurrentExecutionTimeStep = 0;
-    TotalExecutionReplanCount = 0;
-    ExecutionReplanTimingStats = FExecutionReplanTimingStats();
-    bExecutionRunning = false;
 
     LastExecutionSummary = FExecutionSummary();
 }
 
 void APathPlanningDemoActor::CacheExecutionMissionConfigs(const TArray<FDroneMissionConfig>& Missions)
 {
-    ExecutionMissionConfigsByMissionId.Reset();
-
-    for (const FDroneMissionConfig& Mission : Missions)
-    {
-        ExecutionMissionConfigsByMissionId.Add(Mission.MissionId, Mission);
-    }
+    ExecutionSession.MissionConfigsById =
+        FExecutionRuntimeSessionBuilder::BuildMissionConfigsById(Missions);
 }
 
 void APathPlanningDemoActor::InitializeExecutionStates()
 {
-    ExecutionStates.Reset();
-    ExecutionConflicts.Reset();
-
-    ExecutionRandom.Initialize(ExecutionRandomSeed);
+    ExecutionSession.PrepareForExecution(ExecutionRandomSeed);
     ExecutionAccumulator = 0.f;
-    CurrentExecutionTimeStep = 0;
-    TotalExecutionReplanCount = 0;
-    ExecutionReplanTimingStats = FExecutionReplanTimingStats();
-    bExecutionRunning = false;
 
-    for (const TPair<int32, TArray<FIntVector>>& KVP : PlannedCellPathsByMission)
+    FExecutionRuntimeSessionInitializeRequest InitializeRequest;
+    InitializeRequest.GridMap = &GridMap;
+    InitializeRequest.PlannedCellPathsByMission = &PlannedCellPathsByMission;
+    InitializeRequest.MissionConfigsByMissionId =
+        &ExecutionSession.MissionConfigsById;
+    FExecutionRuntimeSessionInitializeResult InitializeResult =
+        FExecutionRuntimeSessionBuilder::BuildInitialState(InitializeRequest);
+    ExecutionSession.AgentStatesByMissionId =
+        MoveTemp(InitializeResult.AgentStatesByMissionId);
+
+    for (TPair<int32, FExecutionAgentState>& Pair :
+        ExecutionSession.AgentStatesByMissionId)
     {
-        const int32 MissionId = KVP.Key;
-        const TArray<FIntVector>& PlannedCells = KVP.Value;
-
-        if (PlannedCells.Num() <= 0)
-        {
-            continue;
-        }
-
-        FExecutionAgentState State;
-        State.MissionId = MissionId;
-        State.Drone = SpawnedDroneByMissionId.FindRef(MissionId);
-        State.PlannedCells = PlannedCells;
-        State.ActualCells.Add(PlannedCells[0]);
-        State.ExecutedPlanIndex = 0;
-        State.TotalDelaySteps = 0;
-        State.bFinished = (PlannedCells.Num() <= 1);
-        State.DisplayFromCell = PlannedCells[0];
-        State.DisplayToCell = PlannedCells[0];
-        State.LastObservedCell = PlannedCells[0];
-        State.GoalCell = PlannedCells.Last();
-        State.GoalWorld = GridMap.CellToWorld(PlannedCells.Last());
-        State.ConsecutiveConflictHoldCount = 0;
-        State.ConsecutiveSafetyGateHoldCount = 0;
-        State.LastAlignmentAction = TEXT("Initialize");
-
-        if (const FDroneMissionConfig* MissionConfig = ExecutionMissionConfigsByMissionId.Find(MissionId))
-        {
-            State.GoalWorld = MissionConfig->GoalWorld;
-            State.GoalCell = GridMap.WorldToCell(MissionConfig->GoalWorld);
-        }
-
+        FExecutionAgentState& State = Pair.Value;
+        State.Drone = SpawnedDroneByMissionId.FindRef(Pair.Key);
         if (State.Drone)
         {
-            State.Drone->SetActorLocation(GridMap.CellToWorld(PlannedCells[0]));
+            State.Drone->SetActorLocation(
+                GridMap.CellToWorld(State.DisplayFromCell));
         }
-
-        ExecutionStates.Add(MissionId, State);
     }
 
-    bExecutionRunning = (ExecutionStates.Num() > 0);
+    ExecutionSession.bRunning = InitializeResult.bRunning;
 
     DetectExecutionConflictsAtStep(0);
 
-    if (!bExecutionRunning)
+    if (!ExecutionSession.bRunning)
     {
         BuildExecutionSummary();
         if (bLogExecutionSummary)
@@ -1428,33 +1298,18 @@ void APathPlanningDemoActor::InitializeExecutionStates()
 
 FExecutionSnapshot APathPlanningDemoActor::CaptureExecutionSnapshot() const
 {
-    FExecutionSnapshot Snapshot;
-    Snapshot.TimeStep = CurrentExecutionTimeStep;
-    Snapshot.TotalReplanCount = TotalExecutionReplanCount;
-    Snapshot.Agents.Reserve(ExecutionStates.Num());
-
-    for (const TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
-    {
-        const FExecutionAgentState& State = KVP.Value;
-        const FIntVector ObservedCell = GetObservedExecutionCell(State);
-
-        FExecutionAgentSnapshot AgentSnapshot;
-        AgentSnapshot.MissionId = State.MissionId;
-        AgentSnapshot.bFinished = State.bFinished;
-        AgentSnapshot.ObservedCell = ObservedCell;
-        AgentSnapshot.ObservedWorld = GridMap.CellToWorld(ObservedCell);
-        AgentSnapshot.GoalCell = State.GoalCell;
-        AgentSnapshot.GoalWorld = State.GoalWorld;
-        AgentSnapshot.TimeStep = CurrentExecutionTimeStep;
-        AgentSnapshot.ExecutedPlanIndex = State.ExecutedPlanIndex;
-        AgentSnapshot.ConsecutiveConflictHoldCount = State.ConsecutiveConflictHoldCount;
-        AgentSnapshot.ConsecutiveSafetyGateHoldCount = State.ConsecutiveSafetyGateHoldCount;
-        AgentSnapshot.PlannedCells = State.PlannedCells;
-
-        Snapshot.Agents.Add(AgentSnapshot);
-    }
-
-    return Snapshot;
+    FExecutionRuntimeSnapshotBuildRequest SnapshotRequest;
+    SnapshotRequest.GridMap = &GridMap;
+    SnapshotRequest.AgentStatesByMissionId =
+        &ExecutionSession.AgentStatesByMissionId;
+    SnapshotRequest.TimeStep = ExecutionSession.TimeStep;
+    SnapshotRequest.TotalReplanCount = ExecutionSession.TotalReplanCount;
+    SnapshotRequest.ResolveObservedCell =
+        [this](const FExecutionAgentState& State)
+        {
+            return GetObservedExecutionCell(State);
+        };
+    return FExecutionRuntimeSessionBuilder::BuildSnapshot(SnapshotRequest);
 }
 
 const FAgentDelayConfig* APathPlanningDemoActor::FindAgentDelayConfig(int32 MissionId) const
@@ -1549,7 +1404,7 @@ bool APathPlanningDemoActor::ShouldDelayThisStep(const FExecutionAgentState& Sta
     case EExecutionDelayMode::RandomGlobal:
     {
         const float P = FMath::Clamp(StepDelayProbability, 0.f, 1.f);
-        return (P > 0.f) && (ExecutionRandom.FRand() < P);
+        return (P > 0.f) && (ExecutionSession.Random.FRand() < P);
     }
 
     case EExecutionDelayMode::PerAgentProbability:
@@ -1561,7 +1416,7 @@ bool APathPlanningDemoActor::ShouldDelayThisStep(const FExecutionAgentState& Sta
         }
 
         const float P = FMath::Clamp(Config->DelayProbability, 0.f, 1.f);
-        return (P > 0.f) && (ExecutionRandom.FRand() < P);
+        return (P > 0.f) && (ExecutionSession.Random.FRand() < P);
     }
 
     case EExecutionDelayMode::ScriptedTimesteps:
@@ -1576,68 +1431,39 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
 {
     // Snap the previous segment to its terminal cell before sampling the current position.
     UpdateExecutionVisuals(1.f);
-    CurrentExecutionTimeStep++;
+    ExecutionSession.TimeStep++;
 
 
-    TArray<int32> MissionIds;
-    ExecutionStates.GetKeys(MissionIds);
-    MissionIds.Sort();
-
-    TArray<FExecutionAgentSnapshot> OrderedAgentSnapshots;
-    OrderedAgentSnapshots.Reserve(MissionIds.Num());
-
-    for (const int32 MissionId : MissionIds)
-    {
-        FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-        if (!State || State->PlannedCells.Num() <= 0)
+    FExecutionRuntimeStepPrepareRequest StepPrepareRequest;
+    StepPrepareRequest.AgentStatesByMissionId =
+        &ExecutionSession.AgentStatesByMissionId;
+    StepPrepareRequest.MissionConfigsById =
+        &ExecutionSession.MissionConfigsById;
+    StepPrepareRequest.TimeStep = ExecutionSession.TimeStep;
+    StepPrepareRequest.ResolveObservedCell =
+        [this](const FExecutionAgentState& State)
         {
-            continue;
-        }
-
-        const FIntVector ObservedCell = GetObservedExecutionCell(*State);
-        State->LastObservedCell = ObservedCell;
-        State->DisplayFromCell = ObservedCell;
-
-        const bool bCanAdvance = (State->ExecutedPlanIndex + 1 < State->PlannedCells.Num());
-        const bool bDelay = bCanAdvance && ShouldDelayThisStep(*State, CurrentExecutionTimeStep);
-        FExecutionAgentSnapshot AgentSnapshot;
-        AgentSnapshot.MissionId = MissionId;
-        AgentSnapshot.bFinished = State->bFinished;
-        AgentSnapshot.bDelayRequested = bDelay;
-        AgentSnapshot.ObservedCell = ObservedCell;
-        AgentSnapshot.TimeStep = CurrentExecutionTimeStep;
-        AgentSnapshot.ExecutedPlanIndex = State->ExecutedPlanIndex;
-        AgentSnapshot.ConsecutiveConflictHoldCount = State->ConsecutiveConflictHoldCount;
-        AgentSnapshot.ConsecutiveSafetyGateHoldCount = State->ConsecutiveSafetyGateHoldCount;
-        AgentSnapshot.PlannedCells = State->PlannedCells;
-        OrderedAgentSnapshots.Add(MoveTemp(AgentSnapshot));
-    }
+            return GetObservedExecutionCell(State);
+        };
+    StepPrepareRequest.ShouldDelay =
+        [this](const FExecutionAgentState& State, int32 TimeStep)
+        {
+            return ShouldDelayThisStep(State, TimeStep);
+        };
+    FExecutionRuntimeStepPrepareResult StepPrepareResult =
+        FExecutionRuntimeSessionStepProcessor::PrepareStep(StepPrepareRequest);
+    const TArray<int32>& MissionIds = StepPrepareResult.OrderedMissionIds;
 
     const FExecutionRuntimeConfig RuntimeConfig = BuildExecutionRuntimeConfig();
 
-    FExecutionConflictResolutionInput ConflictResolutionInput;
-    ConflictResolutionInput.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
-
-    for (const int32 MissionId : MissionIds)
-    {
-        const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-        if (!State)
-        {
-            continue;
-        }
-
-        FExecutionConflictResolutionAgentState AgentState;
-        AgentState.bFinished = State->bFinished;
-        AgentState.ConsecutiveConflictHoldCount = State->ConsecutiveConflictHoldCount;
-        ConflictResolutionInput.AgentStatesByMissionId.Add(MissionId, AgentState);
-    }
-
     FExecutionControllerStepRequest ControllerRequest;
     ControllerRequest.OrderedMissionIds = MissionIds;
-    ControllerRequest.OrderedAgentSnapshots = MoveTemp(OrderedAgentSnapshots);
+    ControllerRequest.OrderedAgentSnapshots =
+        MoveTemp(StepPrepareResult.OrderedAgentSnapshots);
     ControllerRequest.GridMap = &GridMap;
     ControllerRequest.RuntimeConfig = RuntimeConfig;
-    ControllerRequest.ConflictResolutionInput = &ConflictResolutionInput;
+    ControllerRequest.ConflictResolutionInput =
+        &StepPrepareResult.ConflictResolutionInput;
 
     FExecutionControllerStepCallbacks ControllerCallbacks;
     ControllerCallbacks.RunReplan =
@@ -1654,43 +1480,31 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
     ControllerCallbacks.CaptureReplanProposalAgentStates =
         [this, &MissionIds]()
         {
-            return CaptureReplanProposalAgentStates(MissionIds, ExecutionStates);
+            return FExecutionRuntimeSessionStepProcessor::
+                CaptureReplanProposalAgentStates(
+                    MissionIds,
+                    ExecutionSession.AgentStatesByMissionId);
         };
     ControllerCallbacks.BuildFinalSafetyGateInput =
         [this, &MissionIds]()
         {
-            FExecutionFinalSafetyGateInput SafetyGateInput;
-            SafetyGateInput.OrderedMissionIds = MissionIds;
-            SafetyGateInput.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
-
-            for (const int32 MissionId : MissionIds)
-            {
-                const FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-                if (!State)
-                {
-                    continue;
-                }
-
-                FExecutionFinalSafetyGateAgentState AgentState;
-                AgentState.ConsecutiveSafetyGateHoldCount =
-                    State->ConsecutiveSafetyGateHoldCount;
-                SafetyGateInput.AgentStatesByMissionId.Add(MissionId, AgentState);
-            }
-
-            return SafetyGateInput;
+            return FExecutionRuntimeSessionStepProcessor::BuildFinalSafetyGateInput(
+                MissionIds,
+                ExecutionSession.MissionConfigsById,
+                ExecutionSession.AgentStatesByMissionId);
         };
     if (bLogConflictPredictionEvents)
     {
         ControllerCallbacks.OnConflictResolutionEvent =
             [this](const FExecutionConflictResolutionEvent& Event)
             {
-                LogExecutionConflictResolutionEvent(Event, CurrentExecutionTimeStep);
+                LogExecutionConflictResolutionEvent(Event, ExecutionSession.TimeStep);
             };
     }
     ControllerCallbacks.OnFinalSafetyGateEvent =
         [this](const FExecutionFinalSafetyGateEvent& Event)
         {
-            LogExecutionFinalSafetyGateEvent(Event, CurrentExecutionTimeStep);
+            LogExecutionFinalSafetyGateEvent(Event, ExecutionSession.TimeStep);
         };
 
     FExecutionControllerStepResult ControllerResult =
@@ -1701,7 +1515,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
 
     if (ControllerResult.bStopExecution)
     {
-        bExecutionRunning = false;
+        ExecutionSession.bRunning = false;
         BuildExecutionSummary();
         if (bLogExecutionSummary)
         {
@@ -1710,17 +1524,17 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         return;
     }
 
-    FExecutionStepResultApplyRequest ApplyRequest;
-    ApplyRequest.OrderedMissionIds = MissionIds;
-    ApplyRequest.AgentStatesByMissionId =
-        CaptureExecutionStepResultApplyAgentStates(MissionIds, ExecutionStates);
     const FExecutionStepResultApplyResult ApplyResult =
-        FExecutionStepResultApplier::Apply(ApplyRequest, ControllerResult);
+        FExecutionRuntimeSessionStepProcessor::ApplyControllerResult(
+            MissionIds,
+            ExecutionSession.AgentStatesByMissionId,
+            ControllerResult);
 
     for (const FExecutionStepAppliedAgent& AppliedAgent : ApplyResult.AppliedAgents)
     {
         const int32 MissionId = AppliedAgent.MissionId;
-        FExecutionAgentState* State = ExecutionStates.Find(MissionId);
+        FExecutionAgentState* State =
+            ExecutionSession.AgentStatesByMissionId.Find(MissionId);
         const FExecutionStepProposal* Proposal =
             ControllerResult.StepProposals.Find(MissionId);
         if (!State || !Proposal)
@@ -1728,18 +1542,13 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
             continue;
         }
 
-        CommitExecutionStateTransition(
-            *State,
-            *Proposal,
-            AppliedAgent.TransitionResult);
-
         if (Proposal->bDelayRequested && bLogExecutionDelay)
         {
             UE_LOG(
                 LogTemp,
                 Warning,
                 TEXT("[ExecutionDelay] t=%d Mission=%d stay at Cell=(%d,%d,%d)"),
-                CurrentExecutionTimeStep,
+                ExecutionSession.TimeStep,
                 State->MissionId,
                 Proposal->ObservedCell.X,
                 Proposal->ObservedCell.Y,
@@ -1753,7 +1562,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                 LogTemp,
                 Warning,
                 TEXT("[Alignment] t=%d Mission=%d Action=%s Observed=(%d,%d,%d) RefIndex=%d RefCell=(%d,%d,%d) NextCell=(%d,%d,%d) SpatialError=%d TemporalError=%d Replan=%s Reason=%s"),
-                CurrentExecutionTimeStep,
+                ExecutionSession.TimeStep,
                 State->MissionId,
                 FExecutionAlignmentPolicy::LexToString(Proposal->FinalAction),
                 Proposal->AlignmentDecision.ObservedCell.X,
@@ -1773,11 +1582,11 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         }
     }
 
-    DetectExecutionConflictsAtStep(CurrentExecutionTimeStep);
+    DetectExecutionConflictsAtStep(ExecutionSession.TimeStep);
 
     if (!ApplyResult.bAnyActive)
     {
-        bExecutionRunning = false;
+        ExecutionSession.bRunning = false;
         UpdateExecutionVisuals(1.f);
 
         BuildExecutionSummary();
@@ -1789,16 +1598,16 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         return;
     }
 
-    bExecutionRunning = true;
+    ExecutionSession.bRunning = true;
 }
 
 void APathPlanningDemoActor::BuildExecutionSummary()
 {
     LastExecutionSummary = FExecutionSummaryBuilder::Build(
         CaptureExecutionSummaryBuildRequest(
-            ExecutionStates,
-            ExecutionConflicts,
-            ExecutionMissionConfigsByMissionId));
+            ExecutionSession.AgentStatesByMissionId,
+            ExecutionSession.Conflicts,
+            ExecutionSession.MissionConfigsById));
 }
 
 void APathPlanningDemoActor::LogExecutionSummary() const
@@ -1819,7 +1628,11 @@ void APathPlanningDemoActor::LogExecutionSummary() const
         AlignmentConflictResolutionPasses,
         AlignmentConflictHoldThresholdForReplan,
         MaxExecutionReplanCount);
-    UE_LOG(LogTemp, Warning, TEXT("AppliedExecutionReplans = %d"), TotalExecutionReplanCount);
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("AppliedExecutionReplans = %d"),
+        ExecutionSession.TotalReplanCount);
 
     UE_LOG(LogTemp, Warning, TEXT("AgentCount = %d, CompletedAgentCount = %d"),
         LastExecutionSummary.AgentCount,
@@ -1934,7 +1747,7 @@ FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
         LastExecutionSummary.CompletedAgentCount > 0 ||
         LastExecutionSummary.PlannedMakespan > 0 ||
         LastExecutionSummary.ActualMakespan > 0 ||
-        ExecutionConflicts.Num() > 0;
+        ExecutionSession.Conflicts.Num() > 0;
 
     const int32 EffectiveAgentCount =
         bHasExecutionSummary ? LastExecutionSummary.AgentCount : LastPlanningStats.MissionCount;
@@ -1950,12 +1763,14 @@ FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
     const bool bNoFlyValidationClear =
         !bValidatePathsAgainstNoFlyZones || LastNoFlyZonePathValidation.TotalViolationCount <= 0;
     const int32 ExecutionReplanAttemptCount =
-        ExecutionReplanTimingStats.LocalAttemptCount + ExecutionReplanTimingStats.GlobalAttemptCount;
+        ExecutionSession.ReplanTimingStats.LocalAttemptCount +
+        ExecutionSession.ReplanTimingStats.GlobalAttemptCount;
     const double ExecutionReplanTotalTimeMs =
-        ExecutionReplanTimingStats.LocalTotalTimeMs + ExecutionReplanTimingStats.GlobalTotalTimeMs;
+        ExecutionSession.ReplanTimingStats.LocalTotalTimeMs +
+        ExecutionSession.ReplanTimingStats.GlobalTotalTimeMs;
     const double ExecutionReplanMaxTimeMs = FMath::Max(
-        ExecutionReplanTimingStats.LocalMaxTimeMs,
-        ExecutionReplanTimingStats.GlobalMaxTimeMs);
+        ExecutionSession.ReplanTimingStats.LocalMaxTimeMs,
+        ExecutionSession.ReplanTimingStats.GlobalMaxTimeMs);
 
     FExperimentMetadataResolverInput MetadataInput;
     MetadataInput.RunId = ExperimentRunId;
@@ -2044,16 +1859,22 @@ FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
     ReportContext.AlignmentReplanRequestCount = LastExecutionSummary.AlignmentReplanRequestCount;
     ReportContext.AlignmentSuccessfulReplanCount = LastExecutionSummary.AlignmentSuccessfulReplanCount;
 
-    ReportContext.AppliedExecutionReplans = TotalExecutionReplanCount;
+    ReportContext.AppliedExecutionReplans = ExecutionSession.TotalReplanCount;
     ReportContext.ExecutionReplanAttemptCount = ExecutionReplanAttemptCount;
     ReportContext.ExecutionReplanTotalTimeMs = ExecutionReplanTotalTimeMs;
     ReportContext.ExecutionReplanMaxTimeMs = ExecutionReplanMaxTimeMs;
-    ReportContext.ExecutionReplanLocalAttemptCount = ExecutionReplanTimingStats.LocalAttemptCount;
-    ReportContext.ExecutionReplanLocalTotalTimeMs = ExecutionReplanTimingStats.LocalTotalTimeMs;
-    ReportContext.ExecutionReplanLocalMaxTimeMs = ExecutionReplanTimingStats.LocalMaxTimeMs;
-    ReportContext.ExecutionReplanGlobalAttemptCount = ExecutionReplanTimingStats.GlobalAttemptCount;
-    ReportContext.ExecutionReplanGlobalTotalTimeMs = ExecutionReplanTimingStats.GlobalTotalTimeMs;
-    ReportContext.ExecutionReplanGlobalMaxTimeMs = ExecutionReplanTimingStats.GlobalMaxTimeMs;
+    ReportContext.ExecutionReplanLocalAttemptCount =
+        ExecutionSession.ReplanTimingStats.LocalAttemptCount;
+    ReportContext.ExecutionReplanLocalTotalTimeMs =
+        ExecutionSession.ReplanTimingStats.LocalTotalTimeMs;
+    ReportContext.ExecutionReplanLocalMaxTimeMs =
+        ExecutionSession.ReplanTimingStats.LocalMaxTimeMs;
+    ReportContext.ExecutionReplanGlobalAttemptCount =
+        ExecutionSession.ReplanTimingStats.GlobalAttemptCount;
+    ReportContext.ExecutionReplanGlobalTotalTimeMs =
+        ExecutionSession.ReplanTimingStats.GlobalTotalTimeMs;
+    ReportContext.ExecutionReplanGlobalMaxTimeMs =
+        ExecutionSession.ReplanTimingStats.GlobalMaxTimeMs;
 
     return FExperimentReporter::BuildStructuredSummaryJson(ReportContext);
 }
@@ -2074,11 +1895,12 @@ void APathPlanningDemoActor::LogStructuredExperimentSummaryJson() const
 void APathPlanningDemoActor::DetectExecutionConflictsAtStep(int32 TimeStep)
 {
     TArray<int32> MissionIds;
-    ExecutionStates.GetKeys(MissionIds);
+    ExecutionSession.AgentStatesByMissionId.GetKeys(MissionIds);
 
     for (int32 I = 0; I < MissionIds.Num(); ++I)
     {
-        const FExecutionAgentState* A = ExecutionStates.Find(MissionIds[I]);
+        const FExecutionAgentState* A =
+            ExecutionSession.AgentStatesByMissionId.Find(MissionIds[I]);
         if (!A)
         {
             continue;
@@ -2086,7 +1908,8 @@ void APathPlanningDemoActor::DetectExecutionConflictsAtStep(int32 TimeStep)
 
         for (int32 J = I + 1; J < MissionIds.Num(); ++J)
         {
-            const FExecutionAgentState* B = ExecutionStates.Find(MissionIds[J]);
+            const FExecutionAgentState* B =
+                ExecutionSession.AgentStatesByMissionId.Find(MissionIds[J]);
             if (!B)
             {
                 continue;
@@ -2103,7 +1926,7 @@ void APathPlanningDemoActor::DetectExecutionConflictsAtStep(int32 TimeStep)
                 Conflict.AgentB = B->MissionId;
                 Conflict.bIsEdgeConflict = false;
                 Conflict.Cell = ACell;
-                ExecutionConflicts.Add(Conflict);
+                ExecutionSession.Conflicts.Add(Conflict);
 
                 UE_LOG(
                     LogTemp,
@@ -2139,7 +1962,7 @@ void APathPlanningDemoActor::DetectExecutionConflictsAtStep(int32 TimeStep)
                     Conflict.ToA = ACell;
                     Conflict.FromB = BPrev;
                     Conflict.ToB = BCell;
-                    ExecutionConflicts.Add(Conflict);
+                    ExecutionSession.Conflicts.Add(Conflict);
 
                     UE_LOG(
                         LogTemp,
@@ -2161,7 +1984,8 @@ void APathPlanningDemoActor::DetectExecutionConflictsAtStep(int32 TimeStep)
 
 void APathPlanningDemoActor::UpdateExecutionVisuals(float Alpha)
 {
-    for (TPair<int32, FExecutionAgentState>& KVP : ExecutionStates)
+    for (TPair<int32, FExecutionAgentState>& KVP :
+        ExecutionSession.AgentStatesByMissionId)
     {
         FExecutionAgentState& State = KVP.Value;
 
@@ -2174,7 +1998,7 @@ void APathPlanningDemoActor::UpdateExecutionVisuals(float Alpha)
             State.Drone->SetActorLocation(NewLocation);
         }
 
-        DrawExecutionDebugForState(State, CurrentExecutionTimeStep);
+        DrawExecutionDebugForState(State, ExecutionSession.TimeStep);
     }
 }
 
@@ -2635,7 +2459,7 @@ bool APathPlanningDemoActor::RunExecutionReplanAttempt(
 
     FExecutionReplanAttemptContext Context;
     Context.BaseGrid = &GridMap;
-    Context.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
+    Context.MissionConfigsById = &ExecutionSession.MissionConfigsById;
     Context.PlannerType = PlannerType;
     Context.PlannerConfig = &PlannerConfig;
 
@@ -2652,46 +2476,42 @@ bool APathPlanningDemoActor::ApplyExecutionReplanAttemptResult(
     const FExecutionReplanAttemptResult& Result,
     TSet<int32>& OutReplannedMissionIds)
 {
+    FExecutionRuntimeReplanAttemptCommitRequest CommitRequest;
+    CommitRequest.AttemptResult = &Result;
+    CommitRequest.MissionConfigsById = &ExecutionSession.MissionConfigsById;
+    CommitRequest.AgentStatesByMissionId =
+        &ExecutionSession.AgentStatesByMissionId;
+    CommitRequest.PlannedCellPathsByMissionId = &PlannedCellPathsByMission;
+    const FExecutionRuntimeReplanAttemptCommitResult CommitResult =
+        FExecutionRuntimeSessionReplanCommitter::CommitAttemptResult(
+            CommitRequest);
+
     for (const int32 MissionId : Result.CandidateMissionIds)
     {
-        FExecutionAgentState* State = ExecutionStates.Find(MissionId);
-        const FDroneMissionConfig* MissionConfig = ExecutionMissionConfigsByMissionId.Find(MissionId);
-        const TArray<FIntVector>* ReplannedCellPath = Result.ReplannedCellPathsByMission.Find(MissionId);
-        if (!State || !MissionConfig || !ReplannedCellPath)
+        if (!CommitResult.ReplannedMissionIds.Contains(MissionId))
         {
-            return false;
+            continue;
         }
 
-        const FExecutionReplanPathIntegrationResult IntegrationResult =
-            FExecutionReplanPathIntegrator::Integrate(
-                State->ActualCells,
-                State->LastObservedCell,
-                *ReplannedCellPath);
-        if (!IntegrationResult.bSuccess)
+        const TArray<FIntVector>* TimelineCells =
+            PlannedCellPathsByMission.Find(MissionId);
+        if (!TimelineCells)
         {
-            return false;
+            continue;
         }
 
         TArray<FVector> TimelineWorld;
-        TimelineWorld.Reserve(IntegrationResult.TimelineCells.Num());
-        for (const FIntVector& Cell : IntegrationResult.TimelineCells)
+        TimelineWorld.Reserve(TimelineCells->Num());
+        for (const FIntVector& Cell : *TimelineCells)
         {
             TimelineWorld.Add(GridMap.CellToWorld(Cell));
         }
 
-        State->PlannedCells = IntegrationResult.TimelineCells;
-        State->ExecutedPlanIndex = IntegrationResult.ExecutedPlanIndex;
-        State->GoalCell = IntegrationResult.GoalCell;
-        State->GoalWorld = MissionConfig->GoalWorld;
-        State->ConsecutiveConflictHoldCount = 0;
-        State->bAlignmentLost = false;
-
-        PlannedCellPathsByMission.Add(MissionId, IntegrationResult.TimelineCells);
         LastPlannedPathsByMission.Add(MissionId, TimelineWorld);
-        OutReplannedMissionIds.Add(MissionId);
     }
 
-    return OutReplannedMissionIds.Num() > 0;
+    OutReplannedMissionIds = CommitResult.ReplannedMissionIds;
+    return CommitResult.bSuccess;
 }
 
 bool APathPlanningDemoActor::TryExecutionReplan(
@@ -2713,13 +2533,14 @@ bool APathPlanningDemoActor::TryExecutionReplan(
     }
 
     const int32 MaxReplanCount = RuntimeConfig.ReplanService.MaxReplanCount;
-    if (MaxReplanCount >= 0 && TotalExecutionReplanCount >= MaxReplanCount)
+    if (MaxReplanCount >= 0 &&
+        ExecutionSession.TotalReplanCount >= MaxReplanCount)
     {
         UE_LOG(
             LogTemp,
             Warning,
             TEXT("[AlignmentReplan] skipped because total replan count %d reached limit %d"),
-            TotalExecutionReplanCount,
+            ExecutionSession.TotalReplanCount,
             MaxReplanCount);
         return false;
     }
@@ -2727,7 +2548,9 @@ bool APathPlanningDemoActor::TryExecutionReplan(
     FExecutionSnapshot ExecutionSnapshot = CaptureExecutionSnapshot();
     for (FExecutionAgentSnapshot& AgentSnapshot : ExecutionSnapshot.Agents)
     {
-        if (const FExecutionAgentState* State = ExecutionStates.Find(AgentSnapshot.MissionId))
+        if (const FExecutionAgentState* State =
+            ExecutionSession.AgentStatesByMissionId.Find(
+                AgentSnapshot.MissionId))
         {
             AgentSnapshot.ObservedCell = State->LastObservedCell;
             AgentSnapshot.ObservedWorld = GridMap.CellToWorld(State->LastObservedCell);
@@ -2736,7 +2559,8 @@ bool APathPlanningDemoActor::TryExecutionReplan(
 
     FExecutionReplanCoordinatorRequest CoordinatorRequest;
     CoordinatorRequest.Snapshot = &ExecutionSnapshot;
-    CoordinatorRequest.MissionConfigsById = &ExecutionMissionConfigsByMissionId;
+    CoordinatorRequest.MissionConfigsById =
+        &ExecutionSession.MissionConfigsById;
     CoordinatorRequest.RequestedMissionIds = RequestedMissionIds;
     CoordinatorRequest.bGlobalReplan = bGlobalReplan;
     CoordinatorRequest.bCheckStaticUTMSafety =
@@ -2747,8 +2571,9 @@ bool APathPlanningDemoActor::TryExecutionReplan(
         RuntimeConfig.ReplanService.LocalSpatialExpansionRadiusCells;
     CoordinatorRequest.BaseLookaheadSteps =
         RuntimeConfig.ReplanService.LocalLookaheadSteps;
-    CoordinatorRequest.ExecutionTimeStep = CurrentExecutionTimeStep;
-    CoordinatorRequest.CurrentTotalReplanCount = TotalExecutionReplanCount;
+    CoordinatorRequest.ExecutionTimeStep = ExecutionSession.TimeStep;
+    CoordinatorRequest.CurrentTotalReplanCount =
+        ExecutionSession.TotalReplanCount;
 
     FExecutionReplanCoordinatorCallbacks CoordinatorCallbacks;
     CoordinatorCallbacks.RunAttempt =
@@ -2774,24 +2599,11 @@ bool APathPlanningDemoActor::TryExecutionReplan(
     const FExecutionReplanCoordinatorResult CoordinatorResult =
         FExecutionReplanCoordinator::Run(CoordinatorRequest, CoordinatorCallbacks);
 
-    if (bGlobalReplan)
-    {
-        ExecutionReplanTimingStats.GlobalAttemptCount += CoordinatorResult.TimedAttemptCount;
-        ExecutionReplanTimingStats.GlobalTotalTimeMs += CoordinatorResult.TotalAttemptTimeMs;
-        ExecutionReplanTimingStats.GlobalMaxTimeMs = FMath::Max(
-            ExecutionReplanTimingStats.GlobalMaxTimeMs,
-            CoordinatorResult.MaxAttemptTimeMs);
-    }
-    else
-    {
-        ExecutionReplanTimingStats.LocalAttemptCount += CoordinatorResult.TimedAttemptCount;
-        ExecutionReplanTimingStats.LocalTotalTimeMs += CoordinatorResult.TotalAttemptTimeMs;
-        ExecutionReplanTimingStats.LocalMaxTimeMs = FMath::Max(
-            ExecutionReplanTimingStats.LocalMaxTimeMs,
-            CoordinatorResult.MaxAttemptTimeMs);
-    }
-
-    TotalExecutionReplanCount += CoordinatorResult.AppliedReplanCount;
+    FExecutionRuntimeSessionReplanCommitter::CommitCoordinatorResult(
+        bGlobalReplan,
+        CoordinatorResult,
+        ExecutionSession.ReplanTimingStats,
+        ExecutionSession.TotalReplanCount);
     OutReplannedMissionIds = CoordinatorResult.ReplannedMissionIds;
     return CoordinatorResult.bSuccess;
 }
