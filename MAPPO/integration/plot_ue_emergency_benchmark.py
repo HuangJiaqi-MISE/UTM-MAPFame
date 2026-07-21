@@ -93,6 +93,14 @@ def main() -> None:
         args.out_dir / "table_02_overall_recovery_summary.md",
     )
 
+    import matplotlib as mpl
+
+    mpl.rcParams.update(
+        {
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    )
     import matplotlib.pyplot as plt
 
     plot_recovery_outcome_matrix_figure(
