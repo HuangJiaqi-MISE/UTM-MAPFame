@@ -20,7 +20,6 @@ struct FExecutionRuntimeCoordinatorRequest
 struct FExecutionRuntimeCoordinatorCallbacks
 {
     TFunction<FIntVector(const FExecutionAgentState&)> ResolveObservedCell;
-    TFunction<bool(const FExecutionAgentState&, int32)> ShouldDelay;
     TFunction<bool(const TSet<int32>&, bool, TSet<int32>&)> RunReplan;
     TFunction<void(const FExecutionConflictResolutionEvent&)>
         OnConflictResolutionEvent;

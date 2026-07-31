@@ -1310,30 +1310,6 @@ FExecutionSnapshot APathPlanningDemoActor::CaptureExecutionSnapshot() const
     return FExecutionRuntimeSessionBuilder::BuildSnapshot(SnapshotRequest);
 }
 
-const FAgentDelayConfig* APathPlanningDemoActor::FindAgentDelayConfig(int32 MissionId) const
-{
-    for (const FAgentDelayConfig& Config : AgentDelayConfigs)
-    {
-        if (Config.MissionId == MissionId)
-        {
-            return &Config;
-        }
-    }
-
-    return nullptr;
-}
-
-bool APathPlanningDemoActor::IsForcedDelayStep(const FExecutionAgentState& State, int32 TimeStep) const
-{
-    const FAgentDelayConfig* Config = FindAgentDelayConfig(State.MissionId);
-    if (!Config)
-    {
-        return false;
-    }
-
-    return Config->ForcedDelaySteps.Contains(TimeStep);
-}
-
 ADroneActor* APathPlanningDemoActor::FindExecutionDrone(int32 MissionId) const
 {
     const TObjectPtr<ADroneActor>* Drone = SpawnedDroneByMissionId.Find(MissionId);
@@ -1378,6 +1354,9 @@ FDiscreteAlignmentSettings APathPlanningDemoActor::BuildDiscreteAlignmentSetting
 FExecutionRuntimeConfig APathPlanningDemoActor::BuildExecutionRuntimeConfig() const
 {
     FExecutionRuntimeConfig Config;
+    Config.Delay.Mode = DelayMode;
+    Config.Delay.GlobalDelayProbability = StepDelayProbability;
+    Config.Delay.AgentConfigs = AgentDelayConfigs;
     Config.Alignment = BuildDiscreteAlignmentSettings();
     Config.ConflictResolution.bEnabled = bEnableConflictAwareAlignment;
     Config.ConflictResolution.MaxResolutionPasses =
@@ -1396,41 +1375,6 @@ FExecutionRuntimeConfig APathPlanningDemoActor::BuildExecutionRuntimeConfig() co
     return Config;
 }
 
-bool APathPlanningDemoActor::ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep)
-{
-    if (State.bFinished)
-    {
-        return false;
-    }
-
-    switch (DelayMode)
-    {
-    case EExecutionDelayMode::RandomGlobal:
-    {
-        const float P = FMath::Clamp(StepDelayProbability, 0.f, 1.f);
-        return (P > 0.f) && (ExecutionSession.Random.FRand() < P);
-    }
-
-    case EExecutionDelayMode::PerAgentProbability:
-    {
-        const FAgentDelayConfig* Config = FindAgentDelayConfig(State.MissionId);
-        if (!Config)
-        {
-            return false;
-        }
-
-        const float P = FMath::Clamp(Config->DelayProbability, 0.f, 1.f);
-        return (P > 0.f) && (ExecutionSession.Random.FRand() < P);
-    }
-
-    case EExecutionDelayMode::ScriptedTimesteps:
-        return IsForcedDelayStep(State, TimeStep);
-
-    default:
-        return false;
-    }
-}
-
 void APathPlanningDemoActor::AdvanceExecutionOneStep()
 {
     // Snap the previous segment to its terminal cell before sampling the current position.
@@ -1447,11 +1391,6 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         [this](const FExecutionAgentState& State)
         {
             return GetObservedExecutionCell(State);
-        };
-    CoordinatorCallbacks.ShouldDelay =
-        [this](const FExecutionAgentState& State, int32 TimeStep)
-        {
-            return ShouldDelayThisStep(State, TimeStep);
         };
     CoordinatorCallbacks.RunReplan =
         [this](

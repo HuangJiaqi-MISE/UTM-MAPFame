@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Execution/DiscreteAlignmentManager.h"
 #include "Execution/ExecutionConflictResolutionPolicy.h"
+#include "Execution/ExecutionDelayPolicyTypes.h"
 #include "Execution/ExecutionFinalSafetyGateTypes.h"
 #include "Execution/ExecutionTypes.h"
 
@@ -16,6 +17,7 @@ struct FExecutionReplanServiceSettings
 
 struct FExecutionRuntimeConfig
 {
+    FExecutionDelayPolicySettings Delay;
     FDiscreteAlignmentSettings Alignment;
     FExecutionConflictResolutionSettings ConflictResolution;
     FExecutionFinalSafetyGateSettings FinalSafetyGate;

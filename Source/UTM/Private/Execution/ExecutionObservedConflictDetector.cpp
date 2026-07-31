@@ -2,7 +2,7 @@
 
 namespace
 {
-    FIntVector GetCellAtTime(
+    FIntVector GetObservedConflictCellAtTime(
         const TArray<FIntVector>& Cells,
         int32 TimeStep)
     {
@@ -57,9 +57,13 @@ FExecutionObservedConflictDetector::Detect(
             }
 
             const FIntVector ACell =
-                GetCellAtTime(A->ActualCells, Request.TimeStep);
+                GetObservedConflictCellAtTime(
+                    A->ActualCells,
+                    Request.TimeStep);
             const FIntVector BCell =
-                GetCellAtTime(B->ActualCells, Request.TimeStep);
+                GetObservedConflictCellAtTime(
+                    B->ActualCells,
+                    Request.TimeStep);
 
             if (ACell == BCell)
             {
@@ -78,9 +82,13 @@ FExecutionObservedConflictDetector::Detect(
             }
 
             const FIntVector APrev =
-                GetCellAtTime(A->ActualCells, Request.TimeStep - 1);
+                GetObservedConflictCellAtTime(
+                    A->ActualCells,
+                    Request.TimeStep - 1);
             const FIntVector BPrev =
-                GetCellAtTime(B->ActualCells, Request.TimeStep - 1);
+                GetObservedConflictCellAtTime(
+                    B->ActualCells,
+                    Request.TimeStep - 1);
             const bool bEdgeConflict =
                 (APrev == BCell) &&
                 (BPrev == ACell) &&

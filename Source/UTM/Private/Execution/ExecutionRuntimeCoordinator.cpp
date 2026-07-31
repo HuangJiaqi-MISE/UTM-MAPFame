@@ -1,6 +1,7 @@
 #include "Execution/ExecutionRuntimeCoordinator.h"
 
 #include "Execution/ExecutionControllerRegistry.h"
+#include "Execution/ExecutionDelayPolicy.h"
 #include "Execution/ExecutionObservedConflictDetector.h"
 #include "Execution/ExecutionRuntimeSessionStepProcessor.h"
 
@@ -33,7 +34,18 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
     StepPrepareRequest.MissionConfigsById = &Session.MissionConfigsById;
     StepPrepareRequest.TimeStep = Session.TimeStep;
     StepPrepareRequest.ResolveObservedCell = Callbacks.ResolveObservedCell;
-    StepPrepareRequest.ShouldDelay = Callbacks.ShouldDelay;
+    StepPrepareRequest.ShouldDelay =
+        [&Request, &Session](
+            const FExecutionAgentState& AgentState,
+            int32 TimeStep)
+        {
+            FExecutionDelayPolicyInput DelayInput;
+            DelayInput.AgentState = &AgentState;
+            DelayInput.Settings = &Request.RuntimeConfig.Delay;
+            DelayInput.Random = &Session.Random;
+            DelayInput.TimeStep = TimeStep;
+            return FExecutionDelayPolicy::ShouldDelay(DelayInput);
+        };
     FExecutionRuntimeStepPrepareResult StepPrepareResult =
         FExecutionRuntimeSessionStepProcessor::PrepareStep(StepPrepareRequest);
     const TArray<int32>& MissionIds = StepPrepareResult.OrderedMissionIds;

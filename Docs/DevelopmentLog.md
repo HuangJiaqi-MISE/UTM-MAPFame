@@ -2482,3 +2482,63 @@ Execution 已经具备 Runtime Session、Step Processor、Controller Registry、
 
 - 2026-07-31：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 通过，新 `ExecutionObservedConflictDetector.cpp`、修改后的 Runtime Coordinator、Actor 和 UTM 模块均完成编译与链接，本轮无编译警告。
 - 2026-07-31：运行原 N200 参数实验，执行流程和 StructuredExperimentJSON 检查正常，未发现实际冲突统计、makespan 或 Replan 指标异常。
+
+## 2026-07-31 Execution Runtime Coordinator 第三阶段：Delay Policy
+
+### 背景
+
+前两阶段已经让 Runtime Coordinator 负责 Step 编排和实际冲突记录，但 `RandomGlobal`、`PerAgentProbability`、`ScriptedTimesteps` 三种 Delay 决策及 `ExecutionSession.Random` 消费仍由 Actor 回调执行。Delay 是 Benchmark 执行扰动策略，不依赖 UE World 或 Drone，本阶段将其移入独立 Execution Policy，并由 Coordinator 统一调用。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionDelayPolicyTypes.h`
+- `Source/UTM/Public/Execution/ExecutionDelayPolicy.h`
+- `Source/UTM/Private/Execution/ExecutionDelayPolicy.cpp`
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeConfig.h`
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinatorTypes.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeCoordinator.cpp`
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 新职责边界
+
+- `FExecutionDelayPolicySettings` 保存 Delay Mode、全局概率和 Per-Agent 配置快照。
+- `FExecutionDelayPolicy::ShouldDelay()` 统一执行三种 Delay 策略。
+- `FExecutionRuntimeConfig` 新增 `Delay` 设置，和 Alignment、Conflict Resolution、Safety Gate、Replan 设置一起构成执行配置快照。
+- Runtime Coordinator 在 `PrepareStep()` 内通过同一个 `ExecutionSession.Random` 调用 Delay Policy。
+- Actor 的 `BuildExecutionRuntimeConfig()` 只负责把 Details 属性复制到 Delay Settings。
+- Actor 中原 `FindAgentDelayConfig()`、`IsForcedDelayStep()`、`ShouldDelayThisStep()` 以及 `ShouldDelay` Coordinator 回调已删除。
+
+### 随机序列保守性
+
+- Agent 仍由 Session Step Processor 按 Mission ID 排序后依次判断。
+- Agent 无下一步可执行时，Step Processor 仍不会调用 Delay Policy。
+- `bFinished=true` 时不消费随机数。
+- `RandomGlobal` 概率小于等于 0 时不消费随机数。
+- `PerAgentProbability` 找不到对应配置或配置概率小于等于 0 时不消费随机数。
+- `ScriptedTimesteps` 只查询 `ForcedDelaySteps`，不消费随机数。
+- 概率仍使用 `[0, 1]` Clamp，并通过同一次 `FRandomStream::FRand() < Probability` 判断。
+- Session Random Seed 初始化位置和时机未修改。
+
+### 保守性说明
+
+- `DelayMode`、`StepDelayProbability` 和 `AgentDelayConfigs` 的 Details、Blueprint 和 Reporter 字段未修改。
+- Delay 日志仍由 Actor 根据最终 Step Proposal 输出，格式和时机未修改。
+- Alignment、Conflict Resolution、Final Safety Gate、Replan、实际冲突记录、Summary 和 StructuredExperimentJSON 字段未修改。
+- Controller 仍按原逻辑每个 timestep 创建一次；本阶段不改变 Controller 生命周期。
+- EUW 接口未修改。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development。
+2. 使用原 N200 RandomGlobal 参数实验，重点核对 `total_delay_steps`、`actual_makespan`、Alignment 和 Replan 指标。
+3. 后续可分别使用 Per-Agent Probability 与 Scripted Timesteps 做小规模定向检查，确认配置查找和强制 Delay timestep 行为不变。
+
+### 验证结果
+
+- 首次编译在 Unity Build 中发现 `ExecutionObservedConflictDetector.cpp` 与 `ExecutionReplanCandidateSelector.cpp` 的匿名命名空间辅助函数同名；将 Detector 内部函数重命名为唯一的 `GetObservedConflictCellAtTime()`，函数逻辑未修改。
+- 2026-07-31：修正内部辅助函数名称后，UTMEditor Win64 Development 编译通过；Execution Delay Policy、Observed Conflict Detector、Runtime Coordinator、Actor、Unity translation unit 和 UTM 模块均完成编译与链接，本轮最终编译无警告。
+- 2026-07-31：运行原 N200 RandomGlobal 参数实验，执行流程和 StructuredExperimentJSON 检查正常，未发现 Delay 随机序列、total delay steps、makespan、Alignment、Conflict 或 Replan 指标异常。
