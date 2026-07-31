@@ -5,6 +5,34 @@
 #include "Execution/ExecutionObservedConflictDetector.h"
 #include "Execution/ExecutionRuntimeSessionStepProcessor.h"
 
+FExecutionRuntimeCoordinator::FExecutionRuntimeCoordinator() = default;
+
+FExecutionRuntimeCoordinator::~FExecutionRuntimeCoordinator() = default;
+
+bool FExecutionRuntimeCoordinator::InitializeController(
+    EExecutionControllerType ControllerType,
+    FString& OutFailureReason)
+{
+    ResetController();
+    ActiveController =
+        FExecutionControllerRegistry::CreateController(ControllerType);
+    if (!ActiveController)
+    {
+        OutFailureReason = FString::Printf(
+            TEXT("Failed to create execution controller: %s"),
+            *FExecutionControllerRegistry::GetControllerTypeName(ControllerType));
+        return false;
+    }
+
+    OutFailureReason.Reset();
+    return true;
+}
+
+void FExecutionRuntimeCoordinator::ResetController()
+{
+    ActiveController.Reset();
+}
+
 FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
     const FExecutionRuntimeCoordinatorRequest& Request,
     const FExecutionRuntimeCoordinatorCallbacks& Callbacks)
@@ -21,6 +49,13 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
     {
         Result.FailureReason =
             TEXT("Execution runtime coordinator request has no grid map");
+        return Result;
+    }
+
+    if (!ActiveController)
+    {
+        Result.FailureReason =
+            TEXT("Execution runtime coordinator has no active controller");
         return Result;
     }
 
@@ -83,8 +118,7 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
     ControllerCallbacks.OnFinalSafetyGateEvent =
         Callbacks.OnFinalSafetyGateEvent;
 
-    Result.ControllerResult = FExecutionControllerRegistry::RunStep(
-        Request.ControllerType,
+    Result.ControllerResult = ActiveController->RunStep(
         ControllerRequest,
         ControllerCallbacks);
     Result.bStepProcessed = true;

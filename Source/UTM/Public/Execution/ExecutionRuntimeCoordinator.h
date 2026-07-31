@@ -2,9 +2,20 @@
 
 #include "Execution/ExecutionRuntimeCoordinatorTypes.h"
 
+class IExecutionController;
+
 class FExecutionRuntimeCoordinator
 {
 public:
+    FExecutionRuntimeCoordinator();
+    ~FExecutionRuntimeCoordinator();
+
+    bool InitializeController(
+        EExecutionControllerType ControllerType,
+        FString& OutFailureReason);
+
+    void ResetController();
+
     FExecutionRuntimeCoordinatorResult Advance(
         const FExecutionRuntimeCoordinatorRequest& Request,
         const FExecutionRuntimeCoordinatorCallbacks& Callbacks);
@@ -12,4 +23,7 @@ public:
     TArray<FExecutionConflict> RecordObservedConflicts(
         FExecutionRuntimeSession& Session,
         int32 TimeStep) const;
+
+private:
+    TUniquePtr<IExecutionController> ActiveController;
 };

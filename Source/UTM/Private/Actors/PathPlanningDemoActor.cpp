@@ -1238,6 +1238,7 @@ FIntVector APathPlanningDemoActor::GetCellAtTime(const TArray<FIntVector>& Cells
 
 void APathPlanningDemoActor::ResetExecutionCache()
 {
+    ExecutionCoordinator.ResetController();
     PlannedCellPathsByMission.Reset();
     ExecutionSession.Reset();
 
@@ -1254,6 +1255,7 @@ void APathPlanningDemoActor::CacheExecutionMissionConfigs(const TArray<FDroneMis
 
 void APathPlanningDemoActor::InitializeExecutionStates()
 {
+    ExecutionCoordinator.ResetController();
     ExecutionSession.PrepareForExecution(ExecutionRandomSeed);
     ExecutionAccumulator = 0.f;
 
@@ -1280,6 +1282,22 @@ void APathPlanningDemoActor::InitializeExecutionStates()
     }
 
     ExecutionSession.bRunning = InitializeResult.bRunning;
+
+    if (ExecutionSession.bRunning)
+    {
+        FString ControllerFailureReason;
+        if (!ExecutionCoordinator.InitializeController(
+                ExecutionControllerType,
+                ControllerFailureReason))
+        {
+            UE_LOG(
+                LogTemp,
+                Error,
+                TEXT("Execution controller initialization failed: %s"),
+                *ControllerFailureReason);
+            ExecutionSession.bRunning = false;
+        }
+    }
 
     LogObservedExecutionConflicts(
         ExecutionCoordinator.RecordObservedConflicts(ExecutionSession, 0));
@@ -1384,7 +1402,6 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
     CoordinatorRequest.Session = &ExecutionSession;
     CoordinatorRequest.GridMap = &GridMap;
     CoordinatorRequest.RuntimeConfig = BuildExecutionRuntimeConfig();
-    CoordinatorRequest.ControllerType = ExecutionControllerType;
 
     FExecutionRuntimeCoordinatorCallbacks CoordinatorCallbacks;
     CoordinatorCallbacks.ResolveObservedCell =
@@ -1434,6 +1451,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         {
             LogExecutionSummary();
         }
+        ExecutionCoordinator.ResetController();
         return;
     }
 
@@ -1448,6 +1466,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         {
             LogExecutionSummary();
         }
+        ExecutionCoordinator.ResetController();
         return;
     }
 
@@ -1518,6 +1537,8 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         {
             LogExecutionSummary();
         }
+
+        ExecutionCoordinator.ResetController();
 
         return;
     }

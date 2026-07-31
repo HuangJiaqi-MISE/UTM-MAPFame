@@ -2542,3 +2542,48 @@ Execution 已经具备 Runtime Session、Step Processor、Controller Registry、
 - 首次编译在 Unity Build 中发现 `ExecutionObservedConflictDetector.cpp` 与 `ExecutionReplanCandidateSelector.cpp` 的匿名命名空间辅助函数同名；将 Detector 内部函数重命名为唯一的 `GetObservedConflictCellAtTime()`，函数逻辑未修改。
 - 2026-07-31：修正内部辅助函数名称后，UTMEditor Win64 Development 编译通过；Execution Delay Policy、Observed Conflict Detector、Runtime Coordinator、Actor、Unity translation unit 和 UTM 模块均完成编译与链接，本轮最终编译无警告。
 - 2026-07-31：运行原 N200 RandomGlobal 参数实验，执行流程和 StructuredExperimentJSON 检查正常，未发现 Delay 随机序列、total delay steps、makespan、Alignment、Conflict 或 Replan 指标异常。
+
+## 2026-07-31 Execution Runtime Coordinator 第四阶段 A：Controller 生命周期持久化
+
+### 背景
+
+此前 `FExecutionRuntimeCoordinator` 已经成为标准执行时间步入口，但 `FExecutionControllerRegistry::RunStep()` 仍在每个 timestep 创建并销毁一次 Controller。默认 Controller 当前没有内部状态，因此旧流程能够正常运行；但这种生命周期无法支持需要保存冲突历史、动态优先级、在线统计或学习参数的研究型 Controller。
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinator.h`
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinatorTypes.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeCoordinator.cpp`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 新生命周期
+
+- `FExecutionRuntimeCoordinator` 新增持久成员 `ActiveController`。
+- 新增 `InitializeController()`：一次集中式执行会话开始时，根据 Details 中选择的 `ExecutionControllerType` 创建 Controller。
+- `Advance()` 不再通过 Registry 每步重新创建 Controller，而是复用当前会话的 `ActiveController`。
+- 新增 `ResetController()`：重新运行规划、重新初始化执行、执行异常、Controller 主动停止或所有 Agent 完成时释放 Controller。
+- `FExecutionRuntimeCoordinatorRequest` 不再携带每步重复的 `ControllerType`；Controller 类型在执行初始化时确定，并在该次执行会话中保持不变。
+- `FExecutionControllerRegistry::RunStep()` 暂时保留为兼容入口，其他潜在调用者的行为不变。
+
+### 保守性说明
+
+- `IExecutionController::RunStep()` 本阶段仍保持 `const`，没有引入可变状态接口；生命周期接口扩展留到后续阶段。
+- `FDefaultExecutionController` 和 `FExecutionStepPipeline` 的算法、输入、回调顺序和输出均未修改。
+- TimeStep、Delay 随机流、Alignment、Conflict Resolution、Replan、Final Safety Gate、状态写回和冲突记录顺序未修改。
+- Controller 初始化发生在 Runtime State 构建成功且存在可执行 Agent 之后；无可执行 Agent 时不会创建无用实例。
+- Controller 创建失败时，Actor 沿用执行失败路径生成 Summary，并输出明确错误日志。
+- Details 中运行期间对 `ExecutionControllerType` 的修改从下一次执行初始化开始生效，不在当前执行会话中途替换实例。
+- EUW、Details、Blueprint、Reporter 和 StructuredExperimentJSON 接口未修改。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development，检查持有不完整接口类型的析构边界和 Unreal Header Tool。
+2. 运行原 N200 参数实验，核对 `total_delay_steps`、`actual_makespan`、Alignment、Conflict 和 local/global Replan 指标。
+3. 确认一次执行结束后再次点击运行规划，Controller 能够释放并重新创建，第二次实验不会继承第一次会话状态。
+
+### 验证结果
+
+- 2026-07-31：UTMEditor Win64 Development 编译通过；持有 `TUniquePtr<IExecutionController>` 的 Coordinator 构造、析构边界，修改后的 Actor、Execution Runtime Coordinator 和 UTM 模块均完成编译与链接。
+- 编译仅出现既有 `PBSPlanner.cpp` 的 UE 5.5 `TArray::RemoveAt(bool)` 弃用警告，与本阶段修改无关。
+- 2026-07-31：运行原 N200 参数回归实验，执行流程和 StructuredExperimentJSON 检查正常，未发现 Controller 持久化对 makespan、Delay、Alignment、Conflict 或 Replan 指标造成异常影响。
+- 后续仍可在同一编辑器会话内连续运行两次实验，定向确认 Controller 在运行间能够释放并重新初始化。

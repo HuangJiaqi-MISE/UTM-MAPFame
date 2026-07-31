@@ -13,8 +13,6 @@ struct FExecutionRuntimeCoordinatorRequest
     FExecutionRuntimeSession* Session = nullptr;
     const FGridMap3D* GridMap = nullptr;
     FExecutionRuntimeConfig RuntimeConfig;
-    EExecutionControllerType ControllerType =
-        EExecutionControllerType::DefaultPipeline;
 };
 
 struct FExecutionRuntimeCoordinatorCallbacks
