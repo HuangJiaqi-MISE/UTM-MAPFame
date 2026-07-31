@@ -35,4 +35,5 @@ struct FExecutionRuntimeCoordinatorResult
     int32 TimeStep = 0;
     FExecutionControllerStepResult ControllerResult;
     FExecutionStepResultApplyResult ApplyResult;
+    TArray<FExecutionConflict> ObservedConflicts;
 };

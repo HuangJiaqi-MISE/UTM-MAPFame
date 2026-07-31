@@ -2433,3 +2433,52 @@ Execution 已经具备 Runtime Session、Step Processor、Controller Registry、
 - 2026-07-31：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 成功生成反射代码，新 `ExecutionRuntimeCoordinator.cpp`、修改后的 `PathPlanningDemoActor.cpp` 以及 UTM 模块均完成编译和链接。
 - 编译中仅保留既有 `PBSPlanner.cpp` 的 UE 5.5 `TArray::RemoveAt(bool)` 弃用警告，与本阶段修改无关。
 - 2026-07-31：运行原 N200 参数实验，执行流程和 StructuredExperimentJSON 检查正常，未发现异常。
+
+## 2026-07-31 Execution Runtime Coordinator 第二阶段：实际冲突记录
+
+### 背景
+
+第一阶段已经让 Runtime Coordinator 负责 `TimeStep -> Prepare -> Controller -> Apply`，但实际执行轨迹上的 vertex/edge conflict 仍由 Actor 遍历 Agent State、计算并写入 `ExecutionSession.Conflicts`。实际冲突属于标准执行结果，本阶段将判断公式和 Session 写入移入 Execution 模块，Actor 只保留 UE 日志输出。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionObservedConflictDetector.h`
+- `Source/UTM/Private/Execution/ExecutionObservedConflictDetector.cpp`
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinatorTypes.h`
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinator.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeCoordinator.cpp`
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 新职责边界
+
+- `FExecutionObservedConflictDetector` 根据 Agent `ActualCells` 和指定 timestep 检测实际 vertex conflict 与 edge swap conflict。
+- `FExecutionRuntimeCoordinator::RecordObservedConflicts()` 统一调用 Detector，并将结果追加到 `ExecutionSession.Conflicts`。
+- `Advance()` 在 Controller Result 成功 Apply 后记录当前 timestep 实际冲突，并通过 `ObservedConflicts` 返回本步新增项。
+- 初始化 timestep 0 的冲突记录也通过同一个 Coordinator 入口完成。
+- Actor 的 `LogObservedExecutionConflicts()` 只读取结构化冲突并保持原日志格式，不再包含冲突判断或 Session 写入。
+
+### 保守性说明
+
+- `GetCellAtTime()` 的空路径、timestep 0、路径范围内和超过路径长度时的取值语义保持不变。
+- Mission ID 获取和两两遍历顺序未修改，不额外排序。
+- vertex conflict、edge swap conflict 的判断公式以及 `FExecutionConflict` 字段赋值保持不变。
+- timestep 0 仍在 Execution State 初始化后立即检测一次。
+- 普通步骤仍在 Apply 后记录冲突，并在全部完成判断前输出日志。
+- Controller 要求停止时仍不会 Apply，也不会记录该 timestep 实际冲突。
+- Delay 随机序列、Alignment、Conflict Resolution、Final Safety Gate、Replan、Summary 和 JSON 字段未修改。
+- EUW、Details 和 Blueprint 接口未修改。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development。
+2. 运行原 N200 参数实验，重点核对 vertex/edge conflict count、first conflict time、actual makespan 和 Replan 指标。
+3. 检查 `[ExecutionConflict][Vertex]`、`[ExecutionConflict][Edge]` 日志格式以及执行结束 Summary 输出时机。
+
+### 验证结果
+
+- 2026-07-31：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 通过，新 `ExecutionObservedConflictDetector.cpp`、修改后的 Runtime Coordinator、Actor 和 UTM 模块均完成编译与链接，本轮无编译警告。
+- 2026-07-31：运行原 N200 参数实验，执行流程和 StructuredExperimentJSON 检查正常，未发现实际冲突统计、makespan 或 Replan 指标异常。

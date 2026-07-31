@@ -1281,7 +1281,8 @@ void APathPlanningDemoActor::InitializeExecutionStates()
 
     ExecutionSession.bRunning = InitializeResult.bRunning;
 
-    DetectExecutionConflictsAtStep(0);
+    LogObservedExecutionConflicts(
+        ExecutionCoordinator.RecordObservedConflicts(ExecutionSession, 0));
 
     if (!ExecutionSession.bRunning)
     {
@@ -1566,7 +1567,7 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         }
     }
 
-    DetectExecutionConflictsAtStep(ExecutionSession.TimeStep);
+    LogObservedExecutionConflicts(CoordinatorResult.ObservedConflicts);
 
     if (!ApplyResult.bAnyActive)
     {
@@ -1876,93 +1877,39 @@ void APathPlanningDemoActor::LogStructuredExperimentSummaryJson() const
 }
 
 
-void APathPlanningDemoActor::DetectExecutionConflictsAtStep(int32 TimeStep)
+void APathPlanningDemoActor::LogObservedExecutionConflicts(
+    const TArray<FExecutionConflict>& Conflicts) const
 {
-    TArray<int32> MissionIds;
-    ExecutionSession.AgentStatesByMissionId.GetKeys(MissionIds);
-
-    for (int32 I = 0; I < MissionIds.Num(); ++I)
+    for (const FExecutionConflict& Conflict : Conflicts)
     {
-        const FExecutionAgentState* A =
-            ExecutionSession.AgentStatesByMissionId.Find(MissionIds[I]);
-        if (!A)
+        if (!Conflict.bIsEdgeConflict)
         {
+            UE_LOG(
+                LogTemp,
+                Error,
+                TEXT("[ExecutionConflict][Vertex] t=%d Agent=%d Agent=%d Cell=(%d,%d,%d)"),
+                Conflict.TimeStep,
+                Conflict.AgentA,
+                Conflict.AgentB,
+                Conflict.Cell.X,
+                Conflict.Cell.Y,
+                Conflict.Cell.Z
+            );
             continue;
         }
 
-        for (int32 J = I + 1; J < MissionIds.Num(); ++J)
-        {
-            const FExecutionAgentState* B =
-                ExecutionSession.AgentStatesByMissionId.Find(MissionIds[J]);
-            if (!B)
-            {
-                continue;
-            }
-
-            const FIntVector ACell = GetCellAtTime(A->ActualCells, TimeStep);
-            const FIntVector BCell = GetCellAtTime(B->ActualCells, TimeStep);
-
-            if (ACell == BCell)
-            {
-                FExecutionConflict Conflict;
-                Conflict.TimeStep = TimeStep;
-                Conflict.AgentA = A->MissionId;
-                Conflict.AgentB = B->MissionId;
-                Conflict.bIsEdgeConflict = false;
-                Conflict.Cell = ACell;
-                ExecutionSession.Conflicts.Add(Conflict);
-
-                UE_LOG(
-                    LogTemp,
-                    Error,
-                    TEXT("[ExecutionConflict][Vertex] t=%d Agent=%d Agent=%d Cell=(%d,%d,%d)"),
-                    TimeStep,
-                    A->MissionId,
-                    B->MissionId,
-                    ACell.X,
-                    ACell.Y,
-                    ACell.Z
-                );
-            }
-
-            if (TimeStep > 0)
-            {
-                const FIntVector APrev = GetCellAtTime(A->ActualCells, TimeStep - 1);
-                const FIntVector BPrev = GetCellAtTime(B->ActualCells, TimeStep - 1);
-
-                const bool bEdgeConflict =
-                    (APrev == BCell) &&
-                    (BPrev == ACell) &&
-                    (ACell != BCell);
-
-                if (bEdgeConflict)
-                {
-                    FExecutionConflict Conflict;
-                    Conflict.TimeStep = TimeStep;
-                    Conflict.AgentA = A->MissionId;
-                    Conflict.AgentB = B->MissionId;
-                    Conflict.bIsEdgeConflict = true;
-                    Conflict.FromA = APrev;
-                    Conflict.ToA = ACell;
-                    Conflict.FromB = BPrev;
-                    Conflict.ToB = BCell;
-                    ExecutionSession.Conflicts.Add(Conflict);
-
-                    UE_LOG(
-                        LogTemp,
-                        Error,
-                        TEXT("[ExecutionConflict][Edge] t=%d Agent=%d (%d,%d,%d)->(%d,%d,%d), Agent=%d (%d,%d,%d)->(%d,%d,%d)"),
-                        TimeStep,
-                        A->MissionId,
-                        APrev.X, APrev.Y, APrev.Z,
-                        ACell.X, ACell.Y, ACell.Z,
-                        B->MissionId,
-                        BPrev.X, BPrev.Y, BPrev.Z,
-                        BCell.X, BCell.Y, BCell.Z
-                    );
-                }
-            }
-        }
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("[ExecutionConflict][Edge] t=%d Agent=%d (%d,%d,%d)->(%d,%d,%d), Agent=%d (%d,%d,%d)->(%d,%d,%d)"),
+            Conflict.TimeStep,
+            Conflict.AgentA,
+            Conflict.FromA.X, Conflict.FromA.Y, Conflict.FromA.Z,
+            Conflict.ToA.X, Conflict.ToA.Y, Conflict.ToA.Z,
+            Conflict.AgentB,
+            Conflict.FromB.X, Conflict.FromB.Y, Conflict.FromB.Z,
+            Conflict.ToB.X, Conflict.ToB.Y, Conflict.ToB.Z
+        );
     }
 }
 

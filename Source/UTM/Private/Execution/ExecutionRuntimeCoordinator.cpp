@@ -1,6 +1,7 @@
 #include "Execution/ExecutionRuntimeCoordinator.h"
 
 #include "Execution/ExecutionControllerRegistry.h"
+#include "Execution/ExecutionObservedConflictDetector.h"
 #include "Execution/ExecutionRuntimeSessionStepProcessor.h"
 
 FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
@@ -86,5 +87,23 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
             MissionIds,
             Session.AgentStatesByMissionId,
             Result.ControllerResult);
+    Result.ObservedConflicts =
+        RecordObservedConflicts(Session, Session.TimeStep);
     return Result;
+}
+
+TArray<FExecutionConflict>
+FExecutionRuntimeCoordinator::RecordObservedConflicts(
+    FExecutionRuntimeSession& Session,
+    int32 TimeStep) const
+{
+    FExecutionObservedConflictDetectionRequest DetectionRequest;
+    DetectionRequest.AgentStatesByMissionId =
+        &Session.AgentStatesByMissionId;
+    DetectionRequest.TimeStep = TimeStep;
+    FExecutionObservedConflictDetectionResult DetectionResult =
+        FExecutionObservedConflictDetector::Detect(DetectionRequest);
+
+    Session.Conflicts.Append(DetectionResult.Conflicts);
+    return MoveTemp(DetectionResult.Conflicts);
 }

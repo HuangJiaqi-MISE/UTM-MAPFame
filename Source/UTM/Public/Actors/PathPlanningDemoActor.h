@@ -123,7 +123,8 @@ private:
     void UpdateExecutionVisuals(float Alpha);
     bool ShouldDelayThisStep(const FExecutionAgentState& State, int32 TimeStep);
     void CacheExecutionMissionConfigs(const TArray<FDroneMissionConfig>& Missions);
-    void DetectExecutionConflictsAtStep(int32 TimeStep);
+    void LogObservedExecutionConflicts(
+        const TArray<FExecutionConflict>& Conflicts) const;
     void DrawExecutionDebugForState(const FExecutionAgentState& State, int32 TimeStep) const;
     const FAgentDelayConfig* FindAgentDelayConfig(int32 MissionId) const;
     bool IsForcedDelayStep(const FExecutionAgentState& State, int32 TimeStep) const;
