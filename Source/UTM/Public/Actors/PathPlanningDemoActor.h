@@ -126,6 +126,7 @@ private:
     void DrawExecutionDebugForState(const FExecutionAgentState& State, int32 TimeStep) const;
     const FAgentDelayConfig* FindAgentDelayConfig(int32 MissionId) const;
     bool IsForcedDelayStep(const FExecutionAgentState& State, int32 TimeStep) const;
+    ADroneActor* FindExecutionDrone(int32 MissionId) const;
     FIntVector GetObservedExecutionCell(const FExecutionAgentState& State) const;
     FDiscreteAlignmentSettings BuildDiscreteAlignmentSettings() const;
     FExecutionRuntimeConfig BuildExecutionRuntimeConfig() const;

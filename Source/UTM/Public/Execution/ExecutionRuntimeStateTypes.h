@@ -3,8 +3,6 @@
 #include "CoreMinimal.h"
 #include "ExecutionRuntimeStateTypes.generated.h"
 
-class ADroneActor;
-
 /*
 模式 A：全局随机延迟,适合快速看效果。
 模式 B：指定 agent 延迟,比如只让 Mission 2 延迟,能明确观察单个执行异常如何破坏整体 schedule。
@@ -57,9 +55,6 @@ struct FExecutionAgentState
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
     int32 MissionId = INDEX_NONE;
-
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
-    TObjectPtr<ADroneActor> Drone = nullptr;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Execution")
     TArray<FIntVector> PlannedCells;

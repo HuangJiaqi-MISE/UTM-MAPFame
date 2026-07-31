@@ -1274,10 +1274,10 @@ void APathPlanningDemoActor::InitializeExecutionStates()
         ExecutionSession.AgentStatesByMissionId)
     {
         FExecutionAgentState& State = Pair.Value;
-        State.Drone = SpawnedDroneByMissionId.FindRef(Pair.Key);
-        if (State.Drone)
+        ADroneActor* Drone = FindExecutionDrone(Pair.Key);
+        if (Drone)
         {
-            State.Drone->SetActorLocation(
+            Drone->SetActorLocation(
                 GridMap.CellToWorld(State.DisplayFromCell));
         }
     }
@@ -1336,6 +1336,12 @@ bool APathPlanningDemoActor::IsForcedDelayStep(const FExecutionAgentState& State
     return Config->ForcedDelaySteps.Contains(TimeStep);
 }
 
+ADroneActor* APathPlanningDemoActor::FindExecutionDrone(int32 MissionId) const
+{
+    const TObjectPtr<ADroneActor>* Drone = SpawnedDroneByMissionId.Find(MissionId);
+    return Drone ? Drone->Get() : nullptr;
+}
+
 FIntVector APathPlanningDemoActor::GetObservedExecutionCell(const FExecutionAgentState& State) const
 {
     auto ClampCellToGrid = [&](const FIntVector& Cell) -> FIntVector
@@ -1346,9 +1352,9 @@ FIntVector APathPlanningDemoActor::GetObservedExecutionCell(const FExecutionAgen
                 FMath::Clamp(Cell.Z, 0, FMath::Max(0, GridMap.GridDim.Z - 1)));
         };
 
-    if (State.Drone)
+    if (const ADroneActor* Drone = FindExecutionDrone(State.MissionId))
     {
-        return ClampCellToGrid(GridMap.WorldToCell(State.Drone->GetActorLocation()));
+        return ClampCellToGrid(GridMap.WorldToCell(Drone->GetActorLocation()));
     }
 
     if (State.ActualCells.Num() > 0)
@@ -1989,13 +1995,13 @@ void APathPlanningDemoActor::UpdateExecutionVisuals(float Alpha)
     {
         FExecutionAgentState& State = KVP.Value;
 
-        if (State.Drone)
+        if (ADroneActor* Drone = FindExecutionDrone(State.MissionId))
         {
             const FVector FromWorld = GridMap.CellToWorld(State.DisplayFromCell);
             const FVector ToWorld = GridMap.CellToWorld(State.DisplayToCell);
             const FVector NewLocation = FMath::Lerp(FromWorld, ToWorld, Alpha);
 
-            State.Drone->SetActorLocation(NewLocation);
+            Drone->SetActorLocation(NewLocation);
         }
 
         DrawExecutionDebugForState(State, ExecutionSession.TimeStep);
@@ -2033,7 +2039,8 @@ void APathPlanningDemoActor::DrawExecutionDebugForState(const FExecutionAgentSta
         );
     }
 
-    if (bDrawExecutionText && State.Drone)
+    const ADroneActor* Drone = FindExecutionDrone(State.MissionId);
+    if (bDrawExecutionText && Drone)
     {
         const FString Text = FString::Printf(
             TEXT("M%d  t=%d\nPlanned=(%d,%d,%d)\nActual=(%d,%d,%d)\nDelay=%d\nAlign=%s"),
@@ -2047,7 +2054,7 @@ void APathPlanningDemoActor::DrawExecutionDebugForState(const FExecutionAgentSta
 
         DrawDebugString(
             GetWorld(),
-            State.Drone->GetActorLocation() + FVector(0.f, 0.f, 140.f),
+            Drone->GetActorLocation() + FVector(0.f, 0.f, 140.f),
             Text,
             nullptr,
             (PlannedCell == ActualCell) ? FColor::Green : FColor::Yellow,

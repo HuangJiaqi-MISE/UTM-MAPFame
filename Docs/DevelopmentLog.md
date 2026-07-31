@@ -2290,3 +2290,90 @@ Actor 中原来对应的八个独立成员已删除，替换为单一 `Execution
 ### 回归结果
 
 - 2026-07-18：`FExecutionRuntimeSession` 状态所有权集中后，原 N200 参数实验回归通过，未发现异常。
+
+## 2026-07-31 Runtime State 与 Drone View Binding 第一阶段：主流程旁路
+
+### 背景
+
+`FExecutionRuntimeSession` 已集中持有执行期逻辑状态，但 `FExecutionAgentState` 仍通过 `Drone` 字段保存 `ADroneActor` 指针。同时，Actor 已经通过 `SpawnedDroneByMissionId` 保存同一组 Mission-to-Drone 绑定，形成重复所有权入口。本阶段先让 C++ 执行主流程统一使用 Actor 绑定表，同时保留原反射字段，降低后续删除字段时的 Blueprint 兼容风险。
+
+### 修改文件
+
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Actor View Binding 入口
+
+新增 `FindExecutionDrone(int32 MissionId)`，统一从 `SpawnedDroneByMissionId` 查询 Drone。以下流程不再读取 `FExecutionAgentState::Drone`：
+
+- 初始化执行状态后的 Drone 起点定位。
+- `GetObservedExecutionCell()` 中的世界位置读取。
+- `UpdateExecutionVisuals()` 中的 Transform 插值写入。
+- `DrawExecutionDebugForState()` 中的 Debug Text 定位。
+
+### 兼容策略
+
+- `FExecutionAgentState::Drone` 本阶段继续保留。
+- 初始化时继续执行一次兼容赋值，避免已有 Blueprint 或调试逻辑立即失去该字段内容。
+- Execution Runtime Session、Step Processor、Replan Committer 和 Controller 不再通过该字段访问场景对象。
+- 下一阶段在完成 N200 和 Blueprint 编译检查后，再删除 `Drone` 反射字段及 `ADroneActor` 前置声明。
+
+### 保守性说明
+
+- `SpawnedDroneByMissionId` 原本就是 Drone Spawn 后的绑定来源，本阶段没有新增第二张映射表。
+- Drone 缺失时仍按原逻辑回退到 `ActualCells` 或 Planned Cell。
+- 初始化位置、观察位置、视觉插值和 Debug Text 使用的仍是同一个 Mission ID 对应 Drone。
+- Planner、Scheduler、Execution Controller、Delay、Alignment、Conflict Resolution、Replan、Summary 和 StructuredExperimentJSON 均未修改。
+- EUW 和 Details 接口未修改。
+
+### 回归建议
+
+运行原 N200 参数实验，并额外检查 Drone 动画、Execution Debug Text、`bAutoSpawnDrones=false` 回退流程以及 Blueprint 编译状态。
+
+### 回归结果
+
+- 2026-07-31：Runtime State 与 Drone View Binding 第一阶段接入后，原 N200 参数实验回归通过，未发现异常。
+- 2026-07-31：使用 UE 5.5 `CompileAllBlueprints -ProjectOnly` 完成删除 `Drone` 字段前的全项目 Blueprint 编译基线检查；命令退出码为 0，结果为 0 errors、0 warnings、0 blueprints failed to load。
+
+## 2026-07-31 Runtime State 与 Drone View Binding 第二阶段：删除 Drone 状态字段
+
+### 背景
+
+第一阶段已经让初始化定位、Observed Cell、视觉插值和 Debug Text 全部通过 Actor 的 `SpawnedDroneByMissionId` 查询 Drone，并完成 N200 与全项目 Blueprint 编译基线验证。本阶段正式删除 Runtime State 中不再使用的 UE 场景对象引用。
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeStateTypes.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 删除内容
+
+- 删除 `FExecutionAgentState::Drone` 的 `UPROPERTY` 和 `TObjectPtr<ADroneActor>` 字段。
+- 删除 `ExecutionRuntimeStateTypes.h` 中的 `ADroneActor` 前置声明。
+- 删除初始化 Runtime State 时的兼容 `State.Drone = Drone` 赋值。
+
+### 新边界
+
+- `FExecutionRuntimeSession` 只保存 Mission、Cell Path、执行索引、Delay、Alignment、Conflict 和 Replan 等逻辑状态。
+- `APathPlanningDemoActor` 通过 `SpawnedDroneByMissionId` 独占 Mission-to-Drone View Binding。
+- UE 世界位置通过 `GetObservedExecutionCell()` 转换为 Cell 后再进入 Execution 模块。
+- Execution 计算产生的 Display Cell 由 Actor 转换为 World Transform 并应用到 Drone。
+
+### 保守性说明
+
+- 第一阶段建立的 `FindExecutionDrone()` 和所有 Drone 访问路径未修改。
+- Drone Spawn、销毁、初始定位、动画插值、Debug Text 和无 Drone 回退逻辑未修改。
+- Planner、Scheduler、Execution Controller、Delay、Alignment、Conflict Resolution、Replan、Summary 和 StructuredExperimentJSON 未修改。
+- `FExecutionAgentState` 仍是 UE `USTRUCT(BlueprintType)`，本阶段完成的是场景对象解耦，不是完全移除 CoreUObject 反射依赖。
+
+### 验证计划
+
+1. 编译 UTMEditor，确认 Unreal Header Tool 能正确更新结构体反射布局。
+2. 重新运行 `CompileAllBlueprints -ProjectOnly`，与删除字段前的 0 errors、0 warnings、0 failed baseline 对比。
+3. 运行原 N200 参数实验，检查执行结果、Drone 动画和 Debug Text。
+
+### 验证结果
+
+- 2026-07-31：UTMEditor Win64 Development 编译通过；Unreal Header Tool 使用 `-WarningsAsErrors` 成功更新反射代码，共写入 3 个生成文件，C++ 编译和链接均无错误。
+- 2026-07-31：删除 `FExecutionAgentState::Drone` 后重新运行 UE 5.5 `CompileAllBlueprints -ProjectOnly`；命令退出码为 0，结果为 0 errors、0 warnings、0 blueprints failed to load，与删除字段前的基线一致。
+- 2026-07-31：在删除 `FExecutionAgentState::Drone` 后运行原 N200 参数实验；StructuredExperimentJSON 检查正常，未发现执行结果异常。
