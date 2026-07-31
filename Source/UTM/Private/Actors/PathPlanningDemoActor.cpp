@@ -10,14 +10,11 @@
 
 #include "Execution/ExecutionAlignmentPolicy.h"
 #include "Execution/ExecutionConflictResolutionPolicy.h"
-#include "Execution/ExecutionControllerRegistry.h"
 #include "Execution/ExecutionFinalSafetyGateCoordinator.h"
 #include "Execution/ExecutionReplanAttemptRunner.h"
 #include "Execution/ExecutionReplanCoordinator.h"
-#include "Execution/ExecutionReplanProposalSynchronizer.h"
 #include "Execution/ExecutionRuntimeSessionBuilder.h"
 #include "Execution/ExecutionRuntimeSessionReplanCommitter.h"
-#include "Execution/ExecutionRuntimeSessionStepProcessor.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "EditorServices/CityEditorService.h"
 #include "EditorServices/EditorGridService.h"
@@ -1437,42 +1434,25 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
 {
     // Snap the previous segment to its terminal cell before sampling the current position.
     UpdateExecutionVisuals(1.f);
-    ExecutionSession.TimeStep++;
 
+    FExecutionRuntimeCoordinatorRequest CoordinatorRequest;
+    CoordinatorRequest.Session = &ExecutionSession;
+    CoordinatorRequest.GridMap = &GridMap;
+    CoordinatorRequest.RuntimeConfig = BuildExecutionRuntimeConfig();
+    CoordinatorRequest.ControllerType = ExecutionControllerType;
 
-    FExecutionRuntimeStepPrepareRequest StepPrepareRequest;
-    StepPrepareRequest.AgentStatesByMissionId =
-        &ExecutionSession.AgentStatesByMissionId;
-    StepPrepareRequest.MissionConfigsById =
-        &ExecutionSession.MissionConfigsById;
-    StepPrepareRequest.TimeStep = ExecutionSession.TimeStep;
-    StepPrepareRequest.ResolveObservedCell =
+    FExecutionRuntimeCoordinatorCallbacks CoordinatorCallbacks;
+    CoordinatorCallbacks.ResolveObservedCell =
         [this](const FExecutionAgentState& State)
         {
             return GetObservedExecutionCell(State);
         };
-    StepPrepareRequest.ShouldDelay =
+    CoordinatorCallbacks.ShouldDelay =
         [this](const FExecutionAgentState& State, int32 TimeStep)
         {
             return ShouldDelayThisStep(State, TimeStep);
         };
-    FExecutionRuntimeStepPrepareResult StepPrepareResult =
-        FExecutionRuntimeSessionStepProcessor::PrepareStep(StepPrepareRequest);
-    const TArray<int32>& MissionIds = StepPrepareResult.OrderedMissionIds;
-
-    const FExecutionRuntimeConfig RuntimeConfig = BuildExecutionRuntimeConfig();
-
-    FExecutionControllerStepRequest ControllerRequest;
-    ControllerRequest.OrderedMissionIds = MissionIds;
-    ControllerRequest.OrderedAgentSnapshots =
-        MoveTemp(StepPrepareResult.OrderedAgentSnapshots);
-    ControllerRequest.GridMap = &GridMap;
-    ControllerRequest.RuntimeConfig = RuntimeConfig;
-    ControllerRequest.ConflictResolutionInput =
-        &StepPrepareResult.ConflictResolutionInput;
-
-    FExecutionControllerStepCallbacks ControllerCallbacks;
-    ControllerCallbacks.RunReplan =
+    CoordinatorCallbacks.RunReplan =
         [this](
             const TSet<int32>& RequestedMissionIds,
             bool bGlobalReplan,
@@ -1483,41 +1463,42 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
                 bGlobalReplan,
                 ReplannedMissionIds);
         };
-    ControllerCallbacks.CaptureReplanProposalAgentStates =
-        [this, &MissionIds]()
-        {
-            return FExecutionRuntimeSessionStepProcessor::
-                CaptureReplanProposalAgentStates(
-                    MissionIds,
-                    ExecutionSession.AgentStatesByMissionId);
-        };
-    ControllerCallbacks.BuildFinalSafetyGateInput =
-        [this, &MissionIds]()
-        {
-            return FExecutionRuntimeSessionStepProcessor::BuildFinalSafetyGateInput(
-                MissionIds,
-                ExecutionSession.MissionConfigsById,
-                ExecutionSession.AgentStatesByMissionId);
-        };
     if (bLogConflictPredictionEvents)
     {
-        ControllerCallbacks.OnConflictResolutionEvent =
+        CoordinatorCallbacks.OnConflictResolutionEvent =
             [this](const FExecutionConflictResolutionEvent& Event)
             {
                 LogExecutionConflictResolutionEvent(Event, ExecutionSession.TimeStep);
             };
     }
-    ControllerCallbacks.OnFinalSafetyGateEvent =
+    CoordinatorCallbacks.OnFinalSafetyGateEvent =
         [this](const FExecutionFinalSafetyGateEvent& Event)
         {
             LogExecutionFinalSafetyGateEvent(Event, ExecutionSession.TimeStep);
         };
 
-    FExecutionControllerStepResult ControllerResult =
-        FExecutionControllerRegistry::RunStep(
-            ExecutionControllerType,
-            ControllerRequest,
-            ControllerCallbacks);
+    const FExecutionRuntimeCoordinatorResult CoordinatorResult =
+        ExecutionCoordinator.Advance(
+            CoordinatorRequest,
+            CoordinatorCallbacks);
+    if (!CoordinatorResult.bStepProcessed)
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("Execution runtime coordinator failed: %s"),
+            *CoordinatorResult.FailureReason);
+        ExecutionSession.bRunning = false;
+        BuildExecutionSummary();
+        if (bLogExecutionSummary)
+        {
+            LogExecutionSummary();
+        }
+        return;
+    }
+
+    const FExecutionControllerStepResult& ControllerResult =
+        CoordinatorResult.ControllerResult;
 
     if (ControllerResult.bStopExecution)
     {
@@ -1530,11 +1511,8 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         return;
     }
 
-    const FExecutionStepResultApplyResult ApplyResult =
-        FExecutionRuntimeSessionStepProcessor::ApplyControllerResult(
-            MissionIds,
-            ExecutionSession.AgentStatesByMissionId,
-            ControllerResult);
+    const FExecutionStepResultApplyResult& ApplyResult =
+        CoordinatorResult.ApplyResult;
 
     for (const FExecutionStepAppliedAgent& AppliedAgent : ApplyResult.AppliedAgents)
     {

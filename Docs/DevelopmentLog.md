@@ -2377,3 +2377,59 @@ Actor 中原来对应的八个独立成员已删除，替换为单一 `Execution
 - 2026-07-31：UTMEditor Win64 Development 编译通过；Unreal Header Tool 使用 `-WarningsAsErrors` 成功更新反射代码，共写入 3 个生成文件，C++ 编译和链接均无错误。
 - 2026-07-31：删除 `FExecutionAgentState::Drone` 后重新运行 UE 5.5 `CompileAllBlueprints -ProjectOnly`；命令退出码为 0，结果为 0 errors、0 warnings、0 blueprints failed to load，与删除字段前的基线一致。
 - 2026-07-31：在删除 `FExecutionAgentState::Drone` 后运行原 N200 参数实验；StructuredExperimentJSON 检查正常，未发现执行结果异常。
+
+## 2026-07-31 Execution Runtime Coordinator 第一阶段：Step 编排入口
+
+### 背景
+
+Execution 已经具备 Runtime Session、Step Processor、Controller Registry、Step Pipeline 和 Result Applier，但 `APathPlanningDemoActor::AdvanceExecutionOneStep()` 仍直接了解并连接上述内部组件。本阶段新增 Runtime Coordinator，先建立固定的执行步入口，不同时改变 Delay、Replan、冲突统计或结束语义。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinatorTypes.h`
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinator.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeCoordinator.cpp`
+
+### Coordinator 当前职责
+
+- 校验 Runtime Session 和 Grid Map 输入。
+- 按原位置推进 `ExecutionSession.TimeStep`。
+- 构造 `FExecutionRuntimeStepPrepareRequest` 并调用 Session Step Processor。
+- 构造标准 Controller Request 和 Controller Callbacks。
+- 从同一个 Session 构造 Replan Proposal State 和 Final Safety Gate Input。
+- 调用当前 `ExecutionControllerRegistry::RunStep()`。
+- Controller 未要求停止时，调用 Session Step Processor 统一写回 Agent State。
+- 返回 Controller Result、Apply Result、TimeStep 和失败原因。
+
+### Actor 保留职责
+
+- `Tick`、`ExecutionAccumulator` 和视觉段落结束对齐。
+- 从 Drone World Transform 解析 Observed Cell。
+- Delay 决策和随机流消费。
+- `TryExecutionReplan()` 及 Planner 接入。
+- Delay、Alignment、Conflict Resolution 和 Final Safety Gate 日志。
+- 实际 vertex/edge conflict 记录。
+- Drone 视觉更新、停止执行、Execution Summary 和 StructuredExperimentJSON 输出。
+
+### 保守性说明
+
+- `UpdateExecutionVisuals(1.f)` 仍在 timestep 推进前执行。
+- timestep 仍在 Prepare Step 前只增加一次。
+- Agent 排序、Observed Cell 写回、Delay 随机调用顺序、Controller Request 内容和 Apply 顺序未修改。
+- Replan 仍通过同步 Actor 回调执行，并在同一个 Controller Step 内更新原 Session。
+- Controller 要求停止时仍不会 Apply Step Result。
+- 普通 Apply 后仍由 Actor 先输出事件，再记录实际冲突，最后判断是否全部完成。
+- Controller 本阶段仍按原逻辑每个 timestep 创建一次；持久化 Controller 生命周期留待后续阶段。
+- EUW、Details、Planner、Scheduler、JSON 字段和 Blueprint 接口未修改。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development。
+2. 运行原 N200 参数实验，对比 StructuredExperimentJSON，重点检查 actual makespan、delay、alignment、conflict 和 local/global replan 指标。
+3. 检查 Drone 动画、Execution Debug Text 以及执行结束时 Summary 的输出时机。
+
+### 验证结果
+
+- 2026-07-31：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 成功生成反射代码，新 `ExecutionRuntimeCoordinator.cpp`、修改后的 `PathPlanningDemoActor.cpp` 以及 UTM 模块均完成编译和链接。
+- 编译中仅保留既有 `PBSPlanner.cpp` 的 UE 5.5 `TArray::RemoveAt(bool)` 弃用警告，与本阶段修改无关。
+- 2026-07-31：运行原 N200 参数实验，执行流程和 StructuredExperimentJSON 检查正常，未发现异常。

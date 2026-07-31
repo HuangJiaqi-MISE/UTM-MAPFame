@@ -4,6 +4,7 @@
 #include "Execution/DiscreteAlignmentManager.h"
 #include "Execution/ExecutionControllerTypes.h"
 #include "Execution/ExecutionReplanAttemptTypes.h"
+#include "Execution/ExecutionRuntimeCoordinator.h"
 #include "Execution/ExecutionRuntimeSession.h"
 #include "Execution/ExecutionTypes.h"
 #include "GameFramework/Actor.h"
@@ -153,6 +154,7 @@ private:
     bool TryExecutionReplan(const TSet<int32>& RequestedMissionIds, bool bGlobalReplan, TSet<int32>& OutReplannedMissionIds);
 
 private:
+    FExecutionRuntimeCoordinator ExecutionCoordinator;
     FGridMap3D GridMap;
     FPlanningInputValidator InputValidator;
     TMap<int32, TArray<FVector>> LastPlannedPathsByMission;
