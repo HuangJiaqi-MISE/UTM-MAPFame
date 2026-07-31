@@ -1285,9 +1285,17 @@ void APathPlanningDemoActor::InitializeExecutionStates()
 
     if (ExecutionSession.bRunning)
     {
+        FExecutionRuntimeCoordinatorInitializeRequest
+            CoordinatorInitializeRequest;
+        CoordinatorInitializeRequest.ControllerType = ExecutionControllerType;
+        CoordinatorInitializeRequest.Session = &ExecutionSession;
+        CoordinatorInitializeRequest.GridMap = &GridMap;
+        CoordinatorInitializeRequest.RuntimeConfig =
+            BuildExecutionRuntimeConfig();
+
         FString ControllerFailureReason;
         if (!ExecutionCoordinator.InitializeController(
-                ExecutionControllerType,
+                CoordinatorInitializeRequest,
                 ControllerFailureReason))
         {
             UE_LOG(

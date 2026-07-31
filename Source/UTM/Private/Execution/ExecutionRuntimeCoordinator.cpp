@@ -7,29 +7,76 @@
 
 FExecutionRuntimeCoordinator::FExecutionRuntimeCoordinator() = default;
 
-FExecutionRuntimeCoordinator::~FExecutionRuntimeCoordinator() = default;
+FExecutionRuntimeCoordinator::~FExecutionRuntimeCoordinator()
+{
+    ResetController();
+}
 
 bool FExecutionRuntimeCoordinator::InitializeController(
-    EExecutionControllerType ControllerType,
+    const FExecutionRuntimeCoordinatorInitializeRequest& Request,
     FString& OutFailureReason)
 {
     ResetController();
-    ActiveController =
-        FExecutionControllerRegistry::CreateController(ControllerType);
-    if (!ActiveController)
+
+    if (!Request.Session)
     {
-        OutFailureReason = FString::Printf(
-            TEXT("Failed to create execution controller: %s"),
-            *FExecutionControllerRegistry::GetControllerTypeName(ControllerType));
+        OutFailureReason =
+            TEXT("Execution controller initialization has no session");
         return false;
     }
 
+    if (!Request.GridMap)
+    {
+        OutFailureReason =
+            TEXT("Execution controller initialization has no grid map");
+        return false;
+    }
+
+    TUniquePtr<IExecutionController> Controller =
+        FExecutionControllerRegistry::CreateController(Request.ControllerType);
+    if (!Controller)
+    {
+        OutFailureReason = FString::Printf(
+            TEXT("Failed to create execution controller: %s"),
+            *FExecutionControllerRegistry::GetControllerTypeName(
+                Request.ControllerType));
+        return false;
+    }
+
+    FExecutionControllerInitializeRequest ControllerInitializeRequest;
+    Request.Session->AgentStatesByMissionId.GetKeys(
+        ControllerInitializeRequest.OrderedMissionIds);
+    ControllerInitializeRequest.OrderedMissionIds.Sort();
+    ControllerInitializeRequest.GridMap = Request.GridMap;
+    ControllerInitializeRequest.RuntimeConfig = Request.RuntimeConfig;
+
     OutFailureReason.Reset();
+    if (!Controller->Initialize(
+            ControllerInitializeRequest,
+            OutFailureReason))
+    {
+        if (OutFailureReason.IsEmpty())
+        {
+            OutFailureReason = FString::Printf(
+                TEXT("Execution controller initialization failed: %s"),
+                *Controller->GetName());
+        }
+
+        Controller->Reset();
+        return false;
+    }
+
+    ActiveController = MoveTemp(Controller);
     return true;
 }
 
 void FExecutionRuntimeCoordinator::ResetController()
 {
+    if (ActiveController)
+    {
+        ActiveController->Reset();
+    }
+
     ActiveController.Reset();
 }
 

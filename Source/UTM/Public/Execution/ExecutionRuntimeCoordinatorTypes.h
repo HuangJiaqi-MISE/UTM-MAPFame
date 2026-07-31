@@ -8,6 +8,15 @@
 
 class FGridMap3D;
 
+struct FExecutionRuntimeCoordinatorInitializeRequest
+{
+    EExecutionControllerType ControllerType =
+        EExecutionControllerType::DefaultPipeline;
+    const FExecutionRuntimeSession* Session = nullptr;
+    const FGridMap3D* GridMap = nullptr;
+    FExecutionRuntimeConfig RuntimeConfig;
+};
+
 struct FExecutionRuntimeCoordinatorRequest
 {
     FExecutionRuntimeSession* Session = nullptr;

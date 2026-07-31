@@ -11,7 +11,7 @@ public:
     ~FExecutionRuntimeCoordinator();
 
     bool InitializeController(
-        EExecutionControllerType ControllerType,
+        const FExecutionRuntimeCoordinatorInitializeRequest& Request,
         FString& OutFailureReason);
 
     void ResetController();

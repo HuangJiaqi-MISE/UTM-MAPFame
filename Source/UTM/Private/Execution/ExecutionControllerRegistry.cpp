@@ -14,7 +14,7 @@ namespace
 
         virtual FExecutionControllerStepResult RunStep(
             const FExecutionControllerStepRequest& Request,
-            const FExecutionControllerStepCallbacks& Callbacks) const override
+            const FExecutionControllerStepCallbacks& Callbacks) override
         {
             return FExecutionStepPipeline::Run(Request, Callbacks);
         }
@@ -56,5 +56,20 @@ FExecutionControllerStepResult FExecutionControllerRegistry::RunStep(
         return FExecutionControllerStepResult();
     }
 
-    return Controller->RunStep(Request, Callbacks);
+    FExecutionControllerInitializeRequest InitializeRequest;
+    InitializeRequest.OrderedMissionIds = Request.OrderedMissionIds;
+    InitializeRequest.GridMap = Request.GridMap;
+    InitializeRequest.RuntimeConfig = Request.RuntimeConfig;
+
+    FString FailureReason;
+    if (!Controller->Initialize(InitializeRequest, FailureReason))
+    {
+        Controller->Reset();
+        return FExecutionControllerStepResult();
+    }
+
+    FExecutionControllerStepResult Result =
+        Controller->RunStep(Request, Callbacks);
+    Controller->Reset();
+    return Result;
 }

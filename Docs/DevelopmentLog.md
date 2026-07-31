@@ -2587,3 +2587,57 @@ Execution 已经具备 Runtime Session、Step Processor、Controller Registry、
 - 编译仅出现既有 `PBSPlanner.cpp` 的 UE 5.5 `TArray::RemoveAt(bool)` 弃用警告，与本阶段修改无关。
 - 2026-07-31：运行原 N200 参数回归实验，执行流程和 StructuredExperimentJSON 检查正常，未发现 Controller 持久化对 makespan、Delay、Alignment、Conflict 或 Replan 指标造成异常影响。
 - 后续仍可在同一编辑器会话内连续运行两次实验，定向确认 Controller 在运行间能够释放并重新初始化。
+
+## 2026-07-31 Execution Runtime Coordinator 第四阶段 B：标准 Controller 生命周期接口
+
+### 背景
+
+第四阶段 A 已经让一次执行会话复用同一个 Controller 实例，但 `IExecutionController` 仍只有只读的 `RunStep() const`，没有标准初始化和清理钩子。Controller 虽然存活时间变长，研究者仍不能通过普通成员自然维护冲突历史、动态优先级、在线统计或学习参数。本阶段补齐 Controller 的标准生命周期契约。
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionControllerTypes.h`
+- `Source/UTM/Public/Execution/ExecutionControllerRegistry.h`
+- `Source/UTM/Private/Execution/ExecutionControllerRegistry.cpp`
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinatorTypes.h`
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinator.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeCoordinator.cpp`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 标准生命周期接口
+
+- 新增 `FExecutionControllerInitializeRequest`，向 Controller 提供排序后的 Mission ID、Grid Map 和执行开始时的 Runtime Config 快照。
+- `IExecutionController` 新增可选 `Initialize()`：默认实现清空失败原因并返回成功，已有无状态 Controller 不需要编写额外逻辑。
+- `IExecutionController` 新增可选 `Reset()`：默认实现为空，供有状态 Controller 清理会话数据。
+- `IExecutionController::RunStep()` 删除末尾 `const`，允许实现类在 timestep 之间更新普通成员状态。
+- 新增 `FExecutionRuntimeCoordinatorInitializeRequest`，由 Benchmark Host 向 Coordinator 提供 Controller 类型、Runtime Session、Grid Map 和 Runtime Config。
+- Coordinator 负责从 Session 提取并排序 Mission ID，Actor 不需要理解 Controller 内部初始化数据结构。
+- Controller 初始化失败时不会进入 Active 状态；若实现未提供失败原因，Coordinator 会补充包含 Controller 名称的错误信息。
+- `ResetController()` 会先调用 Controller 的 `Reset()`，再销毁实例；Coordinator 析构时也执行同一清理路径。
+
+### Registry 兼容入口
+
+- `FExecutionControllerRegistry::RunStep()` 继续保留。
+- 该兼容入口现在执行一次完整的 `Create -> Initialize -> RunStep -> Reset -> Destroy` 生命周期。
+- Runtime Coordinator 主流程仍不使用该临时入口，而是复用持久的 `ActiveController`。
+
+### 保守性与兼容性说明
+
+- 默认 Controller 继续直接调用原 `FExecutionStepPipeline::Run()`，没有新增内部状态。
+- 初始化时的 Runtime Config 是会话开始快照；每个 `RunStep()` 仍接收当前 timestep 的 Runtime Config，因此除 Controller 类型外，原有运行期配置读取行为不变。
+- Mission ID 使用和 Session Step Processor 相同的升序语义，不改变 Agent 处理顺序。
+- TimeStep、Delay 随机流、Alignment、Conflict Resolution、Replan、Final Safety Gate、状态写回、Summary 和 JSON 均未修改。
+- EUW、Details 和 Blueprint 反射接口未修改。
+- C++ 接口存在一次有意的签名升级：外部自定义 Controller 若覆盖旧版 `RunStep(...) const`，需要删除实现末尾的 `const`，并可按需覆盖 `Initialize()` 和 `Reset()`。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development，检查 Unreal Header Tool、接口覆盖签名和 Coordinator 生命周期接线。
+2. 运行原 N200 参数实验，重点核对 makespan、Delay、Alignment、Conflict 和 local/global Replan 指标。
+3. 在同一编辑器会话中连续运行两次实验，确认 `Reset()` 后的新 Controller 不继承上一轮内部状态。
+
+### 验证结果
+
+- 2026-07-31：UTMEditor Win64 Development 编译通过；Unreal Header Tool 使用 `-WarningsAsErrors` 完成检查并报告 0 个反射文件改动，Controller Registry、Runtime Coordinator、Actor 和 UTM 模块均完成编译与链接，本轮无编译警告。
+- 2026-07-31：运行原 N200 参数回归实验，执行流程和 StructuredExperimentJSON 检查正常，未发现标准 Controller 生命周期接口对 makespan、Delay、Alignment、Conflict 或 Replan 指标造成异常影响。
+- 后续仍可在同一编辑器会话内连续运行两次实验，定向检查自定义有状态 Controller 的会话间 Reset；默认无状态 Controller 的本次 N200 回归已通过。

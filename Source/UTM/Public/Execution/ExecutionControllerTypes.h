@@ -16,6 +16,13 @@ enum class EExecutionControllerType : uint8
     DefaultPipeline UMETA(DisplayName = "Default Execution Pipeline")
 };
 
+struct FExecutionControllerInitializeRequest
+{
+    TArray<int32> OrderedMissionIds;
+    const FGridMap3D* GridMap = nullptr;
+    FExecutionRuntimeConfig RuntimeConfig;
+};
+
 struct FExecutionControllerStepRequest
 {
     TArray<int32> OrderedMissionIds;
