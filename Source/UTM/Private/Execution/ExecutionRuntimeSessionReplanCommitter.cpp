@@ -2,6 +2,17 @@
 
 #include "Execution/ExecutionReplanPathIntegrator.h"
 
+namespace
+{
+    struct FPreparedExecutionReplanCommit
+    {
+        int32 MissionId = INDEX_NONE;
+        FExecutionAgentState* State = nullptr;
+        FVector GoalWorld = FVector::ZeroVector;
+        FExecutionReplanPathIntegrationResult IntegrationResult;
+    };
+}
+
 FExecutionRuntimeReplanAttemptCommitResult
 FExecutionRuntimeSessionReplanCommitter::CommitAttemptResult(
     const FExecutionRuntimeReplanAttemptCommitRequest& Request)
@@ -12,8 +23,23 @@ FExecutionRuntimeSessionReplanCommitter::CommitAttemptResult(
         !Request.AgentStatesByMissionId ||
         !Request.PlannedCellPathsByMissionId)
     {
+        Result.FailureReason =
+            TEXT("invalid execution replan commit request");
         return Result;
     }
+
+    if (Request.AttemptResult->CandidateMissionIds.Num() <= 0)
+    {
+        Result.Status =
+            EExecutionRuntimeReplanAttemptCommitStatus::EmptyCandidateSet;
+        Result.FailureReason =
+            TEXT("execution replan commit has no candidate missions");
+        return Result;
+    }
+
+    TArray<FPreparedExecutionReplanCommit> PreparedCommits;
+    PreparedCommits.Reserve(
+        Request.AttemptResult->CandidateMissionIds.Num());
 
     for (const int32 MissionId : Request.AttemptResult->CandidateMissionIds)
     {
@@ -23,35 +49,85 @@ FExecutionRuntimeSessionReplanCommitter::CommitAttemptResult(
             Request.MissionConfigsById->Find(MissionId);
         const TArray<FIntVector>* ReplannedCellPath =
             Request.AttemptResult->ReplannedCellPathsByMission.Find(MissionId);
-        if (!State || !MissionConfig || !ReplannedCellPath)
+        if (!State)
         {
+            Result.Status =
+                EExecutionRuntimeReplanAttemptCommitStatus::MissingAgentState;
+            Result.FailedMissionId = MissionId;
+            Result.FailureReason = FString::Printf(
+                TEXT("execution replan commit is missing Agent State for Mission %d"),
+                MissionId);
             return Result;
         }
 
-        const FExecutionReplanPathIntegrationResult IntegrationResult =
+        if (!MissionConfig)
+        {
+            Result.Status =
+                EExecutionRuntimeReplanAttemptCommitStatus::MissingMissionConfig;
+            Result.FailedMissionId = MissionId;
+            Result.FailureReason = FString::Printf(
+                TEXT("execution replan commit is missing Mission Config for Mission %d"),
+                MissionId);
+            return Result;
+        }
+
+        if (!ReplannedCellPath)
+        {
+            Result.Status =
+                EExecutionRuntimeReplanAttemptCommitStatus::MissingReplannedPath;
+            Result.FailedMissionId = MissionId;
+            Result.FailureReason = FString::Printf(
+                TEXT("execution replan commit is missing replanned path for Mission %d"),
+                MissionId);
+            return Result;
+        }
+
+        FExecutionReplanPathIntegrationResult IntegrationResult =
             FExecutionReplanPathIntegrator::Integrate(
                 State->ActualCells,
                 State->LastObservedCell,
                 *ReplannedCellPath);
         if (!IntegrationResult.bSuccess)
         {
+            Result.Status =
+                EExecutionRuntimeReplanAttemptCommitStatus::PathIntegrationFailed;
+            Result.FailedMissionId = MissionId;
+            Result.FailureReason = FString::Printf(
+                TEXT("execution replan path integration failed for Mission %d"),
+                MissionId);
             return Result;
         }
 
-        State->PlannedCells = IntegrationResult.TimelineCells;
-        State->ExecutedPlanIndex = IntegrationResult.ExecutedPlanIndex;
-        State->GoalCell = IntegrationResult.GoalCell;
-        State->GoalWorld = MissionConfig->GoalWorld;
-        State->ConsecutiveConflictHoldCount = 0;
-        State->bAlignmentLost = false;
-
-        Request.PlannedCellPathsByMissionId->Add(
-            MissionId,
-            IntegrationResult.TimelineCells);
-        Result.ReplannedMissionIds.Add(MissionId);
+        FPreparedExecutionReplanCommit PreparedCommit;
+        PreparedCommit.MissionId = MissionId;
+        PreparedCommit.State = State;
+        PreparedCommit.GoalWorld = MissionConfig->GoalWorld;
+        PreparedCommit.IntegrationResult = MoveTemp(IntegrationResult);
+        PreparedCommits.Add(MoveTemp(PreparedCommit));
     }
 
-    Result.bSuccess = (Result.ReplannedMissionIds.Num() > 0);
+    for (const FPreparedExecutionReplanCommit& PreparedCommit :
+         PreparedCommits)
+    {
+        FExecutionAgentState& State = *PreparedCommit.State;
+        const FExecutionReplanPathIntegrationResult& IntegrationResult =
+            PreparedCommit.IntegrationResult;
+
+        State.PlannedCells = IntegrationResult.TimelineCells;
+        State.ExecutedPlanIndex = IntegrationResult.ExecutedPlanIndex;
+        State.GoalCell = IntegrationResult.GoalCell;
+        State.GoalWorld = PreparedCommit.GoalWorld;
+        State.ConsecutiveConflictHoldCount = 0;
+        State.bAlignmentLost = false;
+
+        Request.PlannedCellPathsByMissionId->Add(
+            PreparedCommit.MissionId,
+            IntegrationResult.TimelineCells);
+        Result.ReplannedMissionIds.Add(PreparedCommit.MissionId);
+    }
+
+    Result.Status = EExecutionRuntimeReplanAttemptCommitStatus::Success;
+    Result.bSuccess = true;
     return Result;
 }
 

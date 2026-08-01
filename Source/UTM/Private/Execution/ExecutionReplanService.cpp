@@ -114,7 +114,8 @@ FExecutionReplanServiceResult FDefaultExecutionReplanService::Run(
                 FExecutionRuntimeSessionReplanCommitter::CommitAttemptResult(
                     CommitRequest);
 
-            if (Request.PlannedWorldPathsByMissionId)
+            if (CommitResult.bSuccess &&
+                Request.PlannedWorldPathsByMissionId)
             {
                 for (const int32 MissionId : AttemptResult.CandidateMissionIds)
                 {

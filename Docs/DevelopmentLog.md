@@ -2820,3 +2820,65 @@ APathPlanningDemoActor
 
 - 2026-08-01：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 成功处理 Actor 的非反射 C++ 注入方法并写入 1 个生成文件，Replan Service 接口与默认实现、Runtime Coordinator、Actor 和 UTM 模块均完成编译与链接，本轮无编译警告。
 - 2026-08-01：运行原 N200 参数回归实验，默认 `FDefaultExecutionReplanService` 的执行流程和 StructuredExperimentJSON 检查正常，未发现接口化与依赖注入对 makespan、Alignment、Conflict、applied replans 或 local/global Replan 指标造成异常影响。
+
+## 2026-08-01 Execution Replan Committer：原子提交
+
+### 背景
+
+`FExecutionRuntimeSessionReplanCommitter::CommitAttemptResult()` 原先在同一个 Candidate 循环中交错执行校验、路径整合和 Session 写回。如果前面的 Mission 已成功写回，而后面的 Mission 缺少 State、Mission Config、Replanned Path 或 Integration 失败，函数会返回失败，但前面 Mission 的 Runtime State 与 Cell Path Cache 已经改变。后续扩张或重试因而可能从部分新状态和部分旧状态组成的混合快照继续执行。本阶段将该过程改为两阶段事务。
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeSessionReplanCommitter.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeSessionReplanCommitter.cpp`
+- `Source/UTM/Private/Execution/ExecutionReplanService.cpp`
+
+### 两阶段提交
+
+1. Prepare 阶段按原 Candidate 顺序完成全部 State、Mission Config 和 Replanned Path 查询。
+2. Prepare 阶段调用 `FExecutionReplanPathIntegrator`，将每个 Mission 的 Timeline、索引、Goal 和目标状态指针保存在临时记录中。
+3. Prepare 阶段不修改 Agent State、Cell Path Cache、World Path Cache 或 Commit Result Mission ID 集合。
+4. 只有全部 Candidate Prepare 成功后才进入 Commit 阶段。
+5. Commit 阶段按原 Candidate 顺序统一更新 Agent State 和 Cell Path Cache，并产生完整的 Replanned Mission ID 集合。
+6. Service 仅在 Commit Result 整体成功时同步 World Path Cache。
+
+### 结构化失败结果
+
+新增 `EExecutionRuntimeReplanAttemptCommitStatus`：
+
+- `Success`
+- `InvalidRequest`
+- `EmptyCandidateSet`
+- `MissingAgentState`
+- `MissingMissionConfig`
+- `MissingReplannedPath`
+- `PathIntegrationFailed`
+
+Commit Result 同时新增 `FailedMissionId` 和 `FailureReason`，便于后续测试、诊断或自定义 Service 处理；本阶段不新增 UE 日志或 StructuredExperimentJSON 字段。
+
+### 原子性边界
+
+- 任意 Prepare 失败时，`ReplannedMissionIds` 保持为空。
+- 任意 Prepare 失败时，不修改 `PlannedCells`、`ExecutedPlanIndex`、`GoalCell`、`GoalWorld`、Conflict Hold、Alignment Lost 或 Cell Path Cache。
+- Service 使用 `CommitResult.bSuccess` 作为 World Path Cache 同步门槛，因此失败时 World Cache 同样不变。
+- Commit 阶段只执行已经完整准备好的内存写回，不包含新的业务校验失败分支。
+
+### 保守性说明
+
+- 成功路径写回的字段、字段值、Candidate 顺序和 Replanned Mission ID 语义不变。
+- Timeline 仍由原 `FExecutionReplanPathIntegrator` 生成，重规划 Hold timestep 和路径拼接规则未修改。
+- Committer 仍由 Replan Coordinator 的 Apply 回调同步调用，因此 Prepare 和 Commit 都处于原 Replan Attempt 计时范围内。
+- Planner、Candidate 扩张、targeted retry、PostCheck、local/global fallback 和总重规划次数统计未修改。
+- Actor、EUW、Details、Blueprint、Summary 和 StructuredExperimentJSON 接口未修改。
+- 正常 N200 路径通常已经由 Attempt Runner 完成前置校验；本阶段主要强化异常数据和自定义 Replan 实现下的失败契约。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development，检查新增状态类型、临时 Prepare 记录和 Service 成功门控。
+2. 运行原 N200 参数实验，核对 makespan、Alignment、Conflict、applied replans 以及 local/global Replan 数量和耗时。
+3. 后续通过自动化测试构造“前一个 Mission 有效、后一个 Mission 缺少路径”的输入，确认失败后所有 Agent State 和两类路径缓存保持不变。
+
+### 验证结果
+
+- 2026-08-01：UTMEditor Win64 Development 编译通过；修改后的 `ExecutionRuntimeSessionReplanCommitter.cpp` 与 `ExecutionReplanService.cpp` 分别完成非 Unity 编译，UTM 模块成功链接，本轮无编译警告。
+- 2026-08-01：运行原 N200 参数回归实验，执行流程和 StructuredExperimentJSON 检查正常，未发现两阶段原子提交对 makespan、Alignment、Conflict、applied replans 或 local/global Replan 指标造成异常影响。

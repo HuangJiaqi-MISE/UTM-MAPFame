@@ -14,9 +14,24 @@ struct FExecutionRuntimeReplanAttemptCommitRequest
     TMap<int32, TArray<FIntVector>>* PlannedCellPathsByMissionId = nullptr;
 };
 
+enum class EExecutionRuntimeReplanAttemptCommitStatus : uint8
+{
+    Success,
+    InvalidRequest,
+    EmptyCandidateSet,
+    MissingAgentState,
+    MissingMissionConfig,
+    MissingReplannedPath,
+    PathIntegrationFailed
+};
+
 struct FExecutionRuntimeReplanAttemptCommitResult
 {
+    EExecutionRuntimeReplanAttemptCommitStatus Status =
+        EExecutionRuntimeReplanAttemptCommitStatus::InvalidRequest;
     bool bSuccess = false;
+    int32 FailedMissionId = INDEX_NONE;
+    FString FailureReason;
     TSet<int32> ReplannedMissionIds;
 };
 
