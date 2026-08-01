@@ -3,6 +3,7 @@
 #include "Execution/ExecutionRuntimeCoordinatorTypes.h"
 
 class IExecutionController;
+class IExecutionDiagnosticsSink;
 class IExecutionReplanService;
 
 class FExecutionRuntimeCoordinator
@@ -18,6 +19,9 @@ public:
     bool SetReplanService(
         TUniquePtr<IExecutionReplanService>&& InReplanService);
 
+    bool SetDiagnosticsSink(
+        TUniquePtr<IExecutionDiagnosticsSink>&& InDiagnosticsSink);
+
     void ResetController();
 
     FExecutionRuntimeCoordinatorResult Advance(
@@ -26,9 +30,11 @@ public:
 
     TArray<FExecutionConflict> RecordObservedConflicts(
         FExecutionRuntimeSession& Session,
-        int32 TimeStep) const;
+        int32 TimeStep,
+        bool bEmitDiagnostics = true) const;
 
 private:
     TUniquePtr<IExecutionController> ActiveController;
     TUniquePtr<IExecutionReplanService> ReplanService;
+    TUniquePtr<IExecutionDiagnosticsSink> DiagnosticsSink;
 };

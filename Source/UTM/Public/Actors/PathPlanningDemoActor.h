@@ -3,7 +3,6 @@
 #include "CoreMinimal.h"
 #include "Execution/DiscreteAlignmentManager.h"
 #include "Execution/ExecutionControllerTypes.h"
-#include "Execution/ExecutionDiagnosticsSink.h"
 #include "Execution/ExecutionRuntimeCoordinator.h"
 #include "Execution/ExecutionRuntimeSession.h"
 #include "Execution/ExecutionTypes.h"
@@ -23,6 +22,7 @@ class USceneComponent;
 class ADroneActor;
 class AMissionMarkerActor;
 class ANoFlyZoneMarkerActor;
+class IExecutionDiagnosticsSink;
 class IExecutionReplanService;
 struct FMultiAgentPlanningPipelineResult;
 
@@ -133,7 +133,7 @@ private:
     FIntVector GetObservedExecutionCell(const FExecutionAgentState& State) const;
     FDiscreteAlignmentSettings BuildDiscreteAlignmentSettings() const;
     FExecutionRuntimeConfig BuildExecutionRuntimeConfig() const;
-    void RefreshExecutionDiagnosticsSettings();
+    FExecutionDiagnosticsSettings BuildExecutionDiagnosticsSettings() const;
     void BuildExecutionSummary();
     void LogExecutionSummary() const;
 
@@ -154,7 +154,6 @@ private:
 
 private:
     FExecutionRuntimeCoordinator ExecutionCoordinator;
-    TUniquePtr<IExecutionDiagnosticsSink> ExecutionDiagnosticsSink;
     FGridMap3D GridMap;
     FPlanningInputValidator InputValidator;
     TMap<int32, TArray<FVector>> LastPlannedPathsByMission;

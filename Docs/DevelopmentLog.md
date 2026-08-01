@@ -2941,3 +2941,70 @@ Execution Policy、Replan Service、Runtime Coordinator 和 Final Safety Gate �
 - 2026-08-01：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 完成检查，新增 `ExecutionLogSink.cpp` 与修改后的 `PathPlanningDemoActor.cpp` 分别完成非 Unity 编译，UTM 模块成功链接。
 - 本轮唯一编译警告来自未修改的 `PBSPlanner.cpp` 对已弃用 `TArray::RemoveAt(..., bool)` 重载的使用；Diagnostics/Log Sink 修改未新增警告。
 - 2026-08-01：运行原 N200 参数回归实验，执行流程、StructuredExperimentJSON 和现有 Execution 日志检查正常，未发现 Diagnostics/Log Sink 抽取对 makespan、Delay、Alignment、Conflict、applied replans 或 local/global Replan 指标造成异常影响。
+
+## 2026-08-01 Execution Diagnostics / Log Sink 第二阶段
+
+### 背景
+
+第一阶段已经建立可替换 Sink 并把日志格式化移出 Actor，但 `AdvanceExecutionOneStep()` 仍手工绑定 Replan Attempt、Replan Coordinator、Replan Service、Conflict Resolution 和 Final Safety Gate 五类诊断回调，并在 Coordinator 返回后转发 Applied Step 与 Observed Conflict。Actor 因此仍然了解 Execution 内部诊断事件拓扑。本阶段把 Sink 所有权和事件转发下沉到 Runtime Coordinator。
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinatorTypes.h`
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinator.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeCoordinator.cpp`
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+- `Source/UTM/Private/Reporting/ExecutionLogSink.cpp`
+
+### Coordinator 新职责
+
+- `FExecutionRuntimeCoordinator` 持有 `TUniquePtr<IExecutionDiagnosticsSink>`，通过 `SetDiagnosticsSink()` 接收所有权。
+- 只有不存在 Active Controller 时才允许替换 Sink；空指针或执行会话中途替换会返回 `false`，且不转移调用者所有权。
+- Actor 构造时创建默认 `FExecutionLogSink` 并注入 Coordinator，现有项目不需要额外配置。
+- `FExecutionRuntimeCoordinatorInitializeRequest` 和 `FExecutionRuntimeCoordinatorRequest` 新增 `DiagnosticsSettings`，分别同步会话初始化设置和每个 timestep 的当前 Details 设置。
+- Coordinator 在原 Replan Service 和 Controller 回调位置同步转发结构化事件，不改变 Attempt 计时范围或事件顺序。
+- State Transition 写回后，Coordinator 按原顺序调用 `HandleAppliedStep()`、检测并记录 Observed Conflict、再调用 `HandleObservedConflicts()`。
+- `RecordObservedConflicts()` 新增 `bEmitDiagnostics` 参数；Actor 初始化调用使用默认 `true`，普通 timestep 内部调用先关闭自动输出，再由 Coordinator 保证 Applied/Observed 的既有日志顺序。
+
+### Actor 新边界
+
+- `SetExecutionDiagnosticsSink()` 只向 Coordinator 转移所有权，不再持有 Sink。
+- 删除五组诊断 lambda 和 Coordinator 返回后的两次 Sink 调用。
+- `FExecutionRuntimeCoordinatorCallbacks` 现在只剩 `ResolveObservedCell` 与 `BuildPlannerRuntimeConfig`，两者分别连接 Drone/UWorld 观测与 Actor Planner Details 配置。
+- Actor 只通过 `BuildExecutionDiagnosticsSettings()` 把三个现有日志开关转换为标准设置。
+- `PathPlanningDemoActor.cpp` 从第一阶段的 2457 行进一步减少到 2393 行，本阶段净减少 64 行；相对 Diagnostics 抽取前累计减少 451 行。
+
+### 公共契约变化
+
+- 从 `FExecutionRuntimeCoordinatorCallbacks` 删除 `OnReplanAttemptFailure`、`OnReplanCoordinatorEvent`、`OnReplanServiceResult`、`OnConflictResolutionEvent` 和 `OnFinalSafetyGateEvent`。
+- 自定义 Host 不再为每种内部事件组装 lambda；需要自定义输出时实现并注入 `IExecutionDiagnosticsSink`。
+- Execution Event/Result 数据结构、默认日志文本、Details、EUW、Blueprint、Summary 和 StructuredExperimentJSON 均未修改。
+
+### Unity Build 修正
+
+- 首次编译时 `ExecutionLogSink.cpp` 与 `ExecutionSummaryBuilder.cpp` 被 Unity Build 合并，两个匿名命名空间中的 `GetCellAtTime()` 发生同一 Translation Unit 重定义。
+- 将 Sink 内部辅助函数重命名为 `GetCellAtTimeForLog()`；函数主体和 Alignment 日志中的 Reference Cell 取值语义不变。
+- 修正后 UTMEditor 编译与链接通过。
+
+### 保守性说明
+
+- Sink 仍然是只读观察者，所有方法均无决策返回值。
+- TimeStep 在 Coordinator 内递增后直接传给 Sink，避免 Host 在调用前捕获旧 timestep。
+- 关闭 `bLogConflictPredictionEvents` 时 Coordinator 仍不绑定 Conflict Resolution callback。
+- Delay/Alignment 开关继续在默认 Sink 中控制格式化，关闭时不生成对应日志字符串。
+- Sink 生命周期独立于 Controller Reset；一次 Host 实例可在多次执行会话中复用同一个自定义 Sink。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development，检查 Coordinator 的 `TUniquePtr` 不完整类型析构、公共 Request 字段和回调签名。
+2. 运行原 N200 参数实验，核对 makespan、Delay、Alignment、Conflict、applied replans 和 local/global Replan 指标。
+3. 检查 Replan、Final Safety Gate、Applied Step 和 Observed Conflict 日志顺序。
+4. 检查三个现有日志开关，确认 live Details 设置仍在每个 timestep 同步。
+
+### 验证结果
+
+- 2026-08-01：UTMEditor Win64 Development 编译通过；修改后的 Runtime Coordinator、Actor 和 Log Sink 成功编译并完成 UTM 模块链接。
+- 编译过程发现并修复 Reporting 源文件之间的 Unity Build 匿名辅助函数重名；修正不改变算法或日志内容。
+- 本轮唯一剩余警告仍来自未修改的 `PBSPlanner.cpp` 对已弃用 `TArray::RemoveAt(..., bool)` 重载的使用。
+- 2026-08-01：运行原 N200 参数回归实验，执行流程、StructuredExperimentJSON、Replan/Final Safety Gate 日志和现有 Execution 指标检查正常，未发现 Sink 所有权及诊断转发下沉对 makespan、Delay、Alignment、Conflict、applied replans 或 local/global Replan 行为造成异常影响。

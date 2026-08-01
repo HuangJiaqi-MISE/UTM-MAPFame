@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Execution/ExecutionControllerTypes.h"
+#include "Execution/ExecutionDiagnosticsSink.h"
 #include "Execution/ExecutionReplanServiceTypes.h"
 #include "Execution/ExecutionRuntimeConfig.h"
 #include "Execution/ExecutionRuntimeSession.h"
@@ -23,6 +24,7 @@ struct FExecutionRuntimeCoordinatorInitializeRequest
     const FExecutionRuntimeSession* Session = nullptr;
     const FGridMap3D* GridMap = nullptr;
     FExecutionRuntimeConfig RuntimeConfig;
+    FExecutionDiagnosticsSettings DiagnosticsSettings;
 };
 
 struct FExecutionRuntimeCoordinatorRequest
@@ -30,6 +32,7 @@ struct FExecutionRuntimeCoordinatorRequest
     FExecutionRuntimeSession* Session = nullptr;
     const FGridMap3D* GridMap = nullptr;
     FExecutionRuntimeConfig RuntimeConfig;
+    FExecutionDiagnosticsSettings DiagnosticsSettings;
     FExecutionRuntimeReplanContext ReplanContext;
 };
 
@@ -37,17 +40,6 @@ struct FExecutionRuntimeCoordinatorCallbacks
 {
     TFunction<FIntVector(const FExecutionAgentState&)> ResolveObservedCell;
     TFunction<FPlannerRuntimeConfig()> BuildPlannerRuntimeConfig;
-    TFunction<void(
-        const FExecutionReplanAttemptInput&,
-        const FExecutionReplanAttemptResult&)> OnReplanAttemptFailure;
-    TFunction<void(const FExecutionReplanCoordinatorEvent&)>
-        OnReplanCoordinatorEvent;
-    TFunction<void(const FExecutionReplanServiceResult&)>
-        OnReplanServiceResult;
-    TFunction<void(const FExecutionConflictResolutionEvent&)>
-        OnConflictResolutionEvent;
-    TFunction<void(const FExecutionFinalSafetyGateEvent&)>
-        OnFinalSafetyGateEvent;
 };
 
 struct FExecutionRuntimeCoordinatorResult

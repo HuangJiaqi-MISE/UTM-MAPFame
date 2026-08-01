@@ -2,6 +2,7 @@
 
 #include "Execution/ExecutionControllerRegistry.h"
 #include "Execution/ExecutionDelayPolicy.h"
+#include "Execution/ExecutionDiagnosticsSink.h"
 #include "Execution/ExecutionObservedConflictDetector.h"
 #include "Execution/ExecutionReplanService.h"
 #include "Execution/ExecutionRuntimeSessionStepProcessor.h"
@@ -24,6 +25,10 @@ bool FExecutionRuntimeCoordinator::InitializeController(
     if (ReplanService)
     {
         ReplanService->Reset();
+    }
+    if (DiagnosticsSink)
+    {
+        DiagnosticsSink->SetSettings(Request.DiagnosticsSettings);
     }
 
     if (!Request.Session)
@@ -95,6 +100,18 @@ bool FExecutionRuntimeCoordinator::SetReplanService(
     return true;
 }
 
+bool FExecutionRuntimeCoordinator::SetDiagnosticsSink(
+    TUniquePtr<IExecutionDiagnosticsSink>&& InDiagnosticsSink)
+{
+    if (ActiveController || !InDiagnosticsSink)
+    {
+        return false;
+    }
+
+    DiagnosticsSink = MoveTemp(InDiagnosticsSink);
+    return true;
+}
+
 void FExecutionRuntimeCoordinator::ResetController()
 {
     if (ActiveController)
@@ -132,6 +149,10 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
     }
 
     FExecutionRuntimeSession& Session = *Request.Session;
+    if (DiagnosticsSink)
+    {
+        DiagnosticsSink->SetSettings(Request.DiagnosticsSettings);
+    }
     Session.TimeStep++;
     Result.TimeStep = Session.TimeStep;
 
@@ -191,10 +212,23 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
             ServiceRequest.bGlobalReplan = bGlobalReplan;
 
             FExecutionReplanServiceCallbacks ServiceCallbacks;
-            ServiceCallbacks.OnAttemptFailure =
-                Callbacks.OnReplanAttemptFailure;
-            ServiceCallbacks.OnCoordinatorEvent =
-                Callbacks.OnReplanCoordinatorEvent;
+            if (DiagnosticsSink)
+            {
+                ServiceCallbacks.OnAttemptFailure =
+                    [this](
+                        const FExecutionReplanAttemptInput& Input,
+                        const FExecutionReplanAttemptResult& Result)
+                    {
+                        DiagnosticsSink->HandleReplanAttemptFailure(
+                            Input,
+                            Result);
+                    };
+                ServiceCallbacks.OnCoordinatorEvent =
+                    [this](const FExecutionReplanCoordinatorEvent& Event)
+                    {
+                        DiagnosticsSink->HandleReplanCoordinatorEvent(Event);
+                    };
+            }
 
             FExecutionReplanServiceResult ServiceResult;
             if (ReplanService)
@@ -208,9 +242,9 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
                 ServiceResult.FailureReason =
                     TEXT("execution runtime coordinator has no replan service");
             }
-            if (Callbacks.OnReplanServiceResult)
+            if (DiagnosticsSink)
             {
-                Callbacks.OnReplanServiceResult(ServiceResult);
+                DiagnosticsSink->HandleReplanServiceResult(ServiceResult);
             }
 
             ReplannedMissionIds = ServiceResult.ReplannedMissionIds;
@@ -233,10 +267,28 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
                     Session.MissionConfigsById,
                     Session.AgentStatesByMissionId);
         };
-    ControllerCallbacks.OnConflictResolutionEvent =
-        Callbacks.OnConflictResolutionEvent;
-    ControllerCallbacks.OnFinalSafetyGateEvent =
-        Callbacks.OnFinalSafetyGateEvent;
+    if (DiagnosticsSink)
+    {
+        if (Request.DiagnosticsSettings.bLogConflictPredictionEvents)
+        {
+            ControllerCallbacks.OnConflictResolutionEvent =
+                [this, &Session](
+                    const FExecutionConflictResolutionEvent& Event)
+                {
+                    DiagnosticsSink->HandleConflictResolutionEvent(
+                        Session.TimeStep,
+                        Event);
+                };
+        }
+        ControllerCallbacks.OnFinalSafetyGateEvent =
+            [this, &Session](
+                const FExecutionFinalSafetyGateEvent& Event)
+            {
+                DiagnosticsSink->HandleFinalSafetyGateEvent(
+                    Session.TimeStep,
+                    Event);
+            };
+    }
 
     Result.ControllerResult = ActiveController->RunStep(
         ControllerRequest,
@@ -254,14 +306,24 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
             Session.AgentStatesByMissionId,
             Result.ControllerResult);
     Result.ObservedConflicts =
-        RecordObservedConflicts(Session, Session.TimeStep);
+        RecordObservedConflicts(Session, Session.TimeStep, false);
+    if (DiagnosticsSink)
+    {
+        DiagnosticsSink->HandleAppliedStep(
+            Session.TimeStep,
+            Session,
+            Result.ControllerResult,
+            Result.ApplyResult);
+        DiagnosticsSink->HandleObservedConflicts(Result.ObservedConflicts);
+    }
     return Result;
 }
 
 TArray<FExecutionConflict>
 FExecutionRuntimeCoordinator::RecordObservedConflicts(
     FExecutionRuntimeSession& Session,
-    int32 TimeStep) const
+    int32 TimeStep,
+    bool bEmitDiagnostics) const
 {
     FExecutionObservedConflictDetectionRequest DetectionRequest;
     DetectionRequest.AgentStatesByMissionId =
@@ -271,5 +333,9 @@ FExecutionRuntimeCoordinator::RecordObservedConflicts(
         FExecutionObservedConflictDetector::Detect(DetectionRequest);
 
     Session.Conflicts.Append(DetectionResult.Conflicts);
+    if (bEmitDiagnostics && DiagnosticsSink)
+    {
+        DiagnosticsSink->HandleObservedConflicts(DetectionResult.Conflicts);
+    }
     return MoveTemp(DetectionResult.Conflicts);
 }

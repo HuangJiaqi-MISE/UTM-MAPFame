@@ -157,7 +157,8 @@ APathPlanningDemoActor::APathPlanningDemoActor()
 {
     PrimaryActorTick.bCanEverTick = true;
 
-    ExecutionDiagnosticsSink = MakeUnique<FExecutionLogSink>();
+    ExecutionCoordinator.SetDiagnosticsSink(
+        MakeUnique<FExecutionLogSink>());
 
     SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
     RootComponent = SceneRoot;
@@ -166,13 +167,8 @@ APathPlanningDemoActor::APathPlanningDemoActor()
 bool APathPlanningDemoActor::SetExecutionDiagnosticsSink(
     TUniquePtr<IExecutionDiagnosticsSink>&& InDiagnosticsSink)
 {
-    if (ExecutionSession.bRunning || !InDiagnosticsSink)
-    {
-        return false;
-    }
-
-    ExecutionDiagnosticsSink = MoveTemp(InDiagnosticsSink);
-    return true;
+    return ExecutionCoordinator.SetDiagnosticsSink(
+        MoveTemp(InDiagnosticsSink));
 }
 
 // 更新代码结构，手动控制是否在 BeginPlay 里自动运行规划逻辑，方便调试和编辑器交互
@@ -960,6 +956,8 @@ void APathPlanningDemoActor::InitializeExecutionStates()
         CoordinatorInitializeRequest.GridMap = &GridMap;
         CoordinatorInitializeRequest.RuntimeConfig =
             BuildExecutionRuntimeConfig();
+        CoordinatorInitializeRequest.DiagnosticsSettings =
+            BuildExecutionDiagnosticsSettings();
 
         FString ControllerFailureReason;
         if (!ExecutionCoordinator.InitializeController(
@@ -975,13 +973,7 @@ void APathPlanningDemoActor::InitializeExecutionStates()
         }
     }
 
-    RefreshExecutionDiagnosticsSettings();
-    const TArray<FExecutionConflict> InitialConflicts =
-        ExecutionCoordinator.RecordObservedConflicts(ExecutionSession, 0);
-    if (ExecutionDiagnosticsSink)
-    {
-        ExecutionDiagnosticsSink->HandleObservedConflicts(InitialConflicts);
-    }
+    ExecutionCoordinator.RecordObservedConflicts(ExecutionSession, 0);
 
     if (!ExecutionSession.bRunning)
     {
@@ -1065,18 +1057,14 @@ FExecutionRuntimeConfig APathPlanningDemoActor::BuildExecutionRuntimeConfig() co
     return Config;
 }
 
-void APathPlanningDemoActor::RefreshExecutionDiagnosticsSettings()
+FExecutionDiagnosticsSettings
+APathPlanningDemoActor::BuildExecutionDiagnosticsSettings() const
 {
-    if (!ExecutionDiagnosticsSink)
-    {
-        return;
-    }
-
     FExecutionDiagnosticsSettings Settings;
     Settings.bLogDelayEvents = bLogExecutionDelay;
     Settings.bLogAlignmentEvents = bLogAlignmentEvents;
     Settings.bLogConflictPredictionEvents = bLogConflictPredictionEvents;
-    ExecutionDiagnosticsSink->SetSettings(Settings);
+    return Settings;
 }
 
 void APathPlanningDemoActor::AdvanceExecutionOneStep()
@@ -1088,6 +1076,8 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
     CoordinatorRequest.Session = &ExecutionSession;
     CoordinatorRequest.GridMap = &GridMap;
     CoordinatorRequest.RuntimeConfig = BuildExecutionRuntimeConfig();
+    CoordinatorRequest.DiagnosticsSettings =
+        BuildExecutionDiagnosticsSettings();
     CoordinatorRequest.ReplanContext.PlannerType = PlannerType;
     CoordinatorRequest.ReplanContext.PlannedCellPathsByMissionId =
         &PlannedCellPathsByMission;
@@ -1105,49 +1095,6 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         {
             return BuildPlannerRuntimeConfig();
         };
-
-    RefreshExecutionDiagnosticsSettings();
-    IExecutionDiagnosticsSink* DiagnosticsSink =
-        ExecutionDiagnosticsSink.Get();
-    if (DiagnosticsSink)
-    {
-        CoordinatorCallbacks.OnReplanAttemptFailure =
-            [DiagnosticsSink](
-                const FExecutionReplanAttemptInput& Input,
-                const FExecutionReplanAttemptResult& Result)
-            {
-                DiagnosticsSink->HandleReplanAttemptFailure(Input, Result);
-            };
-        CoordinatorCallbacks.OnReplanCoordinatorEvent =
-            [DiagnosticsSink](const FExecutionReplanCoordinatorEvent& Event)
-            {
-                DiagnosticsSink->HandleReplanCoordinatorEvent(Event);
-            };
-        CoordinatorCallbacks.OnReplanServiceResult =
-            [DiagnosticsSink](const FExecutionReplanServiceResult& Result)
-            {
-                DiagnosticsSink->HandleReplanServiceResult(Result);
-            };
-        if (bLogConflictPredictionEvents)
-        {
-            CoordinatorCallbacks.OnConflictResolutionEvent =
-                [this, DiagnosticsSink](
-                    const FExecutionConflictResolutionEvent& Event)
-                {
-                    DiagnosticsSink->HandleConflictResolutionEvent(
-                        ExecutionSession.TimeStep,
-                        Event);
-                };
-        }
-        CoordinatorCallbacks.OnFinalSafetyGateEvent =
-            [this, DiagnosticsSink](
-                const FExecutionFinalSafetyGateEvent& Event)
-            {
-                DiagnosticsSink->HandleFinalSafetyGateEvent(
-                    ExecutionSession.TimeStep,
-                    Event);
-            };
-    }
 
     const FExecutionRuntimeCoordinatorResult CoordinatorResult =
         ExecutionCoordinator.Advance(
@@ -1187,17 +1134,6 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
 
     const FExecutionStepResultApplyResult& ApplyResult =
         CoordinatorResult.ApplyResult;
-
-    if (DiagnosticsSink)
-    {
-        DiagnosticsSink->HandleAppliedStep(
-            ExecutionSession.TimeStep,
-            ExecutionSession,
-            ControllerResult,
-            ApplyResult);
-        DiagnosticsSink->HandleObservedConflicts(
-            CoordinatorResult.ObservedConflicts);
-    }
 
     if (!ApplyResult.bAnyActive)
     {

@@ -29,7 +29,7 @@ namespace
         }
     }
 
-    FIntVector GetCellAtTime(
+    FIntVector GetCellAtTimeForLog(
         const TArray<FIntVector>& Cells,
         int32 TimeStep)
     {
@@ -440,7 +440,7 @@ void FExecutionLogSink::HandleAppliedStep(
         if (Settings.bLogAlignmentEvents &&
             Proposal->FinalAction != EExecutionPolicyAction::FollowPlan)
         {
-            const FIntVector ReferenceCell = GetCellAtTime(
+            const FIntVector ReferenceCell = GetCellAtTimeForLog(
                 State->PlannedCells,
                 Proposal->ReferencePlanIndex);
             UE_LOG(
