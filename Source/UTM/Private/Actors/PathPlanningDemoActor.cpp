@@ -8,9 +8,6 @@
 #include "Actors/DroneActor.h"
 #include "Engine/World.h"
 
-#include "Execution/ExecutionAlignmentPolicy.h"
-#include "Execution/ExecutionConflictResolutionPolicy.h"
-#include "Execution/ExecutionFinalSafetyGateCoordinator.h"
 #include "Execution/ExecutionReplanService.h"
 #include "Execution/ExecutionRuntimeSessionBuilder.h"
 #include "Execution/ExecutionStepTypes.h"
@@ -27,6 +24,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Reporting/ExperimentMetadataResolver.h"
 #include "Reporting/ExperimentReporter.h"
+#include "Reporting/ExecutionLogSink.h"
 #include "Reporting/ExecutionSummaryBuilder.h"
 
 #include "HAL/PlatformTime.h"
@@ -36,67 +34,6 @@ namespace
     constexpr int32 LoggedPathPreviewCount = 16;
     constexpr int32 MaxDebugDrawPathPoints = 2048;
     constexpr int32 MaxSpawnableDronePathPoints = 20000;
-
-    const TCHAR* LexToString(EExecutionPredictedConflictType Type)
-    {
-        switch (Type)
-        {
-        case EExecutionPredictedConflictType::Vertex:
-            return TEXT("Vertex");
-        case EExecutionPredictedConflictType::Edge:
-            return TEXT("Edge");
-        case EExecutionPredictedConflictType::ProtectionFootprint:
-            return TEXT("ProtectionFootprint");
-        case EExecutionPredictedConflictType::Downwash:
-            return TEXT("Downwash");
-        default:
-            return TEXT("None");
-        }
-    }
-
-    void LogExecutionConflictResolutionEvent(
-        const FExecutionConflictResolutionEvent& Event,
-        int32 TimeStep)
-    {
-        switch (Event.Type)
-        {
-        case EExecutionConflictResolutionEventType::UnresolvedConflict:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentConflictPrediction] t=%d unresolved predicted %s conflict between Mission %d and Mission %d, escalate to replan"),
-                TimeStep,
-                LexToString(Event.Conflict.Type),
-                Event.Conflict.AgentA,
-                Event.Conflict.AgentB);
-            break;
-
-        case EExecutionConflictResolutionEventType::YieldApplied:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentConflictPrediction] t=%d Mission=%d hold for predicted %s conflict with Mission=%d at Cell=(%d,%d,%d)"),
-                TimeStep,
-                Event.YieldMissionId,
-                LexToString(Event.Conflict.Type),
-                Event.KeepMissionId,
-                Event.Conflict.Cell.X,
-                Event.Conflict.Cell.Y,
-                Event.Conflict.Cell.Z);
-            break;
-
-        case EExecutionConflictResolutionEventType::RemainingConflict:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentConflictPrediction] t=%d remaining predicted %s conflict between Mission %d and Mission %d after arbitration"),
-                TimeStep,
-                LexToString(Event.Conflict.Type),
-                Event.Conflict.AgentA,
-                Event.Conflict.AgentB);
-            break;
-        }
-    }
 
     EExecutionPolicyReplanMode ToExecutionPolicyReplanMode(EExecutionReplanMode ReplanMode)
     {
@@ -109,287 +46,6 @@ namespace
         case EExecutionReplanMode::Disabled:
         default:
             return EExecutionPolicyReplanMode::Disabled;
-        }
-    }
-
-    void LogExecutionFinalSafetyGateEvent(
-        const FExecutionFinalSafetyGateEvent& Event,
-        int32 TimeStep)
-    {
-        switch (Event.Type)
-        {
-        case EExecutionFinalSafetyGateEventType::UnsafeProposalDetected:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[FinalSafetyGate] t=%d unsafe proposed %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); forcing %d missions to hold"),
-                TimeStep,
-                LexToString(Event.Conflict.Type),
-                Event.Conflict.AgentA,
-                Event.Conflict.AgentB,
-                Event.Conflict.Cell.X,
-                Event.Conflict.Cell.Y,
-                Event.Conflict.Cell.Z,
-                Event.MissionCount);
-            break;
-
-        case EExecutionFinalSafetyGateEventType::HoldSetExpanded:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[FinalSafetyGate] t=%d hold set expanded from %d to %d missions due to remaining %s conflict between Mission %d and Mission %d"),
-                TimeStep,
-                Event.PreviousMissionCount,
-                Event.MissionCount,
-                LexToString(Event.Conflict.Type),
-                Event.Conflict.AgentA,
-                Event.Conflict.AgentB);
-            break;
-
-        case EExecutionFinalSafetyGateEventType::HoldLimitReached:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[FinalSafetyGate] t=%d Mission %d reached safety-gate hold limit %d; upgrade to global replan"),
-                TimeStep,
-                Event.MissionId,
-                Event.HoldBudget);
-            break;
-
-        case EExecutionFinalSafetyGateEventType::SafeHoldReplanRequested:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[FinalSafetyGate] t=%d hold fallback is safe for %d missions; trigger %s execution replan"),
-                TimeStep,
-                Event.MissionCount,
-                Event.bForceGlobalReplan ? TEXT("global") : TEXT("configured"));
-            break;
-
-        case EExecutionFinalSafetyGateEventType::LocalReplanFailedUpgradeGlobal:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[FinalSafetyGate] t=%d local safety-gate replan failed; upgrade to global replan"),
-                TimeStep);
-            break;
-
-        case EExecutionFinalSafetyGateEventType::ReplanDisabledSafeHold:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[FinalSafetyGate] t=%d execution replan disabled; committing safe hold only"),
-                TimeStep);
-            break;
-
-        case EExecutionFinalSafetyGateEventType::FinalProposalUnsafe:
-            UE_LOG(
-                LogTemp,
-                Error,
-                TEXT("[FinalSafetyGate] t=%d final proposal remains unsafe after safety-gate replan: %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); mark execution failed instead of committing unsafe state"),
-                TimeStep,
-                LexToString(Event.Conflict.Type),
-                Event.Conflict.AgentA,
-                Event.Conflict.AgentB,
-                Event.Conflict.Cell.X,
-                Event.Conflict.Cell.Y,
-                Event.Conflict.Cell.Z);
-            break;
-
-        case EExecutionFinalSafetyGateEventType::GlobalReplanFailedAfterHoldLimit:
-            UE_LOG(
-                LogTemp,
-                Error,
-                TEXT("[FinalSafetyGate] t=%d global replan failed after safety-gate hold limit; mark execution failed instead of committing unsafe state"),
-                TimeStep);
-            break;
-
-        case EExecutionFinalSafetyGateEventType::HoldFallbackUnsafe:
-            UE_LOG(
-                LogTemp,
-                Error,
-                TEXT("[FinalSafetyGate] t=%d hold fallback remains unsafe: %s conflict between Mission %d and Mission %d at Cell=(%d,%d,%d); dirty-start recovery required but unavailable, mark execution failed"),
-                TimeStep,
-                LexToString(Event.Conflict.Type),
-                Event.Conflict.AgentA,
-                Event.Conflict.AgentB,
-                Event.Conflict.Cell.X,
-                Event.Conflict.Cell.Y,
-                Event.Conflict.Cell.Z);
-            break;
-        }
-    }
-
-    void LogExecutionReplanAttemptFailure(
-        const FExecutionReplanAttemptInput& Input,
-        const FExecutionReplanAttemptResult& Result)
-    {
-        switch (Result.Status)
-        {
-        case EExecutionReplanAttemptStatus::GridBuildFailed:
-            if (!Result.FailureReason.IsEmpty())
-            {
-                UE_LOG(LogTemp, Warning, TEXT("[AlignmentReplan] %s"), *Result.FailureReason);
-            }
-            break;
-
-        case EExecutionReplanAttemptStatus::MissionBuildFailed:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentReplan] failed to build replan missions: %s"),
-                *Result.FailureReason);
-            break;
-
-        case EExecutionReplanAttemptStatus::PlannerFailed:
-            if (Input.Spec.bGlobalReplan)
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[AlignmentReplan] global replan failed for %d movable missions (Anchors=%d StaticBlocked=%d)"),
-                    Result.CandidateMissionIds.Num(),
-                    Result.AnchorMissionIds.Num(),
-                    Result.StaticAnchorBlockedCellCount);
-            }
-            else
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[AlignmentReplan] local replan attempt %d/%d failed for %d movable missions (Anchors=%d StaticBlocked=%d K=%d W=%d)"),
-                    Input.Spec.AttemptIndex + 1,
-                    Input.Spec.AttemptCount,
-                    Result.CandidateMissionIds.Num(),
-                    Result.AnchorMissionIds.Num(),
-                    Result.StaticAnchorBlockedCellCount,
-                    Input.Spec.SpatialRadiusCells,
-                    Input.Spec.LookaheadSteps);
-            }
-            break;
-
-        case EExecutionReplanAttemptStatus::InvalidReplannedPath:
-            if (Result.FailedMissionId != INDEX_NONE)
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[AlignmentReplan] invalid replanned path for Mission %d"),
-                    Result.FailedMissionId);
-            }
-            break;
-
-        default:
-            break;
-        }
-    }
-
-    void LogExecutionReplanCoordinatorEvent(const FExecutionReplanCoordinatorEvent& Event)
-    {
-        switch (Event.Type)
-        {
-        case EExecutionReplanCoordinatorEventType::CandidateSetExpanded:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentReplan] local conflict component attempt %d/%d expanded from %d to %d missions (K=%d W=%d)"),
-                Event.AttemptIndex + 1,
-                Event.AttemptCount,
-                Event.ActiveRequestedMissionCount,
-                Event.CandidateMissionCount,
-                Event.SpatialRadiusCells,
-                Event.LookaheadSteps);
-            break;
-
-        case EExecutionReplanCoordinatorEventType::PostCheckFailed:
-            if (Event.bGlobalReplan)
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[AlignmentReplan] global replan post-check failed: predicted %s conflict between Mission %d and Mission %d at +%d Cell=(%d,%d,%d) (Movable=%d Anchors=%d StaticBlocked=%d)"),
-                    LexToString(Event.Conflict.Type),
-                    Event.Conflict.AgentA,
-                    Event.Conflict.AgentB,
-                    Event.ConflictOffset,
-                    Event.Conflict.Cell.X,
-                    Event.Conflict.Cell.Y,
-                    Event.Conflict.Cell.Z,
-                    Event.CandidateMissionCount,
-                    Event.AnchorMissionCount,
-                    Event.StaticAnchorBlockedCellCount);
-            }
-            else
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[AlignmentReplan] local replan attempt %d/%d post-check failed: predicted %s conflict between Mission %d and Mission %d at +%d Cell=(%d,%d,%d) (Movable=%d Anchors=%d StaticBlocked=%d K=%d W=%d)"),
-                    Event.AttemptIndex + 1,
-                    Event.AttemptCount,
-                    LexToString(Event.Conflict.Type),
-                    Event.Conflict.AgentA,
-                    Event.Conflict.AgentB,
-                    Event.ConflictOffset,
-                    Event.Conflict.Cell.X,
-                    Event.Conflict.Cell.Y,
-                    Event.Conflict.Cell.Z,
-                    Event.CandidateMissionCount,
-                    Event.AnchorMissionCount,
-                    Event.StaticAnchorBlockedCellCount,
-                    Event.SpatialRadiusCells,
-                    Event.LookaheadSteps);
-            }
-            break;
-
-        case EExecutionReplanCoordinatorEventType::TargetedRetryExpanded:
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentReplan] local post-check targeted retry %d/%d after %s conflict between Mission %d and Mission %d: movable %d->%d forced anchors %d->%d (K=%d W=%d)"),
-                Event.TargetedRetryIndex,
-                Event.MaxTargetedRetryCount,
-                LexToString(Event.Conflict.Type),
-                Event.Conflict.AgentA,
-                Event.Conflict.AgentB,
-                Event.PreviousCandidateMissionCount,
-                Event.CandidateMissionCount,
-                Event.PreviousForcedAnchorMissionCount,
-                Event.ForcedAnchorMissionCount,
-                Event.SpatialRadiusCells,
-                Event.LookaheadSteps);
-            break;
-
-        case EExecutionReplanCoordinatorEventType::AttemptSucceeded:
-            if (Event.bGlobalReplan)
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[AlignmentReplan] global replan succeeded for %d movable missions at t=%d (Total=%d, Anchors=%d StaticBlocked=%d)"),
-                    Event.ReplannedMissionCount,
-                    Event.ExecutionTimeStep,
-                    Event.TotalReplanCount,
-                    Event.AnchorMissionCount,
-                    Event.StaticAnchorBlockedCellCount);
-            }
-            else
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[AlignmentReplan] local replan succeeded for %d movable missions at t=%d (Total=%d, Attempt=%d/%d, Anchors=%d StaticBlocked=%d K=%d W=%d)"),
-                    Event.ReplannedMissionCount,
-                    Event.ExecutionTimeStep,
-                    Event.TotalReplanCount,
-                    Event.AttemptIndex + 1,
-                    Event.AttemptCount,
-                    Event.AnchorMissionCount,
-                    Event.StaticAnchorBlockedCellCount,
-                    Event.SpatialRadiusCells,
-                    Event.LookaheadSteps);
-            }
-            break;
         }
     }
 
@@ -501,8 +157,22 @@ APathPlanningDemoActor::APathPlanningDemoActor()
 {
     PrimaryActorTick.bCanEverTick = true;
 
+    ExecutionDiagnosticsSink = MakeUnique<FExecutionLogSink>();
+
     SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
     RootComponent = SceneRoot;
+}
+
+bool APathPlanningDemoActor::SetExecutionDiagnosticsSink(
+    TUniquePtr<IExecutionDiagnosticsSink>&& InDiagnosticsSink)
+{
+    if (ExecutionSession.bRunning || !InDiagnosticsSink)
+    {
+        return false;
+    }
+
+    ExecutionDiagnosticsSink = MoveTemp(InDiagnosticsSink);
+    return true;
 }
 
 // 更新代码结构，手动控制是否在 BeginPlay 里自动运行规划逻辑，方便调试和编辑器交互
@@ -1305,8 +975,13 @@ void APathPlanningDemoActor::InitializeExecutionStates()
         }
     }
 
-    LogObservedExecutionConflicts(
-        ExecutionCoordinator.RecordObservedConflicts(ExecutionSession, 0));
+    RefreshExecutionDiagnosticsSettings();
+    const TArray<FExecutionConflict> InitialConflicts =
+        ExecutionCoordinator.RecordObservedConflicts(ExecutionSession, 0);
+    if (ExecutionDiagnosticsSink)
+    {
+        ExecutionDiagnosticsSink->HandleObservedConflicts(InitialConflicts);
+    }
 
     if (!ExecutionSession.bRunning)
     {
@@ -1390,6 +1065,20 @@ FExecutionRuntimeConfig APathPlanningDemoActor::BuildExecutionRuntimeConfig() co
     return Config;
 }
 
+void APathPlanningDemoActor::RefreshExecutionDiagnosticsSettings()
+{
+    if (!ExecutionDiagnosticsSink)
+    {
+        return;
+    }
+
+    FExecutionDiagnosticsSettings Settings;
+    Settings.bLogDelayEvents = bLogExecutionDelay;
+    Settings.bLogAlignmentEvents = bLogAlignmentEvents;
+    Settings.bLogConflictPredictionEvents = bLogConflictPredictionEvents;
+    ExecutionDiagnosticsSink->SetSettings(Settings);
+}
+
 void APathPlanningDemoActor::AdvanceExecutionOneStep()
 {
     // Snap the previous segment to its terminal cell before sampling the current position.
@@ -1416,46 +1105,49 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         {
             return BuildPlannerRuntimeConfig();
         };
-    CoordinatorCallbacks.OnReplanAttemptFailure =
-        [](const FExecutionReplanAttemptInput& Input,
-           const FExecutionReplanAttemptResult& Result)
-        {
-            LogExecutionReplanAttemptFailure(Input, Result);
-        };
-    CoordinatorCallbacks.OnReplanCoordinatorEvent =
-        [](const FExecutionReplanCoordinatorEvent& Event)
-        {
-            LogExecutionReplanCoordinatorEvent(Event);
-        };
-    CoordinatorCallbacks.OnReplanServiceResult =
-        [](const FExecutionReplanServiceResult& Result)
-        {
-            if (Result.Status !=
-                EExecutionReplanServiceStatus::ReplanLimitReached)
-            {
-                return;
-            }
 
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[AlignmentReplan] skipped because total replan count %d reached limit %d"),
-                Result.CurrentTotalReplanCount,
-                Result.MaxReplanCount);
-        };
-    if (bLogConflictPredictionEvents)
+    RefreshExecutionDiagnosticsSettings();
+    IExecutionDiagnosticsSink* DiagnosticsSink =
+        ExecutionDiagnosticsSink.Get();
+    if (DiagnosticsSink)
     {
-        CoordinatorCallbacks.OnConflictResolutionEvent =
-            [this](const FExecutionConflictResolutionEvent& Event)
+        CoordinatorCallbacks.OnReplanAttemptFailure =
+            [DiagnosticsSink](
+                const FExecutionReplanAttemptInput& Input,
+                const FExecutionReplanAttemptResult& Result)
             {
-                LogExecutionConflictResolutionEvent(Event, ExecutionSession.TimeStep);
+                DiagnosticsSink->HandleReplanAttemptFailure(Input, Result);
+            };
+        CoordinatorCallbacks.OnReplanCoordinatorEvent =
+            [DiagnosticsSink](const FExecutionReplanCoordinatorEvent& Event)
+            {
+                DiagnosticsSink->HandleReplanCoordinatorEvent(Event);
+            };
+        CoordinatorCallbacks.OnReplanServiceResult =
+            [DiagnosticsSink](const FExecutionReplanServiceResult& Result)
+            {
+                DiagnosticsSink->HandleReplanServiceResult(Result);
+            };
+        if (bLogConflictPredictionEvents)
+        {
+            CoordinatorCallbacks.OnConflictResolutionEvent =
+                [this, DiagnosticsSink](
+                    const FExecutionConflictResolutionEvent& Event)
+                {
+                    DiagnosticsSink->HandleConflictResolutionEvent(
+                        ExecutionSession.TimeStep,
+                        Event);
+                };
+        }
+        CoordinatorCallbacks.OnFinalSafetyGateEvent =
+            [this, DiagnosticsSink](
+                const FExecutionFinalSafetyGateEvent& Event)
+            {
+                DiagnosticsSink->HandleFinalSafetyGateEvent(
+                    ExecutionSession.TimeStep,
+                    Event);
             };
     }
-    CoordinatorCallbacks.OnFinalSafetyGateEvent =
-        [this](const FExecutionFinalSafetyGateEvent& Event)
-        {
-            LogExecutionFinalSafetyGateEvent(Event, ExecutionSession.TimeStep);
-        };
 
     const FExecutionRuntimeCoordinatorResult CoordinatorResult =
         ExecutionCoordinator.Advance(
@@ -1496,59 +1188,16 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
     const FExecutionStepResultApplyResult& ApplyResult =
         CoordinatorResult.ApplyResult;
 
-    for (const FExecutionStepAppliedAgent& AppliedAgent : ApplyResult.AppliedAgents)
+    if (DiagnosticsSink)
     {
-        const int32 MissionId = AppliedAgent.MissionId;
-        FExecutionAgentState* State =
-            ExecutionSession.AgentStatesByMissionId.Find(MissionId);
-        const FExecutionStepProposal* Proposal =
-            ControllerResult.StepProposals.Find(MissionId);
-        if (!State || !Proposal)
-        {
-            continue;
-        }
-
-        if (Proposal->bDelayRequested && bLogExecutionDelay)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[ExecutionDelay] t=%d Mission=%d stay at Cell=(%d,%d,%d)"),
-                ExecutionSession.TimeStep,
-                State->MissionId,
-                Proposal->ObservedCell.X,
-                Proposal->ObservedCell.Y,
-                Proposal->ObservedCell.Z
-            );
-        }
-
-        if (bLogAlignmentEvents && Proposal->FinalAction != EExecutionPolicyAction::FollowPlan)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[Alignment] t=%d Mission=%d Action=%s Observed=(%d,%d,%d) RefIndex=%d RefCell=(%d,%d,%d) NextCell=(%d,%d,%d) SpatialError=%d TemporalError=%d Replan=%s Reason=%s"),
-                ExecutionSession.TimeStep,
-                State->MissionId,
-                FExecutionAlignmentPolicy::LexToString(Proposal->FinalAction),
-                Proposal->AlignmentDecision.ObservedCell.X,
-                Proposal->AlignmentDecision.ObservedCell.Y,
-                Proposal->AlignmentDecision.ObservedCell.Z,
-                Proposal->ReferencePlanIndex,
-                GetCellAtTime(State->PlannedCells, Proposal->ReferencePlanIndex).X,
-                GetCellAtTime(State->PlannedCells, Proposal->ReferencePlanIndex).Y,
-                GetCellAtTime(State->PlannedCells, Proposal->ReferencePlanIndex).Z,
-                Proposal->ProposedCell.X,
-                Proposal->ProposedCell.Y,
-                Proposal->ProposedCell.Z,
-                Proposal->AlignmentDecision.SpatialErrorCells,
-                Proposal->AlignmentDecision.TemporalErrorSteps,
-                AppliedAgent.bReplanRequestedForState ? TEXT("true") : TEXT("false"),
-                *Proposal->ResolutionReason);
-        }
+        DiagnosticsSink->HandleAppliedStep(
+            ExecutionSession.TimeStep,
+            ExecutionSession,
+            ControllerResult,
+            ApplyResult);
+        DiagnosticsSink->HandleObservedConflicts(
+            CoordinatorResult.ObservedConflicts);
     }
-
-    LogObservedExecutionConflicts(CoordinatorResult.ObservedConflicts);
 
     if (!ApplyResult.bAnyActive)
     {
@@ -1859,42 +1508,6 @@ void APathPlanningDemoActor::LogStructuredExperimentSummaryJson() const
     UE_LOG(LogTemp, Warning, TEXT("[StructuredExperimentJSON] %s"), *JsonString);
 }
 
-
-void APathPlanningDemoActor::LogObservedExecutionConflicts(
-    const TArray<FExecutionConflict>& Conflicts) const
-{
-    for (const FExecutionConflict& Conflict : Conflicts)
-    {
-        if (!Conflict.bIsEdgeConflict)
-        {
-            UE_LOG(
-                LogTemp,
-                Error,
-                TEXT("[ExecutionConflict][Vertex] t=%d Agent=%d Agent=%d Cell=(%d,%d,%d)"),
-                Conflict.TimeStep,
-                Conflict.AgentA,
-                Conflict.AgentB,
-                Conflict.Cell.X,
-                Conflict.Cell.Y,
-                Conflict.Cell.Z
-            );
-            continue;
-        }
-
-        UE_LOG(
-            LogTemp,
-            Error,
-            TEXT("[ExecutionConflict][Edge] t=%d Agent=%d (%d,%d,%d)->(%d,%d,%d), Agent=%d (%d,%d,%d)->(%d,%d,%d)"),
-            Conflict.TimeStep,
-            Conflict.AgentA,
-            Conflict.FromA.X, Conflict.FromA.Y, Conflict.FromA.Z,
-            Conflict.ToA.X, Conflict.ToA.Y, Conflict.ToA.Z,
-            Conflict.AgentB,
-            Conflict.FromB.X, Conflict.FromB.Y, Conflict.FromB.Z,
-            Conflict.ToB.X, Conflict.ToB.Y, Conflict.ToB.Z
-        );
-    }
-}
 
 void APathPlanningDemoActor::UpdateExecutionVisuals(float Alpha)
 {

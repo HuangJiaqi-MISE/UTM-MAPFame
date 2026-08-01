@@ -2882,3 +2882,62 @@ Commit Result 同时新增 `FailedMissionId` 和 `FailureReason`，便于后续�
 
 - 2026-08-01：UTMEditor Win64 Development 编译通过；修改后的 `ExecutionRuntimeSessionReplanCommitter.cpp` 与 `ExecutionReplanService.cpp` 分别完成非 Unity 编译，UTM 模块成功链接，本轮无编译警告。
 - 2026-08-01：运行原 N200 参数回归实验，执行流程和 StructuredExperimentJSON 检查正常，未发现两阶段原子提交对 makespan、Alignment、Conflict、applied replans 或 local/global Replan 指标造成异常影响。
+
+## 2026-08-01 Execution Diagnostics / Log Sink 第一阶段
+
+### 背景
+
+Execution Policy、Replan Service、Runtime Coordinator 和 Final Safety Gate 已经通过结构化 Event/Result 描述运行过程，但 `APathPlanningDemoActor` 仍包含 Conflict Resolution、Replan Attempt、Replan Coordinator、Final Safety Gate、Delay、Alignment 和 Observed Conflict 的日志格式化逻辑。新增 Execution 事件或替换日志输出方式时仍需修改 Actor。本阶段把“执行决策”与“诊断输出”分离，默认日志行为保持不变。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionDiagnosticsSink.h`
+- `Source/UTM/Public/Reporting/ExecutionLogSink.h`
+- `Source/UTM/Private/Reporting/ExecutionLogSink.cpp`
+
+### 修改文件
+
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 新诊断边界
+
+- `IExecutionDiagnosticsSink` 定义只读、无返回值的诊断接收接口，Sink 只能观察 Execution Event/Result，不能影响 Hold、Replan、状态转移或停止执行结果。
+- `FExecutionLogSink` 是默认实现，负责把 Conflict Resolution、Final Safety Gate、Replan Attempt、Replan Coordinator、Replan Service、Delay、Alignment 和 Observed Conflict 输出到原 `LogTemp`。
+- Event/Result 类型继续由现有 Execution 组件产生，本阶段不修改 Policy、Controller、Coordinator 或 Replan Service 的事件结构与触发位置。
+- Actor 保留 Coordinator 回调绑定和当前 timestep 提供职责，避免改变 Coordinator 内部先递增 `Session.TimeStep` 的既有语义。
+- Actor 新增非 Blueprint 的 `SetExecutionDiagnosticsSink()` C++ 注入口；只有 Execution 未运行时才允许替换，传入空指针或运行中替换会返回 `false` 且不转移所有权。
+
+### Details 与日志兼容
+
+- 继续保留 `bLogExecutionDelay`、`bLogAlignmentEvents` 和 `bLogConflictPredictionEvents`，Actor 在初始化和每个 timestep 前把当前值同步到 Sink。
+- 关闭 `bLogConflictPredictionEvents` 时仍不绑定 Conflict Resolution callback，避免产生额外事件遍历开销。
+- 迁移前后的 28 条 Execution 日志格式字符串逐条核对一致，日志类别、Warning/Error 级别、输出顺序和触发条件未修改。
+- `LogExecutionSummary()`、StructuredExperimentJSON、路径坐标日志、No-Fly Zone 日志和 DrawDebug 不属于本次 Diagnostics Sink，继续由原模块负责。
+
+### Actor 轻量化结果
+
+- 删除 Actor 匿名命名空间中的四组大型 Execution 日志 `switch`。
+- 删除 `AdvanceExecutionOneStep()` 中逐 Mission 格式化 Delay/Alignment 日志的循环，改为一次 `HandleAppliedStep()` 调用。
+- 删除 Actor 的 `LogObservedExecutionConflicts()` 声明与实现。
+- `PathPlanningDemoActor.cpp` 从 2844 行减少到 2457 行，净减少 387 行；迁出的格式化代码集中在默认 Log Sink 中。
+
+### 保守性说明
+
+- Execution Runtime Config、随机流、TimeStep、Agent 遍历顺序、Proposal、State Transition、Observed Conflict 检测和 Replan 计时均未修改。
+- Sink 回调保持同步执行，不缓存 Session、Proposal 或 Result 引用。
+- Sink 不写入 Runtime Session 或实验统计，关闭或替换日志输出不会改变 StructuredExperimentJSON 指标。
+- EUW、Details、Blueprint 反射接口和现有实验 JSON 字段未修改。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development，检查接口虚函数、前置声明、`TUniquePtr` 所有权和新增源文件链接。
+2. 运行原 N200 参数实验，核对 makespan、Delay、Alignment、Conflict、applied replans 和 local/global Replan 指标。
+3. 检查 `[AlignmentReplan]`、`[FinalSafetyGate]`、`[ExecutionDelay]`、`[Alignment]` 和 `[ExecutionConflict]` 日志文本及顺序。
+4. 分别关闭三个现有日志开关，确认对应输出抑制语义与迁移前一致。
+
+### 验证结果
+
+- 2026-08-01：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 完成检查，新增 `ExecutionLogSink.cpp` 与修改后的 `PathPlanningDemoActor.cpp` 分别完成非 Unity 编译，UTM 模块成功链接。
+- 本轮唯一编译警告来自未修改的 `PBSPlanner.cpp` 对已弃用 `TArray::RemoveAt(..., bool)` 重载的使用；Diagnostics/Log Sink 修改未新增警告。
+- 2026-08-01：运行原 N200 参数回归实验，执行流程、StructuredExperimentJSON 和现有 Execution 日志检查正常，未发现 Diagnostics/Log Sink 抽取对 makespan、Delay、Alignment、Conflict、applied replans 或 local/global Replan 指标造成异常影响。

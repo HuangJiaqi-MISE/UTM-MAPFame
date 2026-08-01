@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Execution/DiscreteAlignmentManager.h"
 #include "Execution/ExecutionControllerTypes.h"
+#include "Execution/ExecutionDiagnosticsSink.h"
 #include "Execution/ExecutionRuntimeCoordinator.h"
 #include "Execution/ExecutionRuntimeSession.h"
 #include "Execution/ExecutionTypes.h"
@@ -91,6 +92,9 @@ public:
     bool SetExecutionReplanService(
         TUniquePtr<IExecutionReplanService>&& InReplanService);
 
+    bool SetExecutionDiagnosticsSink(
+        TUniquePtr<IExecutionDiagnosticsSink>&& InDiagnosticsSink);
+
 private:
     bool ParseTaggedId(AActor* Actor, const FString& Prefix, int32& OutId) const;
 
@@ -124,13 +128,12 @@ private:
     void AdvanceExecutionOneStep();
     void UpdateExecutionVisuals(float Alpha);
     void CacheExecutionMissionConfigs(const TArray<FDroneMissionConfig>& Missions);
-    void LogObservedExecutionConflicts(
-        const TArray<FExecutionConflict>& Conflicts) const;
     void DrawExecutionDebugForState(const FExecutionAgentState& State, int32 TimeStep) const;
     ADroneActor* FindExecutionDrone(int32 MissionId) const;
     FIntVector GetObservedExecutionCell(const FExecutionAgentState& State) const;
     FDiscreteAlignmentSettings BuildDiscreteAlignmentSettings() const;
     FExecutionRuntimeConfig BuildExecutionRuntimeConfig() const;
+    void RefreshExecutionDiagnosticsSettings();
     void BuildExecutionSummary();
     void LogExecutionSummary() const;
 
@@ -151,6 +154,7 @@ private:
 
 private:
     FExecutionRuntimeCoordinator ExecutionCoordinator;
+    TUniquePtr<IExecutionDiagnosticsSink> ExecutionDiagnosticsSink;
     FGridMap3D GridMap;
     FPlanningInputValidator InputValidator;
     TMap<int32, TArray<FVector>> LastPlannedPathsByMission;
