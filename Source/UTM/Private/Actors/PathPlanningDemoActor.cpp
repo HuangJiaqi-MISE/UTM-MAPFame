@@ -11,7 +11,6 @@
 #include "Execution/ExecutionAlignmentPolicy.h"
 #include "Execution/ExecutionConflictResolutionPolicy.h"
 #include "Execution/ExecutionFinalSafetyGateCoordinator.h"
-#include "Execution/ExecutionReplanService.h"
 #include "Execution/ExecutionRuntimeSessionBuilder.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "EditorServices/CityEditorService.h"
@@ -1392,6 +1391,11 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
     CoordinatorRequest.Session = &ExecutionSession;
     CoordinatorRequest.GridMap = &GridMap;
     CoordinatorRequest.RuntimeConfig = BuildExecutionRuntimeConfig();
+    CoordinatorRequest.ReplanContext.PlannerType = PlannerType;
+    CoordinatorRequest.ReplanContext.PlannedCellPathsByMissionId =
+        &PlannedCellPathsByMission;
+    CoordinatorRequest.ReplanContext.PlannedWorldPathsByMissionId =
+        &LastPlannedPathsByMission;
 
     FExecutionRuntimeCoordinatorCallbacks CoordinatorCallbacks;
     CoordinatorCallbacks.ResolveObservedCell =
@@ -1399,16 +1403,37 @@ void APathPlanningDemoActor::AdvanceExecutionOneStep()
         {
             return GetObservedExecutionCell(State);
         };
-    CoordinatorCallbacks.RunReplan =
-        [this](
-            const TSet<int32>& RequestedMissionIds,
-            bool bGlobalReplan,
-            TSet<int32>& ReplannedMissionIds) -> bool
+    CoordinatorCallbacks.BuildPlannerRuntimeConfig =
+        [this]()
         {
-            return TryExecutionReplan(
-                RequestedMissionIds,
-                bGlobalReplan,
-                ReplannedMissionIds);
+            return BuildPlannerRuntimeConfig();
+        };
+    CoordinatorCallbacks.OnReplanAttemptFailure =
+        [](const FExecutionReplanAttemptInput& Input,
+           const FExecutionReplanAttemptResult& Result)
+        {
+            LogExecutionReplanAttemptFailure(Input, Result);
+        };
+    CoordinatorCallbacks.OnReplanCoordinatorEvent =
+        [](const FExecutionReplanCoordinatorEvent& Event)
+        {
+            LogExecutionReplanCoordinatorEvent(Event);
+        };
+    CoordinatorCallbacks.OnReplanServiceResult =
+        [](const FExecutionReplanServiceResult& Result)
+        {
+            if (Result.Status !=
+                EExecutionReplanServiceStatus::ReplanLimitReached)
+            {
+                return;
+            }
+
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[AlignmentReplan] skipped because total replan count %d reached limit %d"),
+                Result.CurrentTotalReplanCount,
+                Result.MaxReplanCount);
         };
     if (bLogConflictPredictionEvents)
     {
@@ -2333,53 +2358,6 @@ bool APathPlanningDemoActor::ProcessMissionConfigsMultiAgent()
         EMultiAgentPlanningResultLogMode::MissionConfig);
 }
 
-bool APathPlanningDemoActor::TryExecutionReplan(
-    const TSet<int32>& RequestedMissionIds,
-    bool bGlobalReplan,
-    TSet<int32>& OutReplannedMissionIds)
-{
-    OutReplannedMissionIds.Reset();
-
-    FExecutionReplanServiceRequest ServiceRequest;
-    ServiceRequest.GridMap = &GridMap;
-    ServiceRequest.Session = &ExecutionSession;
-    ServiceRequest.PlannedCellPathsByMissionId = &PlannedCellPathsByMission;
-    ServiceRequest.PlannedWorldPathsByMissionId = &LastPlannedPathsByMission;
-    ServiceRequest.PlannerType = PlannerType;
-    ServiceRequest.PlannerConfig = BuildPlannerRuntimeConfig();
-    ServiceRequest.RuntimeConfig = BuildExecutionRuntimeConfig();
-    ServiceRequest.RequestedMissionIds = RequestedMissionIds;
-    ServiceRequest.bGlobalReplan = bGlobalReplan;
-
-    FExecutionReplanServiceCallbacks ServiceCallbacks;
-    ServiceCallbacks.OnAttemptFailure =
-        [](const FExecutionReplanAttemptInput& Input,
-           const FExecutionReplanAttemptResult& Result)
-        {
-            LogExecutionReplanAttemptFailure(Input, Result);
-        };
-    ServiceCallbacks.OnCoordinatorEvent =
-        [](const FExecutionReplanCoordinatorEvent& Event)
-        {
-            LogExecutionReplanCoordinatorEvent(Event);
-        };
-
-    const FExecutionReplanServiceResult ServiceResult =
-        FExecutionReplanService::Run(ServiceRequest, ServiceCallbacks);
-    if (ServiceResult.Status ==
-        EExecutionReplanServiceStatus::ReplanLimitReached)
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[AlignmentReplan] skipped because total replan count %d reached limit %d"),
-            ServiceResult.CurrentTotalReplanCount,
-            ServiceResult.MaxReplanCount);
-    }
-
-    OutReplannedMissionIds = ServiceResult.ReplannedMissionIds;
-    return ServiceResult.bSuccess;
-}
 bool APathPlanningDemoActor::IsMultiAgentPlannerType() const
 {
     return FPlannerRegistry::IsMultiAgentPlannerType(PlannerType);

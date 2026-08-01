@@ -3,6 +3,7 @@
 #include "Execution/ExecutionControllerRegistry.h"
 #include "Execution/ExecutionDelayPolicy.h"
 #include "Execution/ExecutionObservedConflictDetector.h"
+#include "Execution/ExecutionReplanService.h"
 #include "Execution/ExecutionRuntimeSessionStepProcessor.h"
 
 FExecutionRuntimeCoordinator::FExecutionRuntimeCoordinator() = default;
@@ -142,7 +143,47 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
         &StepPrepareResult.ConflictResolutionInput;
 
     FExecutionControllerStepCallbacks ControllerCallbacks;
-    ControllerCallbacks.RunReplan = Callbacks.RunReplan;
+    ControllerCallbacks.RunReplan =
+        [&Request, &Callbacks](
+            const TSet<int32>& RequestedMissionIds,
+            bool bGlobalReplan,
+            TSet<int32>& ReplannedMissionIds) -> bool
+        {
+            FExecutionReplanServiceRequest ServiceRequest;
+            ServiceRequest.GridMap = Request.GridMap;
+            ServiceRequest.Session = Request.Session;
+            ServiceRequest.PlannedCellPathsByMissionId =
+                Request.ReplanContext.PlannedCellPathsByMissionId;
+            ServiceRequest.PlannedWorldPathsByMissionId =
+                Request.ReplanContext.PlannedWorldPathsByMissionId;
+            ServiceRequest.PlannerType = Request.ReplanContext.PlannerType;
+            if (Callbacks.BuildPlannerRuntimeConfig)
+            {
+                ServiceRequest.PlannerConfig =
+                    Callbacks.BuildPlannerRuntimeConfig();
+            }
+            ServiceRequest.RuntimeConfig = Request.RuntimeConfig;
+            ServiceRequest.RequestedMissionIds = RequestedMissionIds;
+            ServiceRequest.bGlobalReplan = bGlobalReplan;
+
+            FExecutionReplanServiceCallbacks ServiceCallbacks;
+            ServiceCallbacks.OnAttemptFailure =
+                Callbacks.OnReplanAttemptFailure;
+            ServiceCallbacks.OnCoordinatorEvent =
+                Callbacks.OnReplanCoordinatorEvent;
+
+            const FExecutionReplanServiceResult ServiceResult =
+                FExecutionReplanService::Run(
+                    ServiceRequest,
+                    ServiceCallbacks);
+            if (Callbacks.OnReplanServiceResult)
+            {
+                Callbacks.OnReplanServiceResult(ServiceResult);
+            }
+
+            ReplannedMissionIds = ServiceResult.ReplannedMissionIds;
+            return ServiceResult.bSuccess;
+        };
     ControllerCallbacks.CaptureReplanProposalAgentStates =
         [&Session, &MissionIds]()
         {

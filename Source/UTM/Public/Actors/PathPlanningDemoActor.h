@@ -145,8 +145,6 @@ private:
         const FMultiAgentPlanningPipelineResult& PipelineResult,
         EMultiAgentPlanningResultLogMode LogMode);
 
-    bool TryExecutionReplan(const TSet<int32>& RequestedMissionIds, bool bGlobalReplan, TSet<int32>& OutReplannedMissionIds);
-
 private:
     FExecutionRuntimeCoordinator ExecutionCoordinator;
     FGridMap3D GridMap;

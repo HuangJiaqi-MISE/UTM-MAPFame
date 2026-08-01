@@ -2697,3 +2697,63 @@ Execution 已经具备 Runtime Session、Step Processor、Controller Registry、
 
 - 2026-08-01：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 完成检查，新增 `ExecutionReplanService.cpp` 与修改后的 `PathPlanningDemoActor.cpp` 分别完成非 Unity 编译，UTM 模块成功链接，本轮无编译警告。
 - 2026-08-01：运行原 N200 参数回归实验，执行流程和 StructuredExperimentJSON 检查正常，未发现 Execution Replan Service 抽取对 makespan、Alignment、Conflict、applied replans 或 local/global Replan 指标造成异常影响。
+
+## 2026-08-01 Execution Replan Service 第二阶段：移除 Actor 中转
+
+### 背景
+
+第一阶段已经把一次完整重规划请求的编排移入 `FExecutionReplanService`，但 Runtime Coordinator 仍通过 `RunReplan` 回调进入 `APathPlanningDemoActor::TryExecutionReplan()`，再由 Actor 调用 Service。Actor 因而仍是 Execution Controller 与 Replan Service 之间的控制流中转站。本阶段移除该中转，使执行模块内部直接完成重规划请求，同时保留 Actor 的 UE 配置和日志边界。
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinatorTypes.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeCoordinator.cpp`
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 新调用链
+
+```text
+APathPlanningDemoActor
+    -> FExecutionRuntimeCoordinator::Advance()
+        -> IExecutionController::RunStep()
+            -> Step Replan / Final Safety Gate
+                -> Coordinator 内部 RunReplan 适配
+                    -> FExecutionReplanService::Run()
+```
+
+### Coordinator 新职责
+
+- `FExecutionRuntimeCoordinatorRequest` 新增 `FExecutionRuntimeReplanContext`，统一携带 Planner Type、Cell Path Cache 和 World Path Cache。
+- Coordinator 根据当前 Runtime Session、Grid Map、Runtime Config 和 Replan Context 构造标准 `FExecutionReplanServiceRequest`。
+- Controller、Step Replan Coordinator 和 Final Safety Gate 继续使用通用 `RunReplan` 函数契约，不直接依赖具体 Service。
+- Coordinator 将 Attempt 失败和 Replan Coordinator 事件转发给 Host 回调，并在 Service 返回后转发结构化 Result。
+- Service 的成功结果和 Mission ID 集合由 Coordinator 原样返回给 Controller Pipeline。
+
+### Actor 新边界
+
+- 删除 `APathPlanningDemoActor::TryExecutionReplan()` 的声明与实现。
+- `AdvanceExecutionOneStep()` 只提供 Planner Type、两类路径缓存和按需构造 Planner Runtime Config 的回调。
+- `[AlignmentReplan]` Attempt、扩张、targeted retry、成功和次数上限日志继续由 Actor 输出。
+- Actor 不再构造 Service Request、调用 Replan Service、接收成功结果或转发 Replanned Mission ID。
+
+### 保守性说明
+
+- Controller、Execution Step Pipeline、Step Replan Coordinator、Final Safety Gate、Replan Coordinator 和 Attempt Runner 的算法未修改。
+- Planner Runtime Config 仍只在实际请求重规划时构造，不会在每个普通 timestep 重复复制 No-Fly Zone 配置。
+- Replan Service 使用 Coordinator 当前 timestep 已构造的 Runtime Config 快照；同步调用期间配置值与旧 `TryExecutionReplan()` 再次读取的值一致。
+- Attempt 失败事件和 Coordinator 事件仍在原 Replan Attempt 计时范围内触发。
+- 达到次数上限后的日志文本和 local/global fallback 返回语义不变。
+- Observed Cell、Delay 随机流、路径写回、Summary、StructuredExperimentJSON、EUW、Details 和 Blueprint 接口未修改。
+- 本阶段仅移除 Actor 中转，尚未引入 `IExecutionReplanService` 或动态 Service Registry。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development，检查 Coordinator 公共类型、Lambda 捕获生命周期和模块链接。
+2. 运行原 N200 参数实验，重点核对 makespan、Alignment、Conflict、applied replans 以及 local/global Replan Attempt 数量和耗时。
+3. 检查 `[AlignmentReplan]` 日志格式，并确认 local replan 失败后的 global fallback 与 Final Safety Gate 重规划行为正常。
+
+### 验证结果
+
+- 2026-08-01：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 完成检查并报告 0 个反射文件改动，修改后的 Runtime Coordinator、Actor 和 UTM 模块均完成编译与链接，本轮无编译警告。
+- 2026-08-01：运行原 N200 参数回归实验，执行流程、StructuredExperimentJSON Replan 指标和 `[AlignmentReplan]` 日志检查正常，未发现 Runtime Coordinator 直接调用 Replan Service 对 makespan、Alignment、Conflict 或 local/global Replan 行为造成异常影响。
