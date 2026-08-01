@@ -3008,3 +3008,66 @@ Execution Policy、Replan Service、Runtime Coordinator 和 Final Safety Gate �
 - 编译过程发现并修复 Reporting 源文件之间的 Unity Build 匿名辅助函数重名；修正不改变算法或日志内容。
 - 本轮唯一剩余警告仍来自未修改的 `PBSPlanner.cpp` 对已弃用 `TArray::RemoveAt(..., bool)` 重载的使用。
 - 2026-08-01：运行原 N200 参数回归实验，执行流程、StructuredExperimentJSON、Replan/Final Safety Gate 日志和现有 Execution 指标检查正常，未发现 Sink 所有权及诊断转发下沉对 makespan、Delay、Alignment、Conflict、applied replans 或 local/global Replan 行为造成异常影响。
+
+## 2026-08-01 Experiment Report Context Builder
+
+### 背景
+
+`FExperimentReporter` 已负责把扁平的 `FExperimentReportContext` 序列化为 StructuredExperimentJSON，`FExperimentMetadataResolver` 已负责 run_id、phase 和 group 元数据解析，但 `APathPlanningDemoActor::BuildStructuredExperimentSummaryJson()` 仍承担 Execution Summary 可用性判断、Planner 名称回退、makespan expansion、No-Fly clear、local/global Replan 合计、Metadata Input 构造和 70 个 Context 字段赋值。其他 Benchmark Host 若要生成相同 JSON，仍需复制 Actor 中的报告规则。本阶段新增独立 Context Builder。
+
+### 新增文件
+
+- `Source/UTM/Public/Reporting/ExperimentReportContextBuilder.h`
+- `Source/UTM/Private/Reporting/ExperimentReportContextBuilder.cpp`
+
+### 修改文件
+
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 分组 Request
+
+- `FExperimentReportIdentityInput`：run、phase、group、scenario、map、requested planner、scheduler 和 notes。
+- `FExperimentReportRuntimeSettingsInput`：Delay/Replan 模式、概率、Alignment 参数、Conflict Resolution 参数和最大重规划次数。
+- `FExperimentReportEnvironmentInput`：City、Planning 和 Execution 三类随机种子。
+- `FExperimentReportNoFlyValidationInput`：验证开关、启用 Zone 数量以及检查和违规计数。
+- `FExperimentReportContextBuildRequest`：组合以上输入，并只读引用 `FPlanningTimingStats`、`FExecutionSummary` 和 `FExecutionReplanTimingStats`；不复制 N200 Agent Summary、Mission Stats 或 Agent Delay Config 数组。
+- Request 只在同步 `Build()` 调用期间读取，Builder 不保存外部指针。
+
+### Builder 职责
+
+- 校验 Planning Stats、Execution Summary 和 Replan Timing Stats 三个必要输入，并返回带 `bSuccess`、`FailureReason` 和 `Context` 的结构化结果。
+- 按原条件判断 `bExecutionSummaryAvailable`，包括 Execution Session 已记录冲突但 Agent 汇总仍为空的情况。
+- 保留 requested planner 与实际 Planning Stats planner 的不同用途：前者用于 Metadata fallback run_id，后者优先写入 JSON planner 字段。
+- 计算 Effective Agent Count、fallback run_id Agent Count、makespan expansion 和 No-Fly Validation clear。
+- 汇总 local/global Replan Attempt 数量、总耗时和最大单次耗时。
+- 构造并调用 `FExperimentMetadataResolver`，随后生成完整 `FExperimentReportContext`。
+- Delay/Replan 枚举名称继续使用原 `StaticEnum()->GetNameStringByValue()` 语义。
+
+### Actor 新边界
+
+- Actor 只捕获 Details、地图名称、Scheduler 名称、No-Fly 计数和现有统计对象地址。
+- 删除 Actor 匿名命名空间中只供报告使用的通用枚举名称函数和 Metadata Replan Mode 转换函数。
+- `BuildStructuredExperimentSummaryJson()` 调用 Builder，成功后继续调用原 `FExperimentReporter::BuildStructuredSummaryJson()`。
+- `PathPlanningDemoActor.cpp` 从 2393 行减少到 2296 行，净减少 97 行。
+
+### 保守性说明
+
+- `ExperimentReporter.cpp` 和 `ExperimentReportTypes.h` 未修改，JSON 字段名称、类型、顺序和兼容重复字段均保持不变。
+- 字段级静态核对确认迁移前后均覆盖 70 个 `FExperimentReportContext` 字段。
+- Metadata Input 静态核对确认迁移前后均覆盖 13 个字段。
+- Planning 完成但 Execution 尚未产生 Summary 时，Agent Count 回退和零值字段语义不变。
+- No-Fly、Execution、Replan 和 Planning 指标只读，不修改任何 Runtime Session 或 Summary。
+- EUW、Details、Blueprint、Planner、Scheduler、Execution 算法和现有 JSON 字段均未修改。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development，检查公开 Request 的前置声明、统计类型指针和 Builder 链接。
+2. 运行原 N200 参数实验，逐项检查 StructuredExperimentJSON 的 Metadata、Planning、No-Fly、Execution、Alignment、Conflict 和 Replan 字段。
+3. 重点核对 `execution_summary_available`、`agent_count`、`expansion`、`execution_replan_attempt_count`、`execution_replan_total_time_ms` 和 `execution_replan_max_time_ms`。
+4. 后续可运行一次仅完成 Planning、尚未完成 Execution 的输出场景，确认回退语义。
+
+### 验证结果
+
+- 2026-08-01：UTMEditor Win64 Development 编译通过；新增 `ExperimentReportContextBuilder.cpp` 与修改后的 `PathPlanningDemoActor.cpp` 分别完成非 Unity 编译，UTM 模块成功链接。
+- 本轮唯一编译警告仍来自未修改的 `PBSPlanner.cpp` 对已弃用 `TArray::RemoveAt(..., bool)` 重载的使用；Context Builder 未新增警告。
+- 2026-08-01：运行原 N200 参数回归实验，执行流程和 StructuredExperimentJSON 检查正常；Metadata、Planning、No-Fly、Execution、Alignment、Conflict 与 Replan 字段未发现异常，Context Builder 抽取未改变现有实验结果。

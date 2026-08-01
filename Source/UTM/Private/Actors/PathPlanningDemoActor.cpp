@@ -22,7 +22,7 @@
 #include "Missions/MissionSourceBuilder.h"
 
 #include "Kismet/GameplayStatics.h"
-#include "Reporting/ExperimentMetadataResolver.h"
+#include "Reporting/ExperimentReportContextBuilder.h"
 #include "Reporting/ExperimentReporter.h"
 #include "Reporting/ExecutionLogSink.h"
 #include "Reporting/ExecutionSummaryBuilder.h"
@@ -47,17 +47,6 @@ namespace
         default:
             return EExecutionPolicyReplanMode::Disabled;
         }
-    }
-
-    template<typename TEnum>
-    FString GetEnumNameString(const TEnum Value)
-    {
-        if (const UEnum* Enum = StaticEnum<TEnum>())
-        {
-            return Enum->GetNameStringByValue(static_cast<int64>(Value));
-        }
-
-        return TEXT("Unknown");
     }
 
     TArray<FVector> BuildDebugPreviewPath(const TArray<FVector>& InPath)
@@ -93,21 +82,6 @@ namespace
         }
 
         return Preview;
-    }
-
-    EExperimentMetadataReplanMode ToExperimentMetadataReplanMode(EExecutionReplanMode ReplanMode)
-    {
-        switch (ReplanMode)
-        {
-        case EExecutionReplanMode::Disabled:
-            return EExperimentMetadataReplanMode::Disabled;
-        case EExecutionReplanMode::LocalConflictSet:
-            return EExperimentMetadataReplanMode::LocalConflictSet;
-        case EExecutionReplanMode::GlobalUnfinished:
-            return EExperimentMetadataReplanMode::GlobalUnfinished;
-        default:
-            return EExperimentMetadataReplanMode::Disabled;
-        }
     }
 
     FExecutionSummaryBuildRequest CaptureExecutionSummaryBuildRequest(
@@ -1294,142 +1268,71 @@ int32 APathPlanningDemoActor::GetEnabledNoFlyZoneCount() const
 
 FString APathPlanningDemoActor::BuildStructuredExperimentSummaryJson() const
 {
-    const bool bHasExecutionSummary =
-        LastExecutionSummary.AgentCount > 0 ||
-        LastExecutionSummary.AgentSummaries.Num() > 0 ||
-        LastExecutionSummary.CompletedAgentCount > 0 ||
-        LastExecutionSummary.PlannedMakespan > 0 ||
-        LastExecutionSummary.ActualMakespan > 0 ||
-        ExecutionSession.Conflicts.Num() > 0;
+    FExperimentReportContextBuildRequest Request;
+    Request.Identity.RunId = ExperimentRunId;
+    Request.Identity.Phase = ExperimentPhase;
+    Request.Identity.GroupId = ExperimentGroupId;
+    Request.Identity.GroupName = ExperimentGroupName;
+    Request.Identity.ScenarioName = ExperimentScenarioName;
+    Request.Identity.MapTypeName = GetCityLayoutTypeName();
+    Request.Identity.RequestedPlannerName = GetPlannerTypeName();
+    Request.Identity.SchedulerTypeName =
+        FMissionSchedulerRegistry::GetSchedulerTypeName(MissionSchedulerType);
+    Request.Identity.Notes = ExperimentNotes;
 
-    const int32 EffectiveAgentCount =
-        bHasExecutionSummary ? LastExecutionSummary.AgentCount : LastPlanningStats.MissionCount;
-    const int32 FallbackRunIdAgentCount =
-        LastExecutionSummary.AgentCount > 0 ? LastExecutionSummary.AgentCount : LastPlanningStats.MissionCount;
-    const int32 Expansion =
-        bHasExecutionSummary ? (LastExecutionSummary.ActualMakespan - LastExecutionSummary.PlannedMakespan) : 0;
-    const FString PlannerName =
-        LastPlanningStats.PlannerName.IsEmpty() ? GetPlannerTypeName() : LastPlanningStats.PlannerName;
-    const FString DelayModeName = GetEnumNameString(DelayMode);
-    const FString ReplanModeName = GetEnumNameString(ExecutionReplanMode);
-    const FString MapTypeName = GetCityLayoutTypeName();
-    const bool bNoFlyValidationClear =
-        !bValidatePathsAgainstNoFlyZones || LastNoFlyZonePathValidation.TotalViolationCount <= 0;
-    const int32 ExecutionReplanAttemptCount =
-        ExecutionSession.ReplanTimingStats.LocalAttemptCount +
-        ExecutionSession.ReplanTimingStats.GlobalAttemptCount;
-    const double ExecutionReplanTotalTimeMs =
-        ExecutionSession.ReplanTimingStats.LocalTotalTimeMs +
-        ExecutionSession.ReplanTimingStats.GlobalTotalTimeMs;
-    const double ExecutionReplanMaxTimeMs = FMath::Max(
-        ExecutionSession.ReplanTimingStats.LocalMaxTimeMs,
-        ExecutionSession.ReplanTimingStats.GlobalMaxTimeMs);
+    Request.RuntimeSettings.DelayMode = DelayMode;
+    Request.RuntimeSettings.ReplanMode = ExecutionReplanMode;
+    Request.RuntimeSettings.StepDelayProbability = StepDelayProbability;
+    Request.RuntimeSettings.bEnableDiscreteAlignment = bEnableDiscreteAlignment;
+    Request.RuntimeSettings.bEnableConflictAwareAlignment =
+        bEnableConflictAwareAlignment;
+    Request.RuntimeSettings.bAlignmentAllowRecoveryMoves =
+        bAlignmentAllowRecoveryMoves;
+    Request.RuntimeSettings.bAlignmentHoldPositionOnFailure =
+        bAlignmentHoldPositionOnFailure;
+    Request.RuntimeSettings.AlignmentSearchRadiusSteps =
+        AlignmentSearchRadiusSteps;
+    Request.RuntimeSettings.AlignmentMaxSpatialErrorCells =
+        AlignmentMaxSpatialErrorCells;
+    Request.RuntimeSettings.AlignmentMaxSnapAheadSteps =
+        AlignmentMaxSnapAheadSteps;
+    Request.RuntimeSettings.AlignmentConflictResolutionPasses =
+        AlignmentConflictResolutionPasses;
+    Request.RuntimeSettings.AlignmentConflictHoldThresholdForReplan =
+        AlignmentConflictHoldThresholdForReplan;
+    Request.RuntimeSettings.MaxExecutionReplans = MaxExecutionReplanCount;
 
-    FExperimentMetadataResolverInput MetadataInput;
-    MetadataInput.RunId = ExperimentRunId;
-    MetadataInput.Phase = ExperimentPhase;
-    MetadataInput.GroupId = ExperimentGroupId;
-    MetadataInput.GroupName = ExperimentGroupName;
-    MetadataInput.ScenarioName = ExperimentScenarioName;
-    MetadataInput.FallbackScenarioName = MapTypeName;
-    MetadataInput.PlannerName = GetPlannerTypeName();
-    MetadataInput.EffectiveAgentCount = FallbackRunIdAgentCount;
-    MetadataInput.StepDelayProbability = StepDelayProbability;
-    MetadataInput.ExecutionRandomSeed = ExecutionRandomSeed;
-    MetadataInput.bEnableDiscreteAlignment = bEnableDiscreteAlignment;
-    MetadataInput.bEnableConflictAwareAlignment = bEnableConflictAwareAlignment;
-    MetadataInput.ReplanMode = ToExperimentMetadataReplanMode(ExecutionReplanMode);
+    Request.Environment.CitySeed = CitySeed;
+    Request.Environment.RandomSeed = RandomSeed;
+    Request.Environment.ExecutionRandomSeed = ExecutionRandomSeed;
 
-    const FExperimentMetadata Metadata = FExperimentMetadataResolver::Resolve(MetadataInput);
+    Request.NoFlyValidation.bValidationEnabled =
+        bValidatePathsAgainstNoFlyZones;
+    Request.NoFlyValidation.EnabledZoneCount = GetEnabledNoFlyZoneCount();
+    Request.NoFlyValidation.CheckedMissionCount =
+        LastNoFlyZonePathValidation.CheckedMissionCount;
+    Request.NoFlyValidation.CheckedPointCount =
+        LastNoFlyZonePathValidation.CheckedPointCount;
+    Request.NoFlyValidation.ViolatingMissionCount =
+        LastNoFlyZonePathValidation.ViolatingMissionCount;
+    Request.NoFlyValidation.TotalViolationCount =
+        LastNoFlyZonePathValidation.TotalViolationCount;
 
-    FExperimentReportContext ReportContext;
-    ReportContext.RunId = Metadata.RunId;
-    ReportContext.Phase = Metadata.Phase;
-    ReportContext.GroupId = Metadata.GroupId;
-    ReportContext.GroupName = Metadata.GroupName;
-    ReportContext.ScenarioName = Metadata.ScenarioName;
-    ReportContext.MapTypeName = MapTypeName;
-    ReportContext.PlannerName = PlannerName;
-    ReportContext.SchedulerTypeName = FMissionSchedulerRegistry::GetSchedulerTypeName(MissionSchedulerType);
-    ReportContext.DelayModeName = DelayModeName;
-    ReportContext.ReplanModeName = ReplanModeName;
-    ReportContext.Notes = ExperimentNotes;
+    Request.PlanningStats = &LastPlanningStats;
+    Request.ExecutionSummary = &LastExecutionSummary;
+    Request.ReplanTimingStats = &ExecutionSession.ReplanTimingStats;
+    Request.ObservedConflictCount = ExecutionSession.Conflicts.Num();
+    Request.AppliedExecutionReplans = ExecutionSession.TotalReplanCount;
 
-    ReportContext.bPlanningSuccess = LastPlanningStats.bSuccess;
-    ReportContext.bPlanningMultiAgent = LastPlanningStats.bMultiAgent;
-    ReportContext.bExecutionSummaryAvailable = bHasExecutionSummary;
-    ReportContext.bAlignmentEnabled = bEnableDiscreteAlignment;
-    ReportContext.bConflictAwareAlignment = bEnableConflictAwareAlignment;
-    ReportContext.bAlignmentAllowRecoveryMoves = bAlignmentAllowRecoveryMoves;
-    ReportContext.bAlignmentHoldPositionOnFailure = bAlignmentHoldPositionOnFailure;
-    ReportContext.bValidatePathsAgainstNoFlyZones = bValidatePathsAgainstNoFlyZones;
-    ReportContext.bNoFlyValidationClear = bNoFlyValidationClear;
+    const FExperimentReportContextBuildResult BuildResult =
+        FExperimentReportContextBuilder::Build(Request);
+    if (!BuildResult.bSuccess)
+    {
+        return FString();
+    }
 
-    ReportContext.MissionCount = LastPlanningStats.MissionCount;
-    ReportContext.AgentCount = EffectiveAgentCount;
-    ReportContext.CitySeed = CitySeed;
-    ReportContext.RandomSeed = RandomSeed;
-    ReportContext.ExecutionRandomSeed = ExecutionRandomSeed;
-    ReportContext.StepDelayProbability = StepDelayProbability;
-    ReportContext.AlignmentSearchRadiusSteps = AlignmentSearchRadiusSteps;
-    ReportContext.AlignmentMaxSpatialErrorCells = AlignmentMaxSpatialErrorCells;
-    ReportContext.AlignmentMaxSnapAheadSteps = AlignmentMaxSnapAheadSteps;
-    ReportContext.AlignmentConflictResolutionPasses = AlignmentConflictResolutionPasses;
-    ReportContext.AlignmentConflictHoldThresholdForReplan = AlignmentConflictHoldThresholdForReplan;
-    ReportContext.MaxExecutionReplans = MaxExecutionReplanCount;
-
-    ReportContext.PlanningBuildGridTimeMs = LastPlanningStats.BuildGridTimeMs;
-    ReportContext.PlanningInputPreparationTimeMs = LastPlanningStats.InputPreparationTimeMs;
-    ReportContext.PlanningSolveTimeMs = LastPlanningStats.SolveTimeMs;
-    ReportContext.PlanningPostProcessTimeMs = LastPlanningStats.PostProcessTimeMs;
-    ReportContext.InitialPlanningWallTimeMs = LastPlanningStats.TotalTimeMs;
-
-    ReportContext.NoFlyEnabledZoneCount = GetEnabledNoFlyZoneCount();
-    ReportContext.NoFlyCheckedMissionCount = LastNoFlyZonePathValidation.CheckedMissionCount;
-    ReportContext.NoFlyCheckedPointCount = LastNoFlyZonePathValidation.CheckedPointCount;
-    ReportContext.NoFlyViolatingMissionCount = LastNoFlyZonePathValidation.ViolatingMissionCount;
-    ReportContext.NoFlyTotalViolationCount = LastNoFlyZonePathValidation.TotalViolationCount;
-
-    ReportContext.CompletedAgentCount = LastExecutionSummary.CompletedAgentCount;
-    ReportContext.PlannedMakespan = LastExecutionSummary.PlannedMakespan;
-    ReportContext.ActualMakespan = LastExecutionSummary.ActualMakespan;
-    ReportContext.Expansion = Expansion;
-    ReportContext.TotalDelaySteps = LastExecutionSummary.TotalDelaySteps;
-
-    ReportContext.VertexConflictCount = LastExecutionSummary.VertexConflictCount;
-    ReportContext.EdgeConflictCount = LastExecutionSummary.EdgeConflictCount;
-    ReportContext.FirstConflictTime = LastExecutionSummary.FirstConflictTime;
-
-    ReportContext.UTMStaticConflictCount = LastExecutionSummary.UTMStaticConflictCount;
-    ReportContext.UTMProtectionConflictCount = LastExecutionSummary.UTMProtectionConflictCount;
-    ReportContext.UTMDownwashConflictCount = LastExecutionSummary.UTMDownwashConflictCount;
-    ReportContext.FirstUTMConflictTime = LastExecutionSummary.FirstUTMConflictTime;
-
-    ReportContext.AlignmentCorrectionCount = LastExecutionSummary.AlignmentCorrectionCount;
-    ReportContext.AlignmentHoldCount = LastExecutionSummary.AlignmentHoldCount;
-    ReportContext.AlignmentConflictHoldCount = LastExecutionSummary.AlignmentConflictHoldCount;
-    ReportContext.AlignmentSnapCount = LastExecutionSummary.AlignmentSnapCount;
-    ReportContext.AlignmentReplanRequestCount = LastExecutionSummary.AlignmentReplanRequestCount;
-    ReportContext.AlignmentSuccessfulReplanCount = LastExecutionSummary.AlignmentSuccessfulReplanCount;
-
-    ReportContext.AppliedExecutionReplans = ExecutionSession.TotalReplanCount;
-    ReportContext.ExecutionReplanAttemptCount = ExecutionReplanAttemptCount;
-    ReportContext.ExecutionReplanTotalTimeMs = ExecutionReplanTotalTimeMs;
-    ReportContext.ExecutionReplanMaxTimeMs = ExecutionReplanMaxTimeMs;
-    ReportContext.ExecutionReplanLocalAttemptCount =
-        ExecutionSession.ReplanTimingStats.LocalAttemptCount;
-    ReportContext.ExecutionReplanLocalTotalTimeMs =
-        ExecutionSession.ReplanTimingStats.LocalTotalTimeMs;
-    ReportContext.ExecutionReplanLocalMaxTimeMs =
-        ExecutionSession.ReplanTimingStats.LocalMaxTimeMs;
-    ReportContext.ExecutionReplanGlobalAttemptCount =
-        ExecutionSession.ReplanTimingStats.GlobalAttemptCount;
-    ReportContext.ExecutionReplanGlobalTotalTimeMs =
-        ExecutionSession.ReplanTimingStats.GlobalTotalTimeMs;
-    ReportContext.ExecutionReplanGlobalMaxTimeMs =
-        ExecutionSession.ReplanTimingStats.GlobalMaxTimeMs;
-
-    return FExperimentReporter::BuildStructuredSummaryJson(ReportContext);
+    return FExperimentReporter::BuildStructuredSummaryJson(
+        BuildResult.Context);
 }
 
 void APathPlanningDemoActor::LogStructuredExperimentSummaryJson() const
