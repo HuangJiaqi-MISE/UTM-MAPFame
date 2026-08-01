@@ -11,6 +11,7 @@
 #include "Execution/ExecutionAlignmentPolicy.h"
 #include "Execution/ExecutionConflictResolutionPolicy.h"
 #include "Execution/ExecutionFinalSafetyGateCoordinator.h"
+#include "Execution/ExecutionReplanService.h"
 #include "Execution/ExecutionRuntimeSessionBuilder.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "EditorServices/CityEditorService.h"
@@ -1321,6 +1322,13 @@ ADroneActor* APathPlanningDemoActor::FindExecutionDrone(int32 MissionId) const
 {
     const TObjectPtr<ADroneActor>* Drone = SpawnedDroneByMissionId.Find(MissionId);
     return Drone ? Drone->Get() : nullptr;
+}
+
+bool APathPlanningDemoActor::SetExecutionReplanService(
+    TUniquePtr<IExecutionReplanService>&& InReplanService)
+{
+    return ExecutionCoordinator.SetReplanService(
+        MoveTemp(InReplanService));
 }
 
 FIntVector APathPlanningDemoActor::GetObservedExecutionCell(const FExecutionAgentState& State) const

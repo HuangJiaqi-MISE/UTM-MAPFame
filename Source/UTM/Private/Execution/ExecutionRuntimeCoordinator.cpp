@@ -6,7 +6,10 @@
 #include "Execution/ExecutionReplanService.h"
 #include "Execution/ExecutionRuntimeSessionStepProcessor.h"
 
-FExecutionRuntimeCoordinator::FExecutionRuntimeCoordinator() = default;
+FExecutionRuntimeCoordinator::FExecutionRuntimeCoordinator()
+    : ReplanService(MakeUnique<FDefaultExecutionReplanService>())
+{
+}
 
 FExecutionRuntimeCoordinator::~FExecutionRuntimeCoordinator()
 {
@@ -18,6 +21,10 @@ bool FExecutionRuntimeCoordinator::InitializeController(
     FString& OutFailureReason)
 {
     ResetController();
+    if (ReplanService)
+    {
+        ReplanService->Reset();
+    }
 
     if (!Request.Session)
     {
@@ -68,6 +75,23 @@ bool FExecutionRuntimeCoordinator::InitializeController(
     }
 
     ActiveController = MoveTemp(Controller);
+    return true;
+}
+
+bool FExecutionRuntimeCoordinator::SetReplanService(
+    TUniquePtr<IExecutionReplanService>&& InReplanService)
+{
+    if (ActiveController || !InReplanService)
+    {
+        return false;
+    }
+
+    if (ReplanService)
+    {
+        ReplanService->Reset();
+    }
+
+    ReplanService = MoveTemp(InReplanService);
     return true;
 }
 
@@ -144,7 +168,7 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
 
     FExecutionControllerStepCallbacks ControllerCallbacks;
     ControllerCallbacks.RunReplan =
-        [&Request, &Callbacks](
+        [this, &Request, &Callbacks](
             const TSet<int32>& RequestedMissionIds,
             bool bGlobalReplan,
             TSet<int32>& ReplannedMissionIds) -> bool
@@ -172,10 +196,18 @@ FExecutionRuntimeCoordinatorResult FExecutionRuntimeCoordinator::Advance(
             ServiceCallbacks.OnCoordinatorEvent =
                 Callbacks.OnReplanCoordinatorEvent;
 
-            const FExecutionReplanServiceResult ServiceResult =
-                FExecutionReplanService::Run(
+            FExecutionReplanServiceResult ServiceResult;
+            if (ReplanService)
+            {
+                ServiceResult = ReplanService->Run(
                     ServiceRequest,
                     ServiceCallbacks);
+            }
+            else
+            {
+                ServiceResult.FailureReason =
+                    TEXT("execution runtime coordinator has no replan service");
+            }
             if (Callbacks.OnReplanServiceResult)
             {
                 Callbacks.OnReplanServiceResult(ServiceResult);

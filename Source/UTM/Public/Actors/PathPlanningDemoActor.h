@@ -22,6 +22,7 @@ class USceneComponent;
 class ADroneActor;
 class AMissionMarkerActor;
 class ANoFlyZoneMarkerActor;
+class IExecutionReplanService;
 struct FMultiAgentPlanningPipelineResult;
 
 
@@ -86,6 +87,9 @@ protected:
 
 public:
     virtual void Tick(float DeltaTime) override;
+
+    bool SetExecutionReplanService(
+        TUniquePtr<IExecutionReplanService>&& InReplanService);
 
 private:
     bool ParseTaggedId(AActor* Actor, const FString& Prefix, int32& OutId) const;

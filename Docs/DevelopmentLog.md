@@ -2757,3 +2757,66 @@ APathPlanningDemoActor
 
 - 2026-08-01：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 完成检查并报告 0 个反射文件改动，修改后的 Runtime Coordinator、Actor 和 UTM 模块均完成编译与链接，本轮无编译警告。
 - 2026-08-01：运行原 N200 参数回归实验，执行流程、StructuredExperimentJSON Replan 指标和 `[AlignmentReplan]` 日志检查正常，未发现 Runtime Coordinator 直接调用 Replan Service 对 makespan、Alignment、Conflict 或 local/global Replan 行为造成异常影响。
+
+## 2026-08-01 Execution Replan Service 第三阶段：接口化与依赖注入
+
+### 背景
+
+第二阶段已经让 Runtime Coordinator 直接调用 Replan Service，但依赖目标仍是具体静态类，研究者若要替换完整的执行期重规划流程，仍需修改 Coordinator 源码。本阶段建立最小可替换接口，并采用 C++ 所有权注入；默认实验继续自动使用当前实现，不新增 Details、Blueprint 或固定枚举分支。
+
+### 修改文件
+
+- `Source/UTM/Public/Execution/ExecutionReplanService.h`
+- `Source/UTM/Private/Execution/ExecutionReplanService.cpp`
+- `Source/UTM/Public/Execution/ExecutionRuntimeCoordinator.h`
+- `Source/UTM/Private/Execution/ExecutionRuntimeCoordinator.cpp`
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### 新接口
+
+- 新增 `IExecutionReplanService`，公开 `Run(Request, Callbacks)` 作为完整执行期重规划入口。
+- 接口提供可选 `Reset()` 生命周期钩子；无状态实现不需要覆盖，有状态研究实现可在新执行会话开始前清理历史数据。
+- 原有实现改为 `FDefaultExecutionReplanService`，算法代码、Request/Result 类型和事件回调契约不变。
+- `FExecutionRuntimeCoordinator` 默认创建并持有 `FDefaultExecutionReplanService`，现有 Actor 和实验配置无需额外设置。
+
+### 注入与所有权
+
+- `FExecutionRuntimeCoordinator::SetReplanService()` 接收 `TUniquePtr<IExecutionReplanService>&&`，Coordinator 获得自定义 Service 的唯一所有权。
+- `APathPlanningDemoActor::SetExecutionReplanService()` 提供同名语义的公开 C++ 转发入口，但不是 `UFUNCTION`，因此不扩展 EUW 或 Blueprint 接口。
+- 仅允许在没有 Active Controller 时替换 Service，避免一次执行会话中途切换实现或丢失有状态 Service 的内部历史。
+- 传入空指针或执行期间尝试替换时返回 `false`，且 rvalue reference 在失败分支不会被移动，调用者仍保留原 Service。
+- 成功替换前先调用旧 Service 的 `Reset()`，随后转移所有权。
+- 每次 `InitializeController()` 开始新执行会话时调用当前 Service 的 `Reset()`。
+
+### 新依赖方向
+
+```text
+APathPlanningDemoActor
+    -> FExecutionRuntimeCoordinator
+        -> IExecutionReplanService
+            -> FDefaultExecutionReplanService
+```
+
+自定义研究实现只需实现 `IExecutionReplanService` 并在执行开始前注入，不需要修改 Actor、Runtime Coordinator、Controller、Step Pipeline 或 Final Safety Gate。
+
+### 保守性说明
+
+- 默认 Service 的函数主体仅从静态类成员迁移为实例成员，内部控制流未修改。
+- Replan Request、Result、状态枚举、Attempt/Coordinator 回调和计时统计未修改。
+- 默认 Service 仍由 Coordinator 自动创建，因此未注入自定义实现时调用链和实验行为不变。
+- Planner、Candidate 扩张、targeted retry、PostCheck、路径整合、Session 写回和路径缓存同步未修改。
+- `[AlignmentReplan]` 日志、Summary、StructuredExperimentJSON、EUW、Details 和 Blueprint 接口未修改。
+- 本阶段有一处有意的 C++ 类型升级：原具体类名 `FExecutionReplanService` 改为 `FDefaultExecutionReplanService`；新的外部扩展应依赖 `IExecutionReplanService`。
+- 暂不建立 Replan Service Registry；只有一个默认实现时，固定枚举和 `switch` 会增加扩展成本而没有用户选择价值。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development，检查接口虚函数、`TUniquePtr` 不完整类型析构边界和 UHT 对 Actor 非反射 C++ 方法的处理。
+2. 运行原 N200 参数实验，核对 makespan、Alignment、Conflict、applied replans 以及 local/global Replan 数量和耗时。
+3. 后续增加最小自定义 Service 编译测试，确认注入入口、所有权转移和执行期间拒绝替换的契约。
+
+### 验证结果
+
+- 2026-08-01：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 成功处理 Actor 的非反射 C++ 注入方法并写入 1 个生成文件，Replan Service 接口与默认实现、Runtime Coordinator、Actor 和 UTM 模块均完成编译与链接，本轮无编译警告。
+- 2026-08-01：运行原 N200 参数回归实验，默认 `FDefaultExecutionReplanService` 的执行流程和 StructuredExperimentJSON 检查正常，未发现接口化与依赖注入对 makespan、Alignment、Conflict、applied replans 或 local/global Replan 指标造成异常影响。

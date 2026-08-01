@@ -3,10 +3,24 @@
 #include "CoreMinimal.h"
 #include "Execution/ExecutionReplanServiceTypes.h"
 
-class FExecutionReplanService
+class IExecutionReplanService
 {
 public:
-    static FExecutionReplanServiceResult Run(
+    virtual ~IExecutionReplanService() = default;
+
+    virtual void Reset()
+    {
+    }
+
+    virtual FExecutionReplanServiceResult Run(
         const FExecutionReplanServiceRequest& Request,
-        const FExecutionReplanServiceCallbacks& Callbacks);
+        const FExecutionReplanServiceCallbacks& Callbacks) = 0;
+};
+
+class FDefaultExecutionReplanService final : public IExecutionReplanService
+{
+public:
+    virtual FExecutionReplanServiceResult Run(
+        const FExecutionReplanServiceRequest& Request,
+        const FExecutionReplanServiceCallbacks& Callbacks) override;
 };

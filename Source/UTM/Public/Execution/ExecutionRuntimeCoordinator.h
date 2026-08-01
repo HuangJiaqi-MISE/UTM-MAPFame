@@ -3,6 +3,7 @@
 #include "Execution/ExecutionRuntimeCoordinatorTypes.h"
 
 class IExecutionController;
+class IExecutionReplanService;
 
 class FExecutionRuntimeCoordinator
 {
@@ -13,6 +14,9 @@ public:
     bool InitializeController(
         const FExecutionRuntimeCoordinatorInitializeRequest& Request,
         FString& OutFailureReason);
+
+    bool SetReplanService(
+        TUniquePtr<IExecutionReplanService>&& InReplanService);
 
     void ResetController();
 
@@ -26,4 +30,5 @@ public:
 
 private:
     TUniquePtr<IExecutionController> ActiveController;
+    TUniquePtr<IExecutionReplanService> ReplanService;
 };

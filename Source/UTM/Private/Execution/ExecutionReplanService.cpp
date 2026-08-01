@@ -6,7 +6,7 @@
 #include "Execution/ExecutionRuntimeSessionReplanCommitter.h"
 #include "Planning/GridMap3D.h"
 
-FExecutionReplanServiceResult FExecutionReplanService::Run(
+FExecutionReplanServiceResult FDefaultExecutionReplanService::Run(
     const FExecutionReplanServiceRequest& Request,
     const FExecutionReplanServiceCallbacks& Callbacks)
 {
