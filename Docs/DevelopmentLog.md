@@ -2641,3 +2641,59 @@ Execution 已经具备 Runtime Session、Step Processor、Controller Registry、
 - 2026-07-31：UTMEditor Win64 Development 编译通过；Unreal Header Tool 使用 `-WarningsAsErrors` 完成检查并报告 0 个反射文件改动，Controller Registry、Runtime Coordinator、Actor 和 UTM 模块均完成编译与链接，本轮无编译警告。
 - 2026-07-31：运行原 N200 参数回归实验，执行流程和 StructuredExperimentJSON 检查正常，未发现标准 Controller 生命周期接口对 makespan、Delay、Alignment、Conflict 或 Replan 指标造成异常影响。
 - 后续仍可在同一编辑器会话内连续运行两次实验，定向检查自定义有状态 Controller 的会话间 Reset；默认无状态 Controller 的本次 N200 回归已通过。
+
+## 2026-08-01 Execution Replan Service 第一阶段：完整重规划请求编排
+
+### 背景
+
+执行期重规划的 Candidate 扩张、targeted retry、单次 Attempt 和路径提交此前已经分别模块化，但 `APathPlanningDemoActor::TryExecutionReplan()` 仍负责连接全部组件，并额外承担快照修正、重规划次数限制、计时统计提交和路径缓存同步。研究者若要从其他 Host 调用同一套重规划流程，仍需要复制 Actor 中的编排代码。本阶段新增应用层 Replan Service，为一次完整的执行期重规划请求提供统一入口。
+
+### 新增文件
+
+- `Source/UTM/Public/Execution/ExecutionReplanServiceTypes.h`
+- `Source/UTM/Public/Execution/ExecutionReplanService.h`
+- `Source/UTM/Private/Execution/ExecutionReplanService.cpp`
+
+### 修改文件
+
+- `Source/UTM/Public/Actors/PathPlanningDemoActor.h`
+- `Source/UTM/Private/Actors/PathPlanningDemoActor.cpp`
+
+### Service 职责
+
+- 校验 Grid、Runtime Session 和 Cell Path Cache 等完整请求上下文。
+- 统一处理空请求、Replan Disabled 和最大重规划次数限制。
+- 从 Runtime Session 构造使用 `LastObservedCell` 的算法快照，不读取 `UWorld`、Drone Actor 或 World Transform。
+- 构造并调用 `FExecutionReplanCoordinator`，继续复用已有 Candidate 扩张、local/global 多轮尝试和 targeted retry。
+- 在 Coordinator 的计时范围内调用 `FExecutionReplanAttemptRunner`、失败事件回调、Session Committer 和 World Path Cache 同步。
+- 将 Coordinator 的 local/global Attempt 耗时和成功应用次数写回 Runtime Session。
+- 返回结构化状态、成功标记和实际重规划 Mission ID 集合。
+
+### Actor 新边界
+
+- `TryExecutionReplan()` 保留为 Benchmark Host 的薄适配层，只把 Grid、Session、Planner/Execution 配置和两类路径缓存放入标准 Request。
+- Attempt 失败日志和 Coordinator 过程日志继续由 Actor 的 UE 日志函数输出，日志文本和触发位置不变。
+- 达到最大重规划次数时仍由 Actor 输出原 `[AlignmentReplan] skipped...` 日志。
+- 删除 Actor 中仅供重规划使用的 `CaptureExecutionSnapshot()`、`RunExecutionReplanAttempt()` 和 `ApplyExecutionReplanAttemptResult()`。
+- `AdvanceExecutionOneStep()` 到 `TryExecutionReplan()` 的同步回调接口暂时不变，便于继续使用原 N200 实验验证。
+
+### 保守性说明
+
+- Planner Registry、Replan Coordinator、Attempt Runner、Candidate Selector、PostCheck 和 Path Integrator 算法均未修改。
+- 快照继续使用 `LastObservedCell`；原流程先读取 observed cell、随后在 `TryExecutionReplan()` 中逐 Agent 覆盖为 `LastObservedCell`，本阶段直接构造最终等价快照。
+- local/global Attempt 次数、总耗时、最大耗时和 `TotalReplanCount` 的提交位置不变。
+- 单次 Attempt 的 Planner Config 复制、失败日志、结果提交和 World Path Cache 转换仍位于 Coordinator 的 Attempt 计时范围内。
+- Mission 遍历顺序、Cell Path 写回顺序、成功日志时机和同步执行方式未修改。
+- EUW、Details、Blueprint、Summary 和 StructuredExperimentJSON 字段未修改。
+- 本阶段没有同时修正 Committer 在中途失败时可能产生部分写回的既有事务性问题，避免把行为修复与架构迁移混在同一次回归中。
+
+### 验证计划
+
+1. 编译 UTMEditor Win64 Development，检查新增 Service 类型、Unity Build 和模块链接。
+2. 运行原 N200 参数实验，重点核对 `execution_replan_attempt_count`、local/global Attempt 数量与耗时、applied replans、makespan、Conflict 和 Alignment 指标。
+3. 检查 `[AlignmentReplan]` 的 Attempt 失败、扩张、targeted retry、成功和次数上限日志格式。
+
+### 验证结果
+
+- 2026-08-01：UTMEditor Win64 Development 编译通过；UnrealHeaderTool 使用 `-WarningsAsErrors` 完成检查，新增 `ExecutionReplanService.cpp` 与修改后的 `PathPlanningDemoActor.cpp` 分别完成非 Unity 编译，UTM 模块成功链接，本轮无编译警告。
+- 2026-08-01：运行原 N200 参数回归实验，执行流程和 StructuredExperimentJSON 检查正常，未发现 Execution Replan Service 抽取对 makespan、Alignment、Conflict、applied replans 或 local/global Replan 指标造成异常影响。

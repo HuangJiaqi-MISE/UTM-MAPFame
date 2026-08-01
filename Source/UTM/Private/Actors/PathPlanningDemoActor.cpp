@@ -11,10 +11,8 @@
 #include "Execution/ExecutionAlignmentPolicy.h"
 #include "Execution/ExecutionConflictResolutionPolicy.h"
 #include "Execution/ExecutionFinalSafetyGateCoordinator.h"
-#include "Execution/ExecutionReplanAttemptRunner.h"
-#include "Execution/ExecutionReplanCoordinator.h"
+#include "Execution/ExecutionReplanService.h"
 #include "Execution/ExecutionRuntimeSessionBuilder.h"
-#include "Execution/ExecutionRuntimeSessionReplanCommitter.h"
 #include "Execution/ExecutionStepTypes.h"
 #include "EditorServices/CityEditorService.h"
 #include "EditorServices/EditorGridService.h"
@@ -1320,22 +1318,6 @@ void APathPlanningDemoActor::InitializeExecutionStates()
     }
 }
 
-FExecutionSnapshot APathPlanningDemoActor::CaptureExecutionSnapshot() const
-{
-    FExecutionRuntimeSnapshotBuildRequest SnapshotRequest;
-    SnapshotRequest.GridMap = &GridMap;
-    SnapshotRequest.AgentStatesByMissionId =
-        &ExecutionSession.AgentStatesByMissionId;
-    SnapshotRequest.TimeStep = ExecutionSession.TimeStep;
-    SnapshotRequest.TotalReplanCount = ExecutionSession.TotalReplanCount;
-    SnapshotRequest.ResolveObservedCell =
-        [this](const FExecutionAgentState& State)
-        {
-            return GetObservedExecutionCell(State);
-        };
-    return FExecutionRuntimeSessionBuilder::BuildSnapshot(SnapshotRequest);
-}
-
 ADroneActor* APathPlanningDemoActor::FindExecutionDrone(int32 MissionId) const
 {
     const TObjectPtr<ADroneActor>* Drone = SpawnedDroneByMissionId.Find(MissionId);
@@ -2351,69 +2333,6 @@ bool APathPlanningDemoActor::ProcessMissionConfigsMultiAgent()
         EMultiAgentPlanningResultLogMode::MissionConfig);
 }
 
-bool APathPlanningDemoActor::RunExecutionReplanAttempt(
-    const FExecutionReplanAttemptInput& Input,
-    FExecutionReplanAttemptResult& OutResult) const
-{
-    const FPlannerRuntimeConfig PlannerConfig = BuildPlannerRuntimeConfig();
-
-    FExecutionReplanAttemptContext Context;
-    Context.BaseGrid = &GridMap;
-    Context.MissionConfigsById = &ExecutionSession.MissionConfigsById;
-    Context.PlannerType = PlannerType;
-    Context.PlannerConfig = &PlannerConfig;
-
-    const bool bSuccess = FExecutionReplanAttemptRunner::Run(Context, Input, OutResult);
-    if (!bSuccess)
-    {
-        LogExecutionReplanAttemptFailure(Input, OutResult);
-    }
-
-    return bSuccess;
-}
-
-bool APathPlanningDemoActor::ApplyExecutionReplanAttemptResult(
-    const FExecutionReplanAttemptResult& Result,
-    TSet<int32>& OutReplannedMissionIds)
-{
-    FExecutionRuntimeReplanAttemptCommitRequest CommitRequest;
-    CommitRequest.AttemptResult = &Result;
-    CommitRequest.MissionConfigsById = &ExecutionSession.MissionConfigsById;
-    CommitRequest.AgentStatesByMissionId =
-        &ExecutionSession.AgentStatesByMissionId;
-    CommitRequest.PlannedCellPathsByMissionId = &PlannedCellPathsByMission;
-    const FExecutionRuntimeReplanAttemptCommitResult CommitResult =
-        FExecutionRuntimeSessionReplanCommitter::CommitAttemptResult(
-            CommitRequest);
-
-    for (const int32 MissionId : Result.CandidateMissionIds)
-    {
-        if (!CommitResult.ReplannedMissionIds.Contains(MissionId))
-        {
-            continue;
-        }
-
-        const TArray<FIntVector>* TimelineCells =
-            PlannedCellPathsByMission.Find(MissionId);
-        if (!TimelineCells)
-        {
-            continue;
-        }
-
-        TArray<FVector> TimelineWorld;
-        TimelineWorld.Reserve(TimelineCells->Num());
-        for (const FIntVector& Cell : *TimelineCells)
-        {
-            TimelineWorld.Add(GridMap.CellToWorld(Cell));
-        }
-
-        LastPlannedPathsByMission.Add(MissionId, TimelineWorld);
-    }
-
-    OutReplannedMissionIds = CommitResult.ReplannedMissionIds;
-    return CommitResult.bSuccess;
-}
-
 bool APathPlanningDemoActor::TryExecutionReplan(
     const TSet<int32>& RequestedMissionIds,
     bool bGlobalReplan,
@@ -2421,91 +2340,45 @@ bool APathPlanningDemoActor::TryExecutionReplan(
 {
     OutReplannedMissionIds.Reset();
 
-    if (RequestedMissionIds.Num() <= 0)
-    {
-        return false;
-    }
+    FExecutionReplanServiceRequest ServiceRequest;
+    ServiceRequest.GridMap = &GridMap;
+    ServiceRequest.Session = &ExecutionSession;
+    ServiceRequest.PlannedCellPathsByMissionId = &PlannedCellPathsByMission;
+    ServiceRequest.PlannedWorldPathsByMissionId = &LastPlannedPathsByMission;
+    ServiceRequest.PlannerType = PlannerType;
+    ServiceRequest.PlannerConfig = BuildPlannerRuntimeConfig();
+    ServiceRequest.RuntimeConfig = BuildExecutionRuntimeConfig();
+    ServiceRequest.RequestedMissionIds = RequestedMissionIds;
+    ServiceRequest.bGlobalReplan = bGlobalReplan;
 
-    const FExecutionRuntimeConfig RuntimeConfig = BuildExecutionRuntimeConfig();
-    if (RuntimeConfig.ReplanMode == EExecutionPolicyReplanMode::Disabled)
-    {
-        return false;
-    }
-
-    const int32 MaxReplanCount = RuntimeConfig.ReplanService.MaxReplanCount;
-    if (MaxReplanCount >= 0 &&
-        ExecutionSession.TotalReplanCount >= MaxReplanCount)
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[AlignmentReplan] skipped because total replan count %d reached limit %d"),
-            ExecutionSession.TotalReplanCount,
-            MaxReplanCount);
-        return false;
-    }
-
-    FExecutionSnapshot ExecutionSnapshot = CaptureExecutionSnapshot();
-    for (FExecutionAgentSnapshot& AgentSnapshot : ExecutionSnapshot.Agents)
-    {
-        if (const FExecutionAgentState* State =
-            ExecutionSession.AgentStatesByMissionId.Find(
-                AgentSnapshot.MissionId))
+    FExecutionReplanServiceCallbacks ServiceCallbacks;
+    ServiceCallbacks.OnAttemptFailure =
+        [](const FExecutionReplanAttemptInput& Input,
+           const FExecutionReplanAttemptResult& Result)
         {
-            AgentSnapshot.ObservedCell = State->LastObservedCell;
-            AgentSnapshot.ObservedWorld = GridMap.CellToWorld(State->LastObservedCell);
-        }
-    }
-
-    FExecutionReplanCoordinatorRequest CoordinatorRequest;
-    CoordinatorRequest.Snapshot = &ExecutionSnapshot;
-    CoordinatorRequest.MissionConfigsById =
-        &ExecutionSession.MissionConfigsById;
-    CoordinatorRequest.RequestedMissionIds = RequestedMissionIds;
-    CoordinatorRequest.bGlobalReplan = bGlobalReplan;
-    CoordinatorRequest.bCheckStaticUTMSafety =
-        RuntimeConfig.bCheckStaticUTMSafety;
-    CoordinatorRequest.MaxExpansionRounds =
-        RuntimeConfig.ReplanService.LocalMaxExpansionRounds;
-    CoordinatorRequest.BaseSpatialRadiusCells =
-        RuntimeConfig.ReplanService.LocalSpatialExpansionRadiusCells;
-    CoordinatorRequest.BaseLookaheadSteps =
-        RuntimeConfig.ReplanService.LocalLookaheadSteps;
-    CoordinatorRequest.ExecutionTimeStep = ExecutionSession.TimeStep;
-    CoordinatorRequest.CurrentTotalReplanCount =
-        ExecutionSession.TotalReplanCount;
-
-    FExecutionReplanCoordinatorCallbacks CoordinatorCallbacks;
-    CoordinatorCallbacks.RunAttempt =
-        [this](
-            const FExecutionReplanAttemptInput& AttemptInput,
-            FExecutionReplanAttemptResult& AttemptResult) -> bool
-        {
-            return RunExecutionReplanAttempt(AttemptInput, AttemptResult);
+            LogExecutionReplanAttemptFailure(Input, Result);
         };
-    CoordinatorCallbacks.ApplyAttemptResult =
-        [this](
-            const FExecutionReplanAttemptResult& AttemptResult,
-            TSet<int32>& ReplannedMissionIds) -> bool
-        {
-            return ApplyExecutionReplanAttemptResult(AttemptResult, ReplannedMissionIds);
-        };
-    CoordinatorCallbacks.OnEvent =
+    ServiceCallbacks.OnCoordinatorEvent =
         [](const FExecutionReplanCoordinatorEvent& Event)
         {
             LogExecutionReplanCoordinatorEvent(Event);
         };
 
-    const FExecutionReplanCoordinatorResult CoordinatorResult =
-        FExecutionReplanCoordinator::Run(CoordinatorRequest, CoordinatorCallbacks);
+    const FExecutionReplanServiceResult ServiceResult =
+        FExecutionReplanService::Run(ServiceRequest, ServiceCallbacks);
+    if (ServiceResult.Status ==
+        EExecutionReplanServiceStatus::ReplanLimitReached)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[AlignmentReplan] skipped because total replan count %d reached limit %d"),
+            ServiceResult.CurrentTotalReplanCount,
+            ServiceResult.MaxReplanCount);
+    }
 
-    FExecutionRuntimeSessionReplanCommitter::CommitCoordinatorResult(
-        bGlobalReplan,
-        CoordinatorResult,
-        ExecutionSession.ReplanTimingStats,
-        ExecutionSession.TotalReplanCount);
-    OutReplannedMissionIds = CoordinatorResult.ReplannedMissionIds;
-    return CoordinatorResult.bSuccess;
+    OutReplannedMissionIds = ServiceResult.ReplannedMissionIds;
+    return ServiceResult.bSuccess;
 }
 bool APathPlanningDemoActor::IsMultiAgentPlannerType() const
 {

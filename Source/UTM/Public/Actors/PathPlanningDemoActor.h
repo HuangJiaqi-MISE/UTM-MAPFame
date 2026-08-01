@@ -3,7 +3,6 @@
 #include "CoreMinimal.h"
 #include "Execution/DiscreteAlignmentManager.h"
 #include "Execution/ExecutionControllerTypes.h"
-#include "Execution/ExecutionReplanAttemptTypes.h"
 #include "Execution/ExecutionRuntimeCoordinator.h"
 #include "Execution/ExecutionRuntimeSession.h"
 #include "Execution/ExecutionTypes.h"
@@ -119,7 +118,6 @@ private:
     void ResetExecutionCache();
     void InitializeExecutionStates();
     void AdvanceExecutionOneStep();
-    FExecutionSnapshot CaptureExecutionSnapshot() const;
     void UpdateExecutionVisuals(float Alpha);
     void CacheExecutionMissionConfigs(const TArray<FDroneMissionConfig>& Missions);
     void LogObservedExecutionConflicts(
@@ -147,8 +145,6 @@ private:
         const FMultiAgentPlanningPipelineResult& PipelineResult,
         EMultiAgentPlanningResultLogMode LogMode);
 
-    bool RunExecutionReplanAttempt(const FExecutionReplanAttemptInput& Input, FExecutionReplanAttemptResult& OutResult) const;
-    bool ApplyExecutionReplanAttemptResult(const FExecutionReplanAttemptResult& Result, TSet<int32>& OutReplannedMissionIds);
     bool TryExecutionReplan(const TSet<int32>& RequestedMissionIds, bool bGlobalReplan, TSet<int32>& OutReplannedMissionIds);
 
 private:
