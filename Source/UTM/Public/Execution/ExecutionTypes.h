@@ -81,18 +81,3 @@ struct FExecutionPredictedConflict
     FIntVector AgentBFromCell = FIntVector::ZeroValue;
     FIntVector AgentBToCell = FIntVector::ZeroValue;
 };
-
-struct FExecutionReplanPolicySettings
-{
-    EExecutionPolicyReplanMode Mode = EExecutionPolicyReplanMode::GlobalUnfinished;
-    int32 MaxReplanCount = 0;
-    int32 ConflictHoldThresholdForReplan = 2;
-};
-
-struct FExecutionReplanRequest
-{
-    bool bShouldReplan = false;
-    bool bGlobalReplan = false;
-    TSet<int32> RequestedMissionIds;
-    FString Reason;
-};

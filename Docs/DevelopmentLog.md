@@ -3071,3 +3071,43 @@ Execution Policy、Replan Service、Runtime Coordinator 和 Final Safety Gate �
 - 2026-08-01：UTMEditor Win64 Development 编译通过；新增 `ExperimentReportContextBuilder.cpp` 与修改后的 `PathPlanningDemoActor.cpp` 分别完成非 Unity 编译，UTM 模块成功链接。
 - 本轮唯一编译警告仍来自未修改的 `PBSPlanner.cpp` 对已弃用 `TArray::RemoveAt(..., bool)` 重载的使用；Context Builder 未新增警告。
 - 2026-08-01：运行原 N200 参数回归实验，执行流程和 StructuredExperimentJSON 检查正常；Metadata、Planning、No-Fly、Execution、Alignment、Conflict 与 Replan 字段未发现异常，Context Builder 抽取未改变现有实验结果。
+
+## 2026-08-14 清理未接入主流程的 Execution Policy
+
+### 背景
+
+`ExecutionReplanPolicy` 和 `PathMergePolicy` 是 Execution 目录第一阶段预留的接口，但后续模块化已经由更具体的 Pipeline、Coordinator、Service 和 Path Integrator 承担对应职责。这两个 Policy 没有任何生产调用者，却仍位于 `Public/Execution`，容易让平台使用者误以为它们是当前可替换、会实际生效的扩展点。
+
+### 删除内容
+
+- 删除未接入主流程的 `ExecutionReplanPolicy.h/.cpp`。
+- 删除未接入主流程的 `PathMergePolicy.h/.cpp`。
+- 从 `ExecutionTypes.h` 删除只供旧 `ExecutionReplanPolicy` 使用的 `FExecutionReplanPolicySettings` 和 `FExecutionReplanRequest`。
+- 保留 `EExecutionPolicyReplanMode`；该枚举仍由 Runtime Config、Step Replan Coordinator、Final Safety Gate 和 Replan Service 使用。
+
+### 当前有效替代链路
+
+- 重规划请求产生：`ExecutionStepProposalBuilder`、`ExecutionConflictResolutionPolicy` 和 `ExecutionFinalSafetyGatePolicy`。
+- 重规划范围与 local/global fallback：`ExecutionStepReplanCoordinator` 和 `ExecutionFinalSafetyGateCoordinator`。
+- 重规划生命周期、次数限制与实际执行：`IExecutionReplanService` / `FDefaultExecutionReplanService` 和 `ExecutionReplanCoordinator`。
+- 路径时间线整合：`ExecutionReplanPathIntegrator`。
+- Session 与 Cell/World Path Cache 写回：`ExecutionRuntimeSessionReplanCommitter` 和 `ExecutionReplanService`。
+
+### 兼容性说明
+
+- 本轮删除的是无调用者的 C++ 接口，不改变当前 Execution Pipeline 的触发条件、局部候选扩张、targeted retry、全局升级或 Final Safety Gate 行为。
+- 不修改 Actor、EUW、Details、Blueprint、Planner、Scheduler、StructuredExperimentJSON 和 Execution Summary 接口。
+- 早期开发日志中关于这两个 Policy 的记录保留为历史信息；本条记录明确它们已于当前版本移除，不再属于平台公开扩展点。
+
+### 验证计划
+
+1. 全仓库静态搜索，确认已删除符号不再被源码引用。
+2. 编译 UTMEditor Win64 Development，确认 UnrealHeaderTool、UTM 模块编译和链接通过。
+3. 运行原 N200 参数实验，核对现有 Execution 与 StructuredExperimentJSON 行为。
+
+### 验证结果
+
+- 2026-08-14：全仓库源码静态搜索通过，已删除的两个 Policy、四个 Request/Result/Settings 类型均无剩余源码引用。
+- 2026-08-14：UTMEditor Win64 Development 完整编译通过；Unreal Build Tool 因源文件删除正确刷新 Makefile，UTM 模块完成编译与链接。
+- 本轮唯一编译警告仍来自未修改的 `PBSPlanner.cpp` 对已弃用 `TArray::RemoveAt(..., bool)` 重载的使用；本次接口清理未新增警告。
+- 2026-08-14：运行原 N200 参数回归实验，执行流程与实验结果检查正常，未发现清理未接入 Policy 对现有 Execution 行为造成异常影响。
